@@ -444,6 +444,199 @@ mod ev_deploy {
     use super::*;
 
     #[tokio::test]
+    async fn test_end_slot_exceeded() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts - round already ended (end_slot in past)
+        let current_slot = 1000;
+        let end_slot = current_slot - 10; // Round already ended!
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot - 100, end_slot);
+        add_round_account(&mut program_test, TEST_ROUND_ID, [1_000_000_000u64; 25], 25_000_000_000, end_slot + 1000);
+        add_entropy_var_account(&mut program_test, board_pda().0, end_slot);
+        add_treasury_account(&mut program_test);
+        add_mint_account(&mut program_test);
+        add_treasury_ata_account(&mut program_test);
+        add_config_account(&mut program_test);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to deploy when round already ended
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
+        let ix2 = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix1, ix2], Some(&miner.pubkey()), &[&miner, &manager_keypair], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail when round has ended (EndSlotExceeded)");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_fee_collector() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund, but DON'T fund the fee collector - use wrong address
+        let wrong_fee_collector = Keypair::new();
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &wrong_fee_collector.pubkey(), 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Create a custom instruction with wrong fee collector
+        // We need to build the instruction manually with wrong fee collector
+        let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
+        
+        // Build ev_deploy with wrong fee collector by modifying the accounts
+        let mut ix2 = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+        );
+        // Account index 2 is fee_collector
+        ix2.accounts[2].pubkey = wrong_fee_collector.pubkey();
+        
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix1, ix2], Some(&miner.pubkey()), &[&miner, &manager_keypair], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with wrong fee collector address");
+    }
+
+    #[tokio::test]
+    async fn test_manager_not_initialized() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts but DON'T create manager
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        // Add an empty account at manager address (no data)
+        program_test.add_account(
+            manager_address,
+            Account {
+                lamports: 1_000_000,
+                data: vec![],  // Empty!
+                owner: evore::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to deploy without initialized manager
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail when manager not initialized");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_pda() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let wrong_auth_id = 999u64;
+        let correct_managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        let wrong_managed_miner_auth = managed_miner_auth_pda(manager_address, wrong_auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        // Setup accounts
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        // Add ore_miner for CORRECT managed_miner_auth (the instruction expects this at index 3)
+        add_ore_miner_account(&mut program_test, correct_managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund - need to fund BOTH the correct and wrong managed_miner_auth
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &correct_managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &wrong_managed_miner_auth.0, 1_000_000_000);
+        let ix3 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2, ix3], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Build instruction with auth_id=1, then replace managed_miner_auth with wrong one
+        // The instruction data contains bump for auth_id=1, but we pass account for auth_id=999
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let mut ix = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+        );
+        // Replace managed_miner_auth at index 2 with wrong one
+        ix.accounts[2].pubkey = wrong_managed_miner_auth.0;
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with invalid PDA");
+    }
+
+    #[tokio::test]
     async fn test_success() {
         let mut program_test = setup_programs();
         
@@ -602,6 +795,90 @@ mod checkpoint {
     use super::*;
 
     #[tokio::test]
+    async fn test_manager_not_initialized() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_address = Pubkey::new_unique();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts but DON'T create manager - add empty account
+        let current_slot = 1000;
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100);
+        add_round_account(&mut program_test, TEST_ROUND_ID, [0u64; 25], 0, current_slot + 1000);
+        add_treasury_account(&mut program_test);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        // Add empty manager account
+        program_test.add_account(
+            manager_address,
+            Account {
+                lamports: 1_000_000,
+                data: vec![],
+                owner: evore::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund miner
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try checkpoint with uninitialized manager
+        let ix = evore::instruction::mm_checkpoint(miner.pubkey(), manager_address, TEST_ROUND_ID, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with uninitialized manager");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_pda() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let wrong_auth_id = 999u64;
+        let wrong_managed_miner_auth = managed_miner_auth_pda(manager_address, wrong_auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        // Setup with wrong PDA
+        let current_slot = 1000;
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100);
+        add_round_account(&mut program_test, TEST_ROUND_ID, [0u64; 25], 0, current_slot + 1000);
+        add_treasury_account(&mut program_test);
+        add_ore_miner_account(&mut program_test, wrong_managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Build instruction with auth_id=1 but pass account for auth_id=999
+        let mut ix = evore::instruction::mm_checkpoint(miner.pubkey(), manager_address, TEST_ROUND_ID, auth_id);
+        // Account index 2 is managed_miner_auth
+        ix.accounts[2].pubkey = wrong_managed_miner_auth.0;
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with invalid PDA");
+    }
+
+    #[tokio::test]
     async fn test_wrong_authority() {
         let mut program_test = setup_programs();
         
@@ -643,6 +920,80 @@ mod claim_sol {
     use super::*;
 
     #[tokio::test]
+    async fn test_manager_not_initialized() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_address = Pubkey::new_unique();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Add miner with SOL rewards
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 1_000_000_000, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        // Add empty manager account
+        program_test.add_account(
+            manager_address,
+            Account {
+                lamports: 1_000_000,
+                data: vec![],
+                owner: evore::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try claim_sol with uninitialized manager
+        let ix = evore::instruction::mm_claim_sol(miner.pubkey(), manager_address, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with uninitialized manager");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_pda() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let wrong_auth_id = 999u64;
+        let wrong_managed_miner_auth = managed_miner_auth_pda(manager_address, wrong_auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        add_ore_miner_account(&mut program_test, wrong_managed_miner_auth.0, [0u64; 25], 1_000_000_000, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Build instruction with auth_id=1 but pass account for auth_id=999
+        let mut ix = evore::instruction::mm_claim_sol(miner.pubkey(), manager_address, auth_id);
+        // Account index 2 is managed_miner_auth
+        ix.accounts[2].pubkey = wrong_managed_miner_auth.0;
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with invalid PDA");
+    }
+
+    #[tokio::test]
     async fn test_wrong_authority() {
         let mut program_test = setup_programs();
         
@@ -676,6 +1027,86 @@ mod claim_sol {
 
 mod claim_ore {
     use super::*;
+
+    #[tokio::test]
+    async fn test_manager_not_initialized() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_address = Pubkey::new_unique();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Add miner with ORE rewards and required accounts
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 1_000_000_000, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        add_treasury_account(&mut program_test);
+        add_mint_account(&mut program_test);
+        add_treasury_ata_account(&mut program_test);
+        
+        // Add empty manager account
+        program_test.add_account(
+            manager_address,
+            Account {
+                lamports: 1_000_000,
+                data: vec![],
+                owner: evore::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try claim_ore with uninitialized manager
+        let ix = evore::instruction::mm_claim_ore(miner.pubkey(), manager_address, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with uninitialized manager");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_pda() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let wrong_auth_id = 999u64;
+        let wrong_managed_miner_auth = managed_miner_auth_pda(manager_address, wrong_auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        add_ore_miner_account(&mut program_test, wrong_managed_miner_auth.0, [0u64; 25], 0, 1_000_000_000, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        add_treasury_account(&mut program_test);
+        add_mint_account(&mut program_test);
+        add_treasury_ata_account(&mut program_test);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Build instruction with auth_id=1 but pass account for auth_id=999
+        let mut ix = evore::instruction::mm_claim_ore(miner.pubkey(), manager_address, auth_id);
+        // Account index 2 is managed_miner_auth
+        ix.accounts[2].pubkey = wrong_managed_miner_auth.0;
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with invalid PDA");
+    }
 
     #[tokio::test]
     async fn test_wrong_authority() {

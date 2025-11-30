@@ -10,7 +10,7 @@ _None currently active_
 
 ## Up Next
 
-### Task 11: Add More Edge Case Tests
+### Task 16: Add Edge Case Tests
 **Priority:** 🟡 Medium
 
 - Test with zero bankroll
@@ -22,45 +22,45 @@ _None currently active_
 
 ## Backlog
 
-- [ ] Task 12: Add inline documentation for public functions
-- [ ] Task 13: Create client SDK documentation
-- [ ] Task 14: Deployment guide
+- [ ] Task 17: Add inline documentation for public functions
+- [ ] Task 18: Create client SDK documentation
+- [ ] Task 19: Deployment guide
 
 ---
 
 ## Completed
 
-### ✅ Task 10: Phase 4 - Code Quality (Complete)
+### ✅ Task 11-15: Error Tests
 **Completed:** 2025-11-30
 
-**Changes:**
-1. **Removed unused imports:**
-   - `process_claim_ore.rs`: Removed `EvDeploy`, `MMClaimSOL`, `Board`, `Round`
-   - `process_create_manager.rs`: Removed `std::mem::size_of`
+**Tests added:**
 
-2. **Documented EV calculation constants:**
-   - Added comprehensive comments explaining NUM, DEN24, C_LAM
-   - Documented the mathematical model for the ORE game
+**EvDeploy:**
+- `test_end_slot_exceeded` - Round already ended
+- `test_invalid_fee_collector` - Wrong fee collector address
+- `test_manager_not_initialized` - Empty manager account
+- `test_invalid_pda` - Wrong PDA passed
 
-3. **Enhanced error types:**
-   - Added `InvalidPDA`, `ManagerNotInitialized`, `InvalidFeeCollector`
-   - Added `NoDeployments`, `ArithmeticOverflow`
-   - Added descriptive error messages for debugging
+**Checkpoint:**
+- `test_manager_not_initialized` - Empty manager account
+- `test_invalid_pda` - Wrong PDA passed
 
-4. **Safe type conversions:**
-   - Replaced `as u128` with `u128::from()` for widening casts
-   - Replaced `as i128` with `i128::from()` where applicable
-   - Added `.min(TYPE::MAX) as type` pattern for safe narrowing
-   - Added `.clamp()` for bounded conversions to signed types
+**ClaimSOL:**
+- `test_manager_not_initialized` - Empty manager account
+- `test_invalid_pda` - Wrong PDA passed
 
-5. **Simplified function signatures:**
-   - Changed `calculate_deployments()` to take u64 params directly
-   - Removed redundant widening/narrowing at call site
-   - Simplified fee calculation to `total_deployed / 100`
+**ClaimORE:**
+- `test_manager_not_initialized` - Empty manager account
+- `test_invalid_pda` - Wrong PDA passed
 
 ---
 
-### ✅ Task 9: Refactor Test Setup for Unit Testing (Improved)
+### ✅ Task 10: Phase 4 - Code Quality (Complete)
+**Completed:** 2025-11-30
+
+---
+
+### ✅ Task 9: Refactor Test Setup for Unit Testing
 **Completed:** 2025-11-30
 
 ---
