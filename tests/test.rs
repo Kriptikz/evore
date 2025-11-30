@@ -1,204 +1,40 @@
-use evore::{entropy_api::{self, var_pda, Var}, ore_api::{self, board_pda, config_pda, miner_pda, round_pda, treasury_tokens_address, Board, Miner, INTERMISSION_SLOTS, MINT_ADDRESS, TREASURY_ADDRESS}, state::{managed_miner_auth_pda, Manager}};
-use solana_program::{rent::Rent, system_instruction};
-use solana_program_test::{processor, read_file, ProgramTest, ProgramTestContext};
-use solana_sdk::{
-    account::Account, compute_budget::ComputeBudgetInstruction, pubkey, signature::Keypair, signer::Signer, transaction::Transaction
+use evore::{
+    consts::FEE_COLLECTOR,
+    entropy_api::{self, var_pda, Var},
+    ore_api::{
+        self, board_pda, config_pda, miner_pda, round_pda,
+        Board, Miner, Round, MINT_ADDRESS, TREASURY_ADDRESS,
+    },
+    state::{managed_miner_auth_pda, Manager, EvoreAccount},
 };
-use steel::{AccountDeserialize, Discriminator, Numeric};
+use solana_program::{rent::Rent, system_instruction};
+use solana_program_test::{processor, read_file, ProgramTest};
+use solana_sdk::{
+    account::Account, compute_budget::ComputeBudgetInstruction, pubkey,
+    pubkey::Pubkey, signature::Keypair, signer::Signer, transaction::Transaction,
+};
+use steel::{AccountDeserialize, Numeric};
+
+// ============================================================================
+// Constants
+// ============================================================================
 
 const TEST_ROUND_ID: u64 = 70149;
 
-#[tokio::test]
-pub async fn test_init() {
+// ============================================================================
+// Test Setup - Programs Only
+// ============================================================================
 
-    let round_pda = round_pda(TEST_ROUND_ID).0;
-    println!("ROUND PDA: {}", round_pda.to_string());
-    let config_pda = config_pda();
-    println!("CONFIG PDA: {}", config_pda.0.to_string());
-
-    println!("TREASURY ADDRESS: {}", TREASURY_ADDRESS.to_string());
-
-    println!("TREASURY ATA {}", treasury_tokens_address());
-
-
-    println!("TOKEN PROGRAM: {}", spl_token::id().to_string());
-    init_program().await;
-}
-
-#[tokio::test]
-pub async fn test_deploy() {
-    let (mut context, miner, manager_keypair) = init_program().await;
-
-    // Send miner sol
-    let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1000000000);
-
-    let blockhash = context
-        .banks_client
-        .get_latest_blockhash()
-        .await
-        .expect("should get latest blockhash");
-
-    let mut tx = Transaction::new_with_payer(&[ix0], Some(&context.payer.pubkey()));
-    tx.sign(&[&context.payer], blockhash);
-
-    context
-        .banks_client
-        .process_transaction(tx)
-        .await
-        .expect("process_transaction should be ok");
-
-    let manager_account = manager_keypair.pubkey();
-    let managed_miner_auth_account = managed_miner_auth_pda(manager_account, 1);
-
-    let ore_miner_account = miner_pda(managed_miner_auth_account.0);
-
-    // Send Managed Miner SOL
-    let cu_limit = 1_400_000;
-
-    let cu_limit_ix =
-        ComputeBudgetInstruction::set_compute_unit_limit(cu_limit);
- 
-    let bankroll: u64 = 300_000_000; // 0.3SOL
-    let min_bet: u64 = 10_000;   // 0.00001 SOL
-    // 0.1 SOL cap per square
-    let max_per_square: u64 = 100_000_000;
-
-    // >>> Tune ore value here:
-    // 1 ORE ~= 2 SOL   -> 2_000_000_000
-    // 1 ORE ~= 1 SOL   -> 1_000_000_000
-    // 1 ORE ~= 0.1 SOL ->   100_000_000
-    // 1 ORE ~= 0 SOL   -> 0 (pure SOL EV)
-    // 1 ORE ~= 0.8 SOL
-    let ore_value_lamports: u64 = 800_000_000;
-
-    let slots_left = 2;
-
-    let auth_id = 1;
-    let ix0 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth_account.0, 1_000_000_000);
-    let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_account);
-    let ix2 = evore::instruction::ev_deploy(
-        miner.pubkey(),
-        manager_account,
-        auth_id,
-        TEST_ROUND_ID,
-        bankroll,
-        max_per_square,
-        min_bet,
-        ore_value_lamports,
-        slots_left
-    );
-
-    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, ix0, ix1, ix2], Some(&miner.pubkey()));
-
-    let blockhash = context
-        .banks_client
-        .get_latest_blockhash()
-        .await
-        .expect("should get latest blockhash");
-
-    tx.sign(&[&miner, &manager_keypair, &context.payer], blockhash);
-
-    context
-        .banks_client
-        .process_transaction(tx)
-        .await
-        .expect("process_transaction should be ok");
-
-    // Verify evore::MangedMiner data
-    let manager = context
-        .banks_client
-        .get_account(manager_account)
-        .await
-        .unwrap()
-        .unwrap();
-    let manager = Manager::try_from_bytes(&manager.data).unwrap();
-    assert_eq!(manager.authority, miner.pubkey());
-
-    // Verify ore::Miner data
-    let ore_miner = context
-        .banks_client
-        .get_account(ore_miner_account.0)
-        .await
-        .unwrap()
-        .unwrap();
-    let ore_miner = ore_api::Miner::try_from_bytes(&ore_miner.data).unwrap();
-
-    let board = context
-        .banks_client
-        .get_account(board_pda().0)
-        .await
-        .unwrap()
-        .unwrap();
-    let board = ore_api::Board::try_from_bytes(&board.data).unwrap();
-
-    let _ = context.warp_to_slot(board.end_slot + INTERMISSION_SLOTS + 10);
-
-    let config_fee_collect = pubkey!("DyB4Kv6V613gp2LWQTq1dwDYHGKuUEoDHnCouGUtxFiX");
-
-    let ix0 = ore_api::reset(context.payer.pubkey(), config_fee_collect, TEST_ROUND_ID, managed_miner_auth_account.0);
-
-    let blockhash = context
-        .banks_client
-        .get_latest_blockhash()
-        .await
-        .expect("should get latest blockhash for reset");
-
-    let mut tx = Transaction::new_with_payer(&[ix0], Some(&context.payer.pubkey()));
-    tx.sign(&[&context.payer], blockhash);
-
-    context
-        .banks_client
-        .process_transaction(tx)
-        .await
-        .expect("process_transaction reset should be ok");
-
-    let _ = context.warp_to_slot(board.end_slot + INTERMISSION_SLOTS + 10 + 20);
-    let round_address = round_pda(TEST_ROUND_ID).0;
-    let ix0 = system_instruction::transfer(&context.payer.pubkey(), &round_address, 100_000_000_000);
-    let ix1 = system_instruction::transfer(&context.payer.pubkey(), &ore_miner_account.0, 10_000_000_000);
-    let ix2 = evore::instruction::mm_checkpoint(
-        miner.pubkey(),
-        manager_account,
-        TEST_ROUND_ID,
-        auth_id,
-    );
-    let ix3 = evore::instruction::mm_claim_sol(
-        miner.pubkey(),
-        manager_account,
-        auth_id,
-    );
-    let ix4 = evore::instruction::mm_claim_ore(
-        miner.pubkey(),
-        manager_account,
-        auth_id,
-    );
-
-    let mut tx = Transaction::new_with_payer(&[ix0, ix1, ix2, ix3, ix4], Some(&miner.pubkey()));
-
-    let blockhash = context
-        .banks_client
-        .get_latest_blockhash()
-        .await
-        .expect("should get latest blockhash");
-
-    tx.sign(&[&miner, &context.payer], blockhash);
-
-    context
-        .banks_client
-        .process_transaction(tx)
-        .await
-        .expect("process_transaction should be ok");
-}
-
-
-pub async fn init_program() -> (ProgramTestContext, Keypair, Keypair) {
+/// Sets up the program test with only the required programs (no accounts).
+/// Returns ProgramTest before starting - caller adds accounts and starts context.
+pub fn setup_programs() -> ProgramTest {
     let mut program_test = ProgramTest::new(
         "evore",
         evore::id(),
         processor!(evore::process_instruction),
     );
 
-    // Add Ore Program account
+    // Add Ore Program
     let data = read_file(&"tests/buffers/oreV3.so");
     program_test.add_account(
         ore_api::id(),
@@ -211,46 +47,7 @@ pub async fn init_program() -> (ProgramTestContext, Keypair, Keypair) {
         },
     );
 
-    // Treasury Account
-    let data = read_file(&"tests/buffers/treasury_account.so");
-    program_test.add_account(
-        TREASURY_ADDRESS,
-        Account {
-            lamports: Rent::default().minimum_balance(data.len()).max(1),
-            data,
-            owner: ore_api::id(),
-            executable: false,
-            rent_epoch: 0,
-        },
-    );
-
-    // Mint Account
-    let data = read_file(&"tests/buffers/mint_account.so");
-    program_test.add_account(
-        MINT_ADDRESS,
-        Account {
-            lamports: Rent::default().minimum_balance(data.len()).max(1),
-            data,
-            owner: spl_token::id(),
-            executable: false,
-            rent_epoch: 0,
-        },
-    );
-
-    // Treasury AT Account
-    let data = read_file(&"tests/buffers/treasury_at_account.so");
-    program_test.add_account(
-        pubkey!("GwZS8yBuPPkPgY4uh7eEhHN5EEdpkf7EBZ1za6nuP3wF"),
-        Account {
-            lamports: Rent::default().minimum_balance(data.len()).max(1),
-            data,
-            owner: spl_token::id(),
-            executable: false,
-            rent_epoch: 0,
-        },
-    );
-
-    // Add Entropy Program account
+    // Add Entropy Program
     let data = read_file(&"tests/buffers/entropy.so");
     program_test.add_account(
         entropy_api::id(),
@@ -263,44 +60,60 @@ pub async fn init_program() -> (ProgramTestContext, Keypair, Keypair) {
         },
     );
 
+    program_test
+}
 
-    let c_var = Var {
-        authority: pubkey!("BrcSxdp1nXFzou1YyDnQJcPNBNHgoypZmTsyKBSLLXzi"),
-        id: 0,
-        provider: pubkey!("AKBXJ7jQ2DiqLQKzgPn791r1ZVNvLchTFH6kpesPAAWF"),
-        commit: [255, 8, 38, 129, 68, 179, 50, 246, 181, 212, 33, 196, 78, 70, 219, 148, 201, 87, 24, 84, 153, 232, 51, 229, 213, 243, 65, 3, 78, 115, 50, 42],
-        seed: [0, 0, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        slot_hash: [0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        value: [0, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-        samples: 969807,
-        is_auto: 0,
-        start_at: 383419391,
-        end_at: 383419541
-    };
+// ============================================================================
+// Evore Account Helpers
+// ============================================================================
 
+/// Creates an Evore Manager account with specified authority
+pub fn add_manager_account(
+    program_test: &mut ProgramTest,
+    manager_address: Pubkey,
+    authority: Pubkey,
+) {
+    let manager = Manager { authority };
+    
     let mut data = Vec::new();
-    let discr = (Var::discriminator() as u64).to_le_bytes();
-    for b in discr {
-        data.push(b);
-    }
-    for b in c_var.to_bytes() {
-        data.push(*b);
-    }
+    let discr = (EvoreAccount::Manager as u64).to_le_bytes();
+    data.extend_from_slice(&discr);
+    data.extend_from_slice(manager.to_bytes());
+    
     program_test.add_account(
-        var_pda(board_pda().0, 0).0,
+        manager_address,
         Account {
             lamports: Rent::default().minimum_balance(data.len()).max(1),
             data,
-            owner: entropy_api::id(),
+            owner: evore::id(),
             executable: false,
             rent_epoch: 0,
         },
     );
+}
 
-    // Create initial Board Account
-    let data = read_file(&"tests/buffers/board_account.so");
-    let board_data = data.clone();
-    let board = Board::try_from_bytes(&board_data[..]).unwrap();
+// ============================================================================
+// ORE Account Helpers - Configurable State
+// ============================================================================
+
+/// Creates an ORE Board account with specified state
+pub fn add_board_account(
+    program_test: &mut ProgramTest,
+    round_id: u64,
+    start_slot: u64,
+    end_slot: u64,
+) -> Board {
+    let board = Board {
+        round_id,
+        start_slot,
+        end_slot,
+    };
+    
+    let mut data = Vec::new();
+    let discr = (ore_api::OreAccount::Board as u64).to_le_bytes();
+    data.extend_from_slice(&discr);
+    data.extend_from_slice(board.to_bytes());
+    
     program_test.add_account(
         board_pda().0,
         Account {
@@ -311,79 +124,590 @@ pub async fn init_program() -> (ProgramTestContext, Keypair, Keypair) {
             rent_epoch: 0,
         },
     );
+    
+    board
+}
 
-    // Create initial Round Account
-    let data = read_file(&"tests/buffers/round_account.so");
+/// Creates an ORE Round account with specified state
+pub fn add_round_account(
+    program_test: &mut ProgramTest,
+    round_id: u64,
+    deployed: [u64; 25],
+    total_deployed: u64,
+    expires_at: u64,
+) {
+    let round = Round {
+        id: round_id,
+        deployed,
+        slot_hash: [0u8; 32],
+        count: [0u64; 25],
+        expires_at,
+        motherlode: 0,
+        rent_payer: Pubkey::default(),
+        top_miner: Pubkey::default(),
+        top_miner_reward: 0,
+        total_deployed,
+        total_vaulted: 0,
+        total_winnings: 0,
+    };
+    
+    let mut data = Vec::new();
+    let discr = (ore_api::OreAccount::Round as u64).to_le_bytes();
+    data.extend_from_slice(&discr);
+    data.extend_from_slice(round.to_bytes());
+    
     program_test.add_account(
-        round_pda(TEST_ROUND_ID).0,
+        round_pda(round_id).0,
         Account {
             lamports: Rent::default().minimum_balance(data.len()).max(1),
-            data: data,
+            data,
             owner: ore_api::id(),
             executable: false,
             rent_epoch: 0,
         },
     );
+}
 
-    // Create initial Config Account
-    let data = read_file(&"tests/buffers/config_account.so");
-    program_test.add_account(
-        config_pda().0,
-        Account {
-            lamports: Rent::default().minimum_balance(data.len()).max(1),
-            data: data,
-            owner: ore_api::id(),
-            executable: false,
-            rent_epoch: 0,
-        },
-    );
-
-    let miner = Keypair::new();
-    let manager_keypair = Keypair::new();
-    // Create miner account
-    let manager_address = manager_keypair.pubkey();
-    let managed_miner_auth_address = managed_miner_auth_pda(manager_address, 1).0;
-
-    let new_miner = Miner {
-        authority: managed_miner_auth_address,
-        deployed: [0; 25],
+/// Creates an ORE Miner account with specified state
+pub fn add_ore_miner_account(
+    program_test: &mut ProgramTest,
+    authority: Pubkey,
+    deployed: [u64; 25],
+    rewards_sol: u64,
+    rewards_ore: u64,
+    checkpoint_id: u64,
+    round_id: u64,
+) {
+    let miner = Miner {
+        authority,
+        deployed,
         cumulative: [0; 25],
         checkpoint_fee: 10000,
-        checkpoint_id: TEST_ROUND_ID - 1,
+        checkpoint_id,
         last_claim_ore_at: 0,
         last_claim_sol_at: 0,
         rewards_factor: Numeric::ZERO,
-        rewards_sol: 1_000_000_000,
-        rewards_ore: 1_000_000_000_000, // 10
-        refined_ore: 100_000_000_000, // 1
-        round_id: TEST_ROUND_ID - 1,
+        rewards_sol,
+        rewards_ore,
+        refined_ore: 0,
+        round_id,
         lifetime_rewards_sol: 0,
         lifetime_rewards_ore: 0,
     };
 
     let mut data = Vec::new();
-    let discr = (Miner::discriminator() as u64).to_le_bytes();
-    for b in discr {
-        data.push(b);
-    }
-    for b in new_miner.to_bytes() {
-        data.push(*b);
-    }
-
-    let ore_miner_address = miner_pda(managed_miner_auth_address).0;
+    let discr = (ore_api::OreAccount::Miner as u64).to_le_bytes();
+    data.extend_from_slice(&discr);
+    data.extend_from_slice(miner.to_bytes());
 
     program_test.add_account(
-        ore_miner_address,
+        miner_pda(authority).0,
         Account {
             lamports: Rent::default().minimum_balance(data.len()).max(1),
-            data: data,
+            data,
             owner: ore_api::id(),
             executable: false,
             rent_epoch: 0,
         },
     );
-    let mut context = program_test.start_with_context().await;
-    let _ = context.warp_to_slot(board.end_slot - 2);
+}
 
-    (context, miner, manager_keypair)
+/// Creates an Entropy Var account with specified state
+pub fn add_entropy_var_account(
+    program_test: &mut ProgramTest,
+    board_address: Pubkey,
+    end_at: u64,
+) {
+    let var = Var {
+        authority: board_address,
+        id: 0,
+        provider: Pubkey::default(),
+        commit: [0u8; 32],
+        seed: [0u8; 32],
+        slot_hash: [0u8; 32],
+        value: [0u8; 32],
+        samples: 0,
+        is_auto: 0,
+        start_at: 0,
+        end_at,
+    };
+
+    let mut data = Vec::new();
+    let discr = (entropy_api::EntropyAccount::Var as u64).to_le_bytes();
+    data.extend_from_slice(&discr);
+    data.extend_from_slice(var.to_bytes());
+
+    program_test.add_account(
+        var_pda(board_address, 0).0,
+        Account {
+            lamports: Rent::default().minimum_balance(data.len()).max(1),
+            data,
+            owner: entropy_api::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+}
+
+// ============================================================================
+// ORE Account Helpers - From Snapshots (for complex state)
+// ============================================================================
+
+/// Adds the ORE Treasury account from snapshot
+pub fn add_treasury_account(program_test: &mut ProgramTest) {
+    let data = read_file(&"tests/buffers/treasury_account.so");
+    program_test.add_account(
+        TREASURY_ADDRESS,
+        Account {
+            lamports: Rent::default().minimum_balance(data.len()).max(1),
+            data,
+            owner: ore_api::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+}
+
+/// Adds the ORE Mint account from snapshot
+pub fn add_mint_account(program_test: &mut ProgramTest) {
+    let data = read_file(&"tests/buffers/mint_account.so");
+    program_test.add_account(
+        MINT_ADDRESS,
+        Account {
+            lamports: Rent::default().minimum_balance(data.len()).max(1),
+            data,
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+}
+
+/// Adds the Treasury ATA account from snapshot
+pub fn add_treasury_ata_account(program_test: &mut ProgramTest) {
+    let data = read_file(&"tests/buffers/treasury_at_account.so");
+    program_test.add_account(
+        pubkey!("GwZS8yBuPPkPgY4uh7eEhHN5EEdpkf7EBZ1za6nuP3wF"),
+        Account {
+            lamports: Rent::default().minimum_balance(data.len()).max(1),
+            data,
+            owner: spl_token::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+}
+
+/// Adds the Config account from snapshot
+pub fn add_config_account(program_test: &mut ProgramTest) {
+    let data = read_file(&"tests/buffers/config_account.so");
+    program_test.add_account(
+        config_pda().0,
+        Account {
+            lamports: Rent::default().minimum_balance(data.len()).max(1),
+            data,
+            owner: ore_api::id(),
+            executable: false,
+            rent_epoch: 0,
+        },
+    );
+}
+
+// ============================================================================
+// Convenience Helpers
+// ============================================================================
+
+/// Sets up common ORE accounts needed for deploy tests
+/// Returns the board for slot reference
+pub fn setup_deploy_test_accounts(
+    program_test: &mut ProgramTest,
+    round_id: u64,
+    current_slot: u64,
+    slots_until_end: u64,
+) -> Board {
+    let end_slot = current_slot + slots_until_end;
+    
+    // Board with specified timing
+    let board = add_board_account(program_test, round_id, current_slot, end_slot);
+    
+    // Round with some existing deployments (so EV calc has something to work with)
+    let mut deployed = [0u64; 25];
+    deployed[0] = 1_000_000_000; // 1 SOL on square 0
+    deployed[5] = 500_000_000;   // 0.5 SOL on square 5
+    add_round_account(program_test, round_id, deployed, 1_500_000_000, end_slot + 1000);
+    
+    // Entropy var
+    add_entropy_var_account(program_test, board_pda().0, end_slot);
+    
+    // Other required accounts
+    add_treasury_account(program_test);
+    add_mint_account(program_test);
+    add_treasury_ata_account(program_test);
+    add_config_account(program_test);
+    
+    board
+}
+
+// ============================================================================
+// Tests
+// ============================================================================
+
+mod create_manager {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_success() {
+        let program_test = setup_programs();
+        let context = program_test.start_with_context().await;
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        
+        // Fund the miner
+        let ix = system_instruction::transfer(
+            &context.payer.pubkey(),
+            &miner.pubkey(),
+            1_000_000_000,
+        );
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&context.payer.pubkey()),
+            &[&context.payer],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Create manager
+        let ix = evore::instruction::create_manager(miner.pubkey(), manager_keypair.pubkey());
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&miner.pubkey()),
+            &[&miner, &manager_keypair],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.expect("create_manager should succeed");
+        
+        // Verify
+        let manager_account = context.banks_client
+            .get_account(manager_keypair.pubkey())
+            .await
+            .unwrap()
+            .unwrap();
+        let manager = Manager::try_from_bytes(&manager_account.data).unwrap();
+        assert_eq!(manager.authority, miner.pubkey());
+    }
+    
+    #[tokio::test]
+    async fn test_already_initialized() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        
+        // Pre-create the manager account
+        add_manager_account(&mut program_test, manager_keypair.pubkey(), miner.pubkey());
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund the miner
+        let ix = system_instruction::transfer(
+            &context.payer.pubkey(),
+            &miner.pubkey(),
+            1_000_000_000,
+        );
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&context.payer.pubkey()),
+            &[&context.payer],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to create manager again - should fail
+        let ix = evore::instruction::create_manager(miner.pubkey(), manager_keypair.pubkey());
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&miner.pubkey()),
+            &[&miner, &manager_keypair],
+            blockhash,
+        );
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail when manager already exists");
+    }
+}
+
+mod ev_deploy {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_success() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts - round ending in 5 slots
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        
+        // Add ore miner for our managed auth
+        add_ore_miner_account(
+            &mut program_test,
+            managed_miner_auth.0,
+            [0u64; 25],
+            0, 0,
+            TEST_ROUND_ID - 1,
+            TEST_ROUND_ID - 1,
+        );
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3); // 2 slots left
+        
+        // Fund accounts
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[ix0, ix1, ix2],
+            Some(&context.payer.pubkey()),
+            &[&context.payer],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Create manager and deploy
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
+        let ix2 = evore::instruction::ev_deploy(
+            miner.pubkey(),
+            manager_address,
+            auth_id,
+            TEST_ROUND_ID,
+            300_000_000,  // bankroll
+            100_000_000,  // max_per_square
+            10_000,       // min_bet
+            800_000_000,  // ore_value
+            2,            // slots_left threshold
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_limit_ix, ix1, ix2],
+            Some(&miner.pubkey()),
+            &[&miner, &manager_keypair],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.expect("deploy should succeed");
+        
+        // Verify manager was created
+        let manager = context.banks_client.get_account(manager_address).await.unwrap().unwrap();
+        let manager = Manager::try_from_bytes(&manager.data).unwrap();
+        assert_eq!(manager.authority, miner.pubkey());
+    }
+
+    #[tokio::test]
+    async fn test_too_many_slots_left() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts - round ending in 100 slots (too many)
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 100);
+        
+        add_ore_miner_account(
+            &mut program_test,
+            managed_miner_auth.0,
+            [0u64; 25], 0, 0,
+            TEST_ROUND_ID - 1, TEST_ROUND_ID - 1,
+        );
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 10); // Still 90 slots left
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to deploy with slots_left=2 when there are 90 slots left
+        let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
+        let ix2 = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            300_000_000, 100_000_000, 10_000, 800_000_000,
+            2,  // slots_left threshold - but there are 90 slots left!
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix1, ix2], Some(&miner.pubkey()), &[&miner, &manager_keypair], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail when too many slots left");
+    }
+    
+    #[tokio::test]
+    async fn test_wrong_authority() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let wrong_signer = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager with miner as authority
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund wrong_signer
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &wrong_signer.pubkey(), 2_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to deploy with wrong signer (not the manager authority)
+        let ix = evore::instruction::ev_deploy(
+            wrong_signer.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with wrong authority");
+    }
+}
+
+mod checkpoint {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_wrong_authority() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let wrong_signer = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager with miner as authority
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        // Setup minimal accounts
+        let current_slot = 1000;
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100);
+        add_round_account(&mut program_test, TEST_ROUND_ID, [0u64; 25], 0, current_slot + 1000);
+        add_treasury_account(&mut program_test);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund wrong_signer
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &wrong_signer.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try checkpoint with wrong authority
+        let ix = evore::instruction::mm_checkpoint(wrong_signer.pubkey(), manager_address, TEST_ROUND_ID, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with wrong authority");
+    }
+}
+
+mod claim_sol {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_wrong_authority() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let wrong_signer = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager with miner as authority
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 1_000_000_000, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund wrong_signer
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &wrong_signer.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try claim_sol with wrong authority
+        let ix = evore::instruction::mm_claim_sol(wrong_signer.pubkey(), manager_address, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with wrong authority");
+    }
+}
+
+mod claim_ore {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_wrong_authority() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let wrong_signer = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager with miner as authority
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 1_000_000_000, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        add_treasury_account(&mut program_test);
+        add_mint_account(&mut program_test);
+        add_treasury_ata_account(&mut program_test);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund wrong_signer
+        let ix = system_instruction::transfer(&context.payer.pubkey(), &wrong_signer.pubkey(), 1_000_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try claim_ore with wrong authority
+        let ix = evore::instruction::mm_claim_ore(wrong_signer.pubkey(), manager_address, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with wrong authority");
+    }
 }
