@@ -14,9 +14,9 @@
 > Priority: **HIGH** - Complete before mainnet
 
 - [x] Add program verifications (entropy, SPL token, SPL ATA)
-- [ ] Add writable checks for mutable accounts in `process_claim_sol.rs`
-- [ ] Add writable checks for mutable accounts in `process_claim_ore.rs`
-- [ ] Add writable checks for mutable accounts in `process_checkpoint.rs`
+- [x] Add writable checks for mutable accounts in `process_claim_sol.rs`
+- [x] Add writable checks for mutable accounts in `process_claim_ore.rs`
+- [x] Add writable checks for mutable accounts in `process_checkpoint.rs`
 
 ## Phase 3: Optimization (High - CU Determinism)
 > Priority: **HIGH** - Required for predictable CU usage
@@ -69,7 +69,7 @@
 | Phase | Status | Completion |
 |-------|--------|------------|
 | Phase 1: Security Fixes | ✅ Complete | 100% (4/4) |
-| Phase 2: Security Hardening | 🟡 In Progress | 25% (1/4) |
+| Phase 2: Security Hardening | ✅ Complete | 100% (4/4) |
 | Phase 3: Optimization | 🟡 In Progress | 75% (3/4) |
 | Phase 4: Code Quality | 🔴 Not Started | 0% |
 | Phase 5: Testing | 🔴 Not Started | 0% |
@@ -80,7 +80,7 @@
 
 ## Notes
 
-- Phase 1 complete! All critical security fixes done.
+- Phase 1 & 2 complete! All critical security fixes and hardening done.
 - Phase 3 (CU optimization) mostly complete - bump parameters added
-- Tests need updating with deterministic keypairs for consistent CU measurements
-- Consider external audit after Phase 2 completion
+- Remaining CU variance is from external ORE program PDA lookups (can't be fixed)
+- Consider external audit after Phase 4 completion

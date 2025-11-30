@@ -29,6 +29,14 @@ pub fn process_claim_sol(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
+    if !signer.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
+    if !managed_miner_auth_account_info.is_writable {
+        return Err(ProgramError::InvalidAccountData);
+    }
+
     if manager_account_info.data_is_empty() {
         return Err(ProgramError::InvalidAccountData);
     }
