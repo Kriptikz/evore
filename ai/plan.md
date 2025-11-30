@@ -9,14 +9,11 @@
 - [x] Add fee collector address verification in `process_ev_deploy.rs`
 - [x] Add PDA address validation in `process_ev_deploy.rs`
 - [x] Add PDA address validation in remaining processors (checkpoint, claim_sol, claim_ore)
-- [ ] Fix rent drain issue in `process_claim_sol.rs`
 
 ## Phase 2: Security Hardening (High)
 > Priority: **HIGH** - Complete before mainnet
 
-- [ ] Add Entropy program verification in `process_ev_deploy.rs`
-- [ ] Add SPL Token program verification in `process_claim_ore.rs`
-- [ ] Add SPL ATA program verification in `process_claim_ore.rs`
+- [ ] Add program verifications (entropy, SPL token, SPL ATA)
 - [ ] Add writable checks for mutable accounts in `process_claim_sol.rs`
 - [ ] Add writable checks for mutable accounts in `process_claim_ore.rs`
 - [ ] Add writable checks for mutable accounts in `process_checkpoint.rs`
@@ -36,7 +33,6 @@
 - [ ] Add integration tests for each instruction
 - [ ] Add security-focused tests (invalid authority, wrong accounts, etc.)
 - [ ] Add tests for fee calculation verification
-- [ ] Test rent-exempt handling in claim operations
 
 ## Phase 5: Optimization (Low)
 > Priority: **LOW** - Performance improvements
@@ -72,7 +68,7 @@
 
 | Phase | Status | Completion |
 |-------|--------|------------|
-| Phase 1: Security Fixes | 🟡 In Progress | 80% (4/5) |
+| Phase 1: Security Fixes | ✅ Complete | 100% (4/4) |
 | Phase 2: Security Hardening | 🔴 Not Started | 0% |
 | Phase 3: Code Quality | 🔴 Not Started | 0% |
 | Phase 4: Testing | 🔴 Not Started | 0% |
@@ -84,6 +80,6 @@
 
 ## Notes
 
-- All security fixes (Phase 1) must be completed before any public deployment
-- Testing (Phase 4) should run in parallel with fixes
+- Phase 1 complete! All critical security fixes done.
+- Testing (Phase 4) should run in parallel with Phase 2
 - Consider external audit after Phase 2 completion
