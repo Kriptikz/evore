@@ -1,0 +1,30 @@
+[package]
+name = "evore"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib", "lib"]
+name = "evore"
+
+[features]
+no-entrypoint = []
+default = []
+
+[dependencies]
+bytemuck = "1.14.3"
+bytemuck_derive = "1.7.0"
+num_enum = "0.7.2"
+serde = { version = "1.0", features = ["derive"] }
+solana-program = "^2.1"
+spl-token = { version = "^4", features = ["no-entrypoint"] }
+spl-pod = "=0.5.1"
+spl-associated-token-account = { version = "^6", features = ["no-entrypoint"] }
+thiserror = "1.0.57"
+steel = { version = "4.0.3", features = ["spl"] }
+
+
+[dev-dependencies]
+solana-program-test = "^2.1"
+solana-sdk = "^2.1"
+tokio = { version = "1.37.0", features = ["full"] }
