@@ -13,6 +13,16 @@ pub enum Instructions {
     MMClaimORE = 4,
 }
 
+/// Deployment strategy for the Deploy instruction
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromPrimitive)]
+pub enum DeployStrategy {
+    /// EV-based waterfill algorithm - calculates optimal +EV deployments
+    EV = 0,
+    // Percentage = 1,  // Future: Deploy to own X% of each square
+    // Manual = 2,      // Future: User specifies exact squares and amounts
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CreateManager {}
@@ -41,6 +51,7 @@ pub struct EvDeploy {
     pub ore_value: [u8; 8],
     pub slots_left: [u8; 8],
     pub bump: u8,
+    pub strategy: u8,  // DeployStrategy as u8
 }
 
 instruction!(Instructions, EvDeploy);
@@ -89,6 +100,7 @@ pub fn ev_deploy(
             ore_value: ore_value.to_le_bytes(),
             slots_left: slots_left.to_le_bytes(),
             bump,
+            strategy: DeployStrategy::EV as u8,
         }.to_bytes(),
     }
 }

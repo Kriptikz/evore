@@ -4,7 +4,7 @@ use solana_program::{
 use steel::*;
 
 use crate::{
-    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::EvDeploy, ore_api::{self, Board, Round}, state::Manager
+    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::{DeployStrategy, EvDeploy}, ore_api::{self, Board, Round}, state::Manager
 };
 
 pub fn process_ev_deploy(
@@ -18,6 +18,14 @@ pub fn process_ev_deploy(
     let min_bet = u64::from_le_bytes(args.min_bet);
     let ore_value = u64::from_le_bytes(args.ore_value);
     let slots_left = u64::from_le_bytes(args.slots_left);
+    
+    // Validate strategy - currently only EV is supported
+    let strategy = DeployStrategy::try_from(args.strategy)
+        .map_err(|_| ProgramError::InvalidInstructionData)?;
+    
+    if strategy != DeployStrategy::EV {
+        return Err(ProgramError::InvalidInstructionData);
+    }
 
 
     let [
