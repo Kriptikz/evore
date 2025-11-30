@@ -21,9 +21,12 @@ _None currently active_
    - `Manual` - User-specified squares and amounts
 
 2. **Percentage Strategy**
-   - Args: `bankroll`, `num_squares`, `percentage`
-   - Deploys equal amounts on squares 0 to (num_squares - 1)
-   - No randomization
+   - Args: `percentage`, `squares_count`, `bankroll`
+   - For each square (0 to squares_count - 1):
+     - Calculate amount to own `percentage` of that square
+     - Formula: `amount = P * T / (1 - P)` where T = current square total
+   - Continues until bankroll exhausted
+   - Same amounts batched in single CPI call
 
 3. **Manual Strategy**
    - Args: Array of (square_index, amount) pairs

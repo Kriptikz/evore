@@ -67,10 +67,14 @@
    - Deploys based on +EV squares
 
 2. **Percentage Strategy** (New)
-   - Deploy X% of bankroll on Y squares
-   - Deploys in order (square 0, 1, 2, ... up to Y)
-   - No randomization
-   - Equal split across chosen squares
+   - Args: `percentage`, `squares_count`, `bankroll`
+   - For each square 0 to (squares_count - 1):
+     - Calculate amount to own `percentage` of that square
+     - Formula: `amount = P * T / (1 - P)` where T = current square total
+     - Example: Square has 1 SOL, want 10% → deploy 0.111 SOL (0.111/1.111 = 10%)
+   - Continues until bankroll exhausted
+   - Same amounts can be batched in single CPI call
+   - No randomization - deploys in order
 
 3. **Manual Strategy** (New)
    - User specifies exact squares and amounts
