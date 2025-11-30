@@ -10,34 +10,19 @@ _None currently active_
 
 ## Up Next
 
-### Task 6: Add Program Verifications
+### Task 7: Add Writable Account Checks
 **Priority:** 🟠 High
 
 **Files & Changes:**
 
-1. **`src/processor/process_ev_deploy.rs`** - Add entropy program check:
-```rust
-if *entropy_program.key != entropy_api::id() {
-    return Err(ProgramError::IncorrectProgramId);
-}
-```
-
-2. **`src/processor/process_claim_ore.rs`** - Add SPL program checks:
-```rust
-if *spl_program.key != spl_token::id() {
-    return Err(ProgramError::IncorrectProgramId);
-}
-
-if *spl_ata_program.key != spl_associated_token_account::id() {
-    return Err(ProgramError::IncorrectProgramId);
-}
-```
+1. **`src/processor/process_claim_sol.rs`** - Add writable check for `managed_miner_auth_account_info`
+2. **`src/processor/process_claim_ore.rs`** - Add writable checks for mutable accounts
+3. **`src/processor/process_checkpoint.rs`** - Add writable check for `managed_miner_auth_account_info`
 
 ---
 
 ## Backlog
 
-- [ ] Task 7: Add writable account checks (all processors)
 - [ ] Task 8: Remove unused imports
 - [ ] Task 9: Add comprehensive error types
 
@@ -45,8 +30,17 @@ if *spl_ata_program.key != spl_associated_token_account::id() {
 
 ## Completed
 
+### ✅ Task 6: Add Program Verifications
+**Files:** 
+- `src/processor/process_ev_deploy.rs` - Added entropy program check
+- `src/processor/process_claim_ore.rs` - Added SPL Token & SPL ATA checks
+
+**Completed:** 2025-11-30
+
+---
+
 ### ✅ Task 5: Fix Rent Drain (CANCELLED)
-**Reason:** Not applicable - managed_miner_auth PDA is only used as signing authority, not a persistent account.
+**Reason:** Not applicable - PDA only used as signing authority.
 
 ---
 

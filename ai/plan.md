@@ -13,7 +13,7 @@
 ## Phase 2: Security Hardening (High)
 > Priority: **HIGH** - Complete before mainnet
 
-- [ ] Add program verifications (entropy, SPL token, SPL ATA)
+- [x] Add program verifications (entropy, SPL token, SPL ATA)
 - [ ] Add writable checks for mutable accounts in `process_claim_sol.rs`
 - [ ] Add writable checks for mutable accounts in `process_claim_ore.rs`
 - [ ] Add writable checks for mutable accounts in `process_checkpoint.rs`
@@ -69,7 +69,7 @@
 | Phase | Status | Completion |
 |-------|--------|------------|
 | Phase 1: Security Fixes | ✅ Complete | 100% (4/4) |
-| Phase 2: Security Hardening | 🔴 Not Started | 0% |
+| Phase 2: Security Hardening | 🟡 In Progress | 25% (1/4) |
 | Phase 3: Code Quality | 🔴 Not Started | 0% |
 | Phase 4: Testing | 🔴 Not Started | 0% |
 | Phase 5: Optimization | 🔴 Not Started | 0% |

@@ -48,6 +48,14 @@ pub fn process_claim_ore(
         return Err(ProgramError::IncorrectProgramId);
     }
 
+    if *spl_program.key != spl_token::id() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    if *spl_ata_program.key != spl_associated_token_account::id() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
     let manager = manager_account_info
         .as_account::<Manager>(&crate::id())?;
 

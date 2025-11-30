@@ -4,7 +4,7 @@ use solana_program::{
 use steel::*;
 
 use crate::{
-    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, error::EvoreError, instruction::EvDeploy, ore_api::{self, Board, Round}, state::Manager
+    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::EvDeploy, ore_api::{self, Board, Round}, state::Manager
 };
 
 pub fn process_ev_deploy(
@@ -68,6 +68,10 @@ pub fn process_ev_deploy(
     }
 
     if *system_program.key != system_program::id() {
+        return Err(ProgramError::IncorrectProgramId);
+    }
+
+    if *entropy_program.key != entropy_api::id() {
         return Err(ProgramError::IncorrectProgramId);
     }
 
