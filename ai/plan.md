@@ -7,10 +7,8 @@
 
 - [x] Fix fee transfer bug in `process_ev_deploy.rs` (transfers `total_deployed` instead of `fee_amount`)
 - [x] Add fee collector address verification in `process_ev_deploy.rs`
-- [ ] Add PDA address validation in `process_ev_deploy.rs`
-- [ ] Add PDA address validation in `process_checkpoint.rs`
-- [ ] Add PDA address validation in `process_claim_sol.rs`
-- [ ] Add PDA address validation in `process_claim_ore.rs`
+- [x] Add PDA address validation in `process_ev_deploy.rs`
+- [x] Add PDA address validation in remaining processors (checkpoint, claim_sol, claim_ore)
 - [ ] Fix rent drain issue in `process_claim_sol.rs`
 
 ## Phase 2: Security Hardening (High)
@@ -74,7 +72,7 @@
 
 | Phase | Status | Completion |
 |-------|--------|------------|
-| Phase 1: Security Fixes | 🟡 In Progress | 29% (2/7) |
+| Phase 1: Security Fixes | 🟡 In Progress | 80% (4/5) |
 | Phase 2: Security Hardening | 🔴 Not Started | 0% |
 | Phase 3: Code Quality | 🔴 Not Started | 0% |
 | Phase 4: Testing | 🔴 Not Started | 0% |

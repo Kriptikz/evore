@@ -60,10 +60,13 @@ pub fn process_claim_ore(
             crate::consts::MANAGED_MINER_AUTH,
             manager_account_info.key.as_ref(),
             &auth_id.to_le_bytes(),
-
         ],
         &crate::id(),
     );
+
+    if managed_miner_auth_pda.0 != *managed_miner_auth_account_info.key {
+        return Err(ProgramError::InvalidSeeds);
+    }
 
     let claim_ore_accounts = 
         vec![
