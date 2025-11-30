@@ -106,10 +106,10 @@ pub fn process_ev_deploy(
 
     let (squares, total_deployed) = calculate_deployments(
         round,
-        bankroll as u128,
-        min_bet as u128,
-        max_per_square as u128,
-        ore_value as u128
+        bankroll,
+        min_bet,
+        max_per_square,
+        ore_value
     );
 
     if total_deployed == 0 {
@@ -131,7 +131,8 @@ pub fn process_ev_deploy(
         ];
 
     // transfer fee to fee_collector for deployments (1% fee, minimum MIN_DEPLOY_FEE)
-    let fee_amount = (((total_deployed as u128).saturating_mul(100).saturating_div(10_000)) as u64).max(MIN_DEPLOY_FEE);
+    // fee = total_deployed * 1% = total_deployed / 100
+    let fee_amount = total_deployed.saturating_div(100).max(MIN_DEPLOY_FEE);
     let transfer_fee_accounts = 
         vec![
             signer.clone(),
@@ -197,27 +198,13 @@ pub fn process_ev_deploy(
 
 fn calculate_deployments(
     round: &Round,
-    bankroll: u128,
-    min_bet: u128,
-    max_per_square: u128,
-    ore_value_lamports: u128,
+    bankroll: u64,
+    min_bet: u64,
+    max_per_square: u64,
+    ore_value_lamports: u64,
 ) -> ([u128; 25], u64) {
-    // Convert to u64 where possible (we assume these fit in u64).
-    // Add explicit checks/clamps if your ranges may exceed u64.
-    let bankroll_u64: u64       = bankroll as u64;
-    let min_bet_u64: u64        = min_bet as u64;
-    let max_per_square_u64: u64 = if max_per_square == 0 {
-        0
-    } else {
-        max_per_square as u64
-    };
-    let ore_val_u64: u64        = ore_value_lamports as u64;
-
-    // Build initial T from round totals (lamports) BEFORE your bets:
-    let mut r_deploys = [0u64; 25];
-    for (i, d) in round.deployed.iter().enumerate() {
-        r_deploys[i] = *d as u64;
-    }
+    // Round.deployed is already [u64; 25], no conversion needed
+    let r_deploys = round.deployed;
 
     let tick: u64 = 100;
 
@@ -226,18 +213,18 @@ fn calculate_deployments(
 
     let plan = plan_max_profit_waterfill(
         r_deploys,
-        bankroll_u64,
-        min_bet_u64,
+        bankroll,
+        min_bet,
         tick,
         margin_ppm,
-        ore_val_u64,
-        max_per_square_u64,
+        ore_value_lamports,
+        max_per_square,
     );
 
-    // Convert back to u128 for the caller
+    // Widen u64 to u128 for the caller (safe widening cast)
     let mut out = [0u128; 25];
     for i in 0..25 {
-        out[i] = plan.per_square[i] as u128;
+        out[i] = u128::from(plan.per_square[i]);
     }
     (out, plan.spent)
 }
@@ -327,10 +314,12 @@ fn profit_fraction_fixed_s(
         -((inner_neg - inner_pos) as i128)
     };
 
+    // Widening cast u128 → i128 is safe when x is bounded by lamport values
+    let x_i128 = x.min(i128::MAX as u128) as i128;
     let n_sol: i128 = if inner_i >= 0 {
-        (x as i128).saturating_mul(inner_i)
+        x_i128.saturating_mul(inner_i)
     } else {
-        -((x as i128).saturating_mul(inner_i.saturating_abs()))
+        -(x_i128.saturating_mul(inner_i.saturating_abs()))
     };
 
     // D = 25*1000*(T + x)
@@ -343,7 +332,8 @@ fn profit_fraction_fixed_s(
     let ore_num_u = ore_value_lamports
         .saturating_mul(x)
         .saturating_mul(1000);
-    let ore_num = ore_num_u as i128;
+    // Safe conversion: clamp to i128::MAX if overflow (practically impossible for lamport values)
+    let ore_num = ore_num_u.min(i128::MAX as u128) as i128;
 
     let n_total = n_sol.saturating_add(ore_num);
     (n_total, d)
@@ -402,7 +392,7 @@ fn optimal_x_for_lambda(
     ore_value_lamports: u64,
     lambda: u64,           // dimensionless Lagrange multiplier
 ) -> u64 {
-    let ti = ti_u64 as u128;
+    let ti = u128::from(ti_u64);
     if ti == 0 {
         return 0;
     }
@@ -414,7 +404,7 @@ fn optimal_x_for_lambda(
     }
 
     let l = s.saturating_sub(ti); // L_i
-    let ore = ore_value_lamports as u128;
+    let ore = u128::from(ore_value_lamports);
 
     // A_i = NUM*L_i + 1000*ore_value
     let a = NUM
@@ -423,7 +413,7 @@ fn optimal_x_for_lambda(
 
     // B(λ) = DEN24 + C_LAM * λ
     let b_lambda = DEN24.saturating_add(
-        C_LAM.saturating_mul(lambda as u128)
+        C_LAM.saturating_mul(u128::from(lambda))
     );
 
     if b_lambda == 0 || a == 0 {
@@ -448,8 +438,8 @@ fn optimal_x_for_lambda(
     if x == 0 {
         0
     } else {
-        // Downcast; if you're paranoid, clamp to u64::MAX first.
-        x as u64
+        // Safe narrowing: clamp to u64::MAX to prevent truncation
+        x.min(u64::MAX as u128) as u64
     }
 }
 
@@ -491,8 +481,9 @@ fn allocation_for_lambda(
     let mut spent: u64 = 0;
     let mut ev_sum: i64 = 0;
 
-    let total_sum: u128 = total_sum_u64 as u128;
-    let ore_u128: u128   = ore_value_lamports as u128;
+    // Widening casts (u64 → u128) are always safe
+    let total_sum: u128 = u128::from(total_sum_u64);
+    let ore_u128: u128 = u128::from(ore_value_lamports);
 
     if bankroll < min_bet {
         return Allocation {
@@ -555,9 +546,9 @@ fn allocation_for_lambda(
             continue;
         }
 
-        // EV check for this x
-        let ti_u128 = ti_u64 as u128;
-        let x_u128  = x as u128;
+        // EV check for this x (widening casts are always safe)
+        let ti_u128 = u128::from(ti_u64);
+        let x_u128  = u128::from(x);
         let (n, d)  = profit_fraction_fixed_s(
             total_sum,
             ti_u128,
@@ -579,9 +570,10 @@ fn allocation_for_lambda(
                     continue;
                 }
             };
-            let rhs = (margin_ppm as i128)
-                .saturating_mul(x as i128)
-                .saturating_mul(d as i128);
+            // Safe widening: u32 → i128, u64 → i128
+            let rhs = i128::from(margin_ppm)
+                .saturating_mul(i128::from(x))
+                .saturating_mul(d.min(i128::MAX as u128) as i128);
 
             if lhs < rhs {
                 continue;
@@ -592,8 +584,12 @@ fn allocation_for_lambda(
         per_square[i] = per_square[i].saturating_add(x);
         spent = spent.saturating_add(x);
 
-        // Approximate EV contribution: floor(n/d)
-        ev_sum = ev_sum.saturating_add((n / (d as i128)) as i64);
+        // Approximate EV contribution: floor(n/d), clamped to i64 range
+        // Safe narrowing: d is u128, clamp to i128::MAX before conversion
+        let d_i128 = d.min(i128::MAX as u128) as i128;
+        let ev_contrib = n / d_i128;
+        let ev_contrib_i64 = ev_contrib.clamp(i64::MIN as i128, i64::MAX as i128) as i64;
+        ev_sum = ev_sum.saturating_add(ev_contrib_i64);
 
         if spent >= bankroll {
             break;
@@ -625,8 +621,8 @@ pub fn plan_max_profit_waterfill(
     max_per_square: u64,
 ) -> Allocation {
     let total_sum_u64 = sum25_u64(&t);
-    let total_sum_u128 = total_sum_u64 as u128;
-    let ore_u128 = ore_value_lamports as u128;
+    let total_sum_u128 = u128::from(total_sum_u64);
+    let ore_u128 = u128::from(ore_value_lamports);
 
     // If we can't even place a min bet, bail.
     if bankroll < min_bet {
@@ -648,7 +644,7 @@ pub fn plan_max_profit_waterfill(
             continue;
         }
 
-        let ti_u128 = ti_u64 as u128;
+        let ti_u128 = u128::from(ti_u64);
         // dmax at λ=0 with fixed S0:
         let dmax0 = dmax_for_square_fixed_s(total_sum_u128, ti_u128, ore_u128);
 

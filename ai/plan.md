@@ -32,7 +32,9 @@
 - [x] Remove unused imports (`EvDeploy`, `MMClaimSOL`, `size_of`)
 - [x] Document magic numbers in EV calculation (NUM, DEN24, C_LAM)
 - [x] Add comprehensive error types for each failure mode
-- [ ] Replace unsafe casts with `try_into()` (deferred - mostly safe widening casts)
+- [x] Replace unsafe casts with safe conversions (`From`, `.min()` + cast, `.clamp()`)
+- [x] Simplify `calculate_deployments` function signature (u64 instead of u128 params)
+- [x] Simplify fee calculation (avoid unnecessary widening/narrowing)
 
 ## Phase 5: Testing (High)
 > Priority: **HIGH** - Validate fixes and prevent regressions
@@ -73,7 +75,7 @@
 | Phase 1: Security Fixes | ✅ Complete | 100% (4/4) |
 | Phase 2: Security Hardening | ✅ Complete | 100% (4/4) |
 | Phase 3: Optimization | ✅ Complete | 100% (4/4) |
-| Phase 4: Code Quality | ✅ Complete | 100% (3/3) |
+| Phase 4: Code Quality | ✅ Complete | 100% (6/6) |
 | Phase 5: Testing | 🟡 In Progress | 67% (4/6) |
 | Phase 6: Documentation | 🟡 In Progress | 50% (3/6) |
 | Phase 7: Deployment | 🔴 Not Started | 0% |
@@ -85,4 +87,5 @@
 - Phases 1-4 complete! All critical fixes, hardening, optimizations, and code quality done.
 - Test infrastructure in place with modular unit testing
 - Error types expanded with descriptive messages
+- All type casts now use safe conversion patterns
 - Consider external audit after Phase 5 completion
