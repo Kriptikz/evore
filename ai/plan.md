@@ -18,7 +18,17 @@
 - [ ] Add writable checks for mutable accounts in `process_claim_ore.rs`
 - [ ] Add writable checks for mutable accounts in `process_checkpoint.rs`
 
-## Phase 3: Code Quality (Medium)
+## Phase 3: Optimization (High - CU Determinism)
+> Priority: **HIGH** - Required for predictable CU usage
+
+- [ ] Add `bump` parameter to all instruction structs
+- [ ] Replace `find_program_address` with `create_program_address` + bump verification
+- [ ] Update instruction builders to accept/compute bump client-side
+- [ ] Update tests with deterministic keypairs
+
+**Why:** `find_program_address` iterates through bump values (255→0), causing variable CU consumption. By passing bump as a parameter and using `create_program_address`, CU usage becomes deterministic.
+
+## Phase 4: Code Quality (Medium)
 > Priority: **MEDIUM** - Good practice improvements
 
 - [ ] Remove unused imports (`EvDeploy`, `MMClaimSOL` in `process_claim_ore.rs`)
@@ -26,21 +36,13 @@
 - [ ] Document magic numbers in EV calculation (NUM, DEN24, C_LAM)
 - [ ] Add comprehensive error types for each failure mode
 
-## Phase 4: Testing (High)
+## Phase 5: Testing (High)
 > Priority: **HIGH** - Validate fixes and prevent regressions
 
 - [ ] Add unit tests for EV calculation edge cases
 - [ ] Add integration tests for each instruction
 - [ ] Add security-focused tests (invalid authority, wrong accounts, etc.)
 - [ ] Add tests for fee calculation verification
-
-## Phase 5: Optimization (Low)
-> Priority: **LOW** - Performance improvements
-
-- [ ] Reduce `.clone()` calls on AccountInfo
-- [ ] Consider batching deploy CPIs
-- [ ] Optimize loop in `process_ev_deploy.rs` (25 iterations)
-- [ ] Cache PDA bumps where possible
 
 ## Phase 6: Documentation (Medium)
 > Priority: **MEDIUM** - For maintainability
@@ -70,9 +72,9 @@
 |-------|--------|------------|
 | Phase 1: Security Fixes | ✅ Complete | 100% (4/4) |
 | Phase 2: Security Hardening | 🟡 In Progress | 25% (1/4) |
-| Phase 3: Code Quality | 🔴 Not Started | 0% |
-| Phase 4: Testing | 🔴 Not Started | 0% |
-| Phase 5: Optimization | 🔴 Not Started | 0% |
+| Phase 3: Optimization | 🔴 Not Started | 0% |
+| Phase 4: Code Quality | 🔴 Not Started | 0% |
+| Phase 5: Testing | 🔴 Not Started | 0% |
 | Phase 6: Documentation | 🟡 In Progress | 33% (2/6) |
 | Phase 7: Deployment | 🔴 Not Started | 0% |
 
@@ -81,5 +83,6 @@
 ## Notes
 
 - Phase 1 complete! All critical security fixes done.
-- Testing (Phase 4) should run in parallel with Phase 2
+- Phase 3 (CU optimization) prioritized - required for deterministic testing
+- Testing (Phase 5) should run in parallel with other phases
 - Consider external audit after Phase 2 completion

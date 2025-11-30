@@ -10,31 +10,52 @@ _None currently active_
 
 ## Up Next
 
-### Task 7: Add Writable Account Checks
-**Priority:** 🟠 High
+### Task 7: Add Bump Parameter for Deterministic CU Usage
+**Priority:** 🟠 High  
+**Goal:** Make CU consumption deterministic by avoiding `find_program_address` on-chain
 
-**Files & Changes:**
+**Changes Required:**
 
-1. **`src/processor/process_claim_sol.rs`** - Add writable check for `managed_miner_auth_account_info`
-2. **`src/processor/process_claim_ore.rs`** - Add writable checks for mutable accounts
-3. **`src/processor/process_checkpoint.rs`** - Add writable check for `managed_miner_auth_account_info`
+#### 1. Update Instruction Structs (`src/instruction.rs`)
+Add `bump: u8` field to each instruction that uses PDAs:
+- `EvDeploy` - add `bump: u8`
+- `MMCheckpoint` - add `bump: u8`
+- `MMClaimSOL` - add `bump: u8`
+- `MMClaimORE` - add `bump: u8`
+
+#### 2. Update Processors
+Replace in each processor:
+```rust
+// Before (variable CU):
+let managed_miner_auth_pda = Pubkey::find_program_address(&seeds, &crate::id());
+
+// After (fixed CU):
+let managed_miner_auth_pda = Pubkey::create_program_address(
+    &[...seeds, &[args.bump]],
+    &crate::id()
+)?;
+// Then verify it matches the provided account
+```
+
+#### 3. Update Instruction Builders (`src/instruction.rs`)
+Compute bump client-side using `find_program_address` and pass it to instruction.
+
+#### 4. Update Tests
+Use deterministic keypairs so bumps are consistent.
 
 ---
 
 ## Backlog
 
-- [ ] Task 8: Remove unused imports
-- [ ] Task 9: Add comprehensive error types
+- [ ] Task 8: Add writable account checks (all processors)
+- [ ] Task 9: Remove unused imports
+- [ ] Task 10: Add comprehensive error types
 
 ---
 
 ## Completed
 
 ### ✅ Task 6: Add Program Verifications
-**Files:** 
-- `src/processor/process_ev_deploy.rs` - Added entropy program check
-- `src/processor/process_claim_ore.rs` - Added SPL Token & SPL ATA checks
-
 **Completed:** 2025-11-30
 
 ---
