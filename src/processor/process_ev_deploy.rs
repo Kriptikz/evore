@@ -116,7 +116,7 @@ pub fn process_ev_deploy(
             ore_program.clone(),
         ];
 
-    // transfer fee to fee_collector for deployments
+    // transfer fee to fee_collector for deployments (1% fee, minimum MIN_DEPLOY_FEE)
     let fee_amount = (((total_deployed as u128).saturating_mul(100).saturating_div(10_000)) as u64).max(MIN_DEPLOY_FEE);
     let transfer_fee_accounts = 
         vec![
@@ -128,7 +128,7 @@ pub fn process_ev_deploy(
         &solana_program::system_instruction::transfer(
             signer.key,
             fee_collector_account_info.key,
-            total_deployed,
+            fee_amount,
         ),
         &transfer_fee_accounts,
     )?;

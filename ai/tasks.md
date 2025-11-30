@@ -1,48 +1,21 @@
 # Current Tasks
 
+> Last Updated: 2025-11-30
+
 ## Active
 
-### Fix Critical Fee Transfer Bug
-**File:** `src/processor/process_ev_deploy.rs`  
-**Line:** ~131  
-**Issue:** Transfers `total_deployed` instead of `fee_amount`  
-**Priority:** 🔴 Critical
-
-```rust
-// Current (WRONG):
-solana_program::system_instruction::transfer(
-    signer.key,
-    fee_collector_account_info.key,
-    total_deployed,  // ❌ Should be fee_amount
-)
-
-// Fixed:
-solana_program::system_instruction::transfer(
-    signer.key,
-    fee_collector_account_info.key,
-    fee_amount,  // ✅ Correct
-)
-```
+_None currently active_
 
 ---
 
-### Add PDA Address Validation
-**Files:** All processors  
-**Priority:** 🔴 Critical
+## Up Next
 
-Add validation after computing PDA:
-```rust
-if managed_miner_auth_pda.0 != *managed_miner_auth_account_info.key {
-    return Err(ProgramError::InvalidSeeds);
-}
-```
-
----
-
-### Add Fee Collector Verification
+### Task 2: Add Fee Collector Address Verification
 **File:** `src/processor/process_ev_deploy.rs`  
-**Priority:** 🔴 Critical
+**Priority:** 🔴 Critical  
+**Issue:** Fee collector account is not validated, allowing fee theft
 
+Add verification after line ~72 (after system_program check):
 ```rust
 if *fee_collector_account_info.key != crate::consts::FEE_COLLECTOR {
     return Err(ProgramError::InvalidAccountData);
@@ -51,17 +24,43 @@ if *fee_collector_account_info.key != crate::consts::FEE_COLLECTOR {
 
 ---
 
+### Task 3: Add PDA Address Validation (process_ev_deploy.rs)
+**File:** `src/processor/process_ev_deploy.rs`  
+**Priority:** 🔴 Critical  
+
+Add after PDA computation (~line 92):
+```rust
+if managed_miner_auth_pda.0 != *managed_miner_auth_account_info.key {
+    return Err(ProgramError::InvalidSeeds);
+}
+```
+
+---
+
 ## Backlog
 
-- [ ] Fix rent drain in `process_claim_sol.rs`
-- [ ] Add entropy program check
-- [ ] Add SPL program checks
-- [ ] Add writable account checks
-- [ ] Write security tests
+- [ ] Task 4: Add PDA validation in `process_checkpoint.rs`
+- [ ] Task 5: Add PDA validation in `process_claim_sol.rs`
+- [ ] Task 6: Add PDA validation in `process_claim_ore.rs`
+- [ ] Task 7: Fix rent drain in `process_claim_sol.rs`
+- [ ] Task 8: Add entropy program check
+- [ ] Task 9: Add SPL program checks
+- [ ] Task 10: Add writable account checks
 
 ---
 
 ## Completed
 
-_No completed tasks yet_
+### ✅ Task 1: Fix Critical Fee Transfer Bug
+**File:** `src/processor/process_ev_deploy.rs`  
+**Line:** 131  
+**Completed:** 2025-11-30
 
+Changed `total_deployed` to `fee_amount` in the fee transfer:
+```rust
+// Before (BUG):
+total_deployed,
+
+// After (FIXED):
+fee_amount,
+```

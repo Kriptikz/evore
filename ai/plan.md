@@ -1,13 +1,17 @@
 # Evore Development Plan
 
+> Last Updated: 2025-11-30
+
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
 
-- [ ] Fix fee transfer bug in `process_ev_deploy.rs` (transfers `total_deployed` instead of `fee_amount`)
-- [ ] Add PDA address validation in all processors
-- [ ] Add fee collector address verification
+- [x] Fix fee transfer bug in `process_ev_deploy.rs` (transfers `total_deployed` instead of `fee_amount`)
+- [ ] Add fee collector address verification in `process_ev_deploy.rs`
+- [ ] Add PDA address validation in `process_ev_deploy.rs`
+- [ ] Add PDA address validation in `process_checkpoint.rs`
+- [ ] Add PDA address validation in `process_claim_sol.rs`
+- [ ] Add PDA address validation in `process_claim_ore.rs`
 - [ ] Fix rent drain issue in `process_claim_sol.rs`
-- [ ] Add missing account owner checks for Manager account
 
 ## Phase 2: Security Hardening (High)
 > Priority: **HIGH** - Complete before mainnet
@@ -15,8 +19,9 @@
 - [ ] Add Entropy program verification in `process_ev_deploy.rs`
 - [ ] Add SPL Token program verification in `process_claim_ore.rs`
 - [ ] Add SPL ATA program verification in `process_claim_ore.rs`
-- [ ] Add writable checks for all mutable accounts
-- [ ] Add explicit checks for ORE account addresses (board, round, miner, treasury)
+- [ ] Add writable checks for mutable accounts in `process_claim_sol.rs`
+- [ ] Add writable checks for mutable accounts in `process_claim_ore.rs`
+- [ ] Add writable checks for mutable accounts in `process_checkpoint.rs`
 
 ## Phase 3: Code Quality (Medium)
 > Priority: **MEDIUM** - Good practice improvements
@@ -25,7 +30,6 @@
 - [ ] Replace unsafe casts with `try_into()` and proper error handling
 - [ ] Document magic numbers in EV calculation (NUM, DEN24, C_LAM)
 - [ ] Add comprehensive error types for each failure mode
-- [ ] Refactor PDA computation to accept bump as parameter (gas optimization)
 
 ## Phase 4: Testing (High)
 > Priority: **HIGH** - Validate fixes and prevent regressions
@@ -47,6 +51,8 @@
 ## Phase 6: Documentation (Medium)
 > Priority: **MEDIUM** - For maintainability
 
+- [x] Create security audit document
+- [x] Create program architecture documentation
 - [ ] Add inline documentation for all public functions
 - [ ] Document the EV waterfill algorithm mathematically
 - [ ] Create client SDK documentation
@@ -68,12 +74,12 @@
 
 | Phase | Status | Completion |
 |-------|--------|------------|
-| Phase 1: Security Fixes | 🔴 Not Started | 0% |
+| Phase 1: Security Fixes | 🟡 In Progress | 14% (1/7) |
 | Phase 2: Security Hardening | 🔴 Not Started | 0% |
 | Phase 3: Code Quality | 🔴 Not Started | 0% |
 | Phase 4: Testing | 🔴 Not Started | 0% |
 | Phase 5: Optimization | 🔴 Not Started | 0% |
-| Phase 6: Documentation | 🟡 In Progress | 50% |
+| Phase 6: Documentation | 🟡 In Progress | 33% (2/6) |
 | Phase 7: Deployment | 🔴 Not Started | 0% |
 
 ---
@@ -83,4 +89,3 @@
 - All security fixes (Phase 1) must be completed before any public deployment
 - Testing (Phase 4) should run in parallel with fixes
 - Consider external audit after Phase 2 completion
-
