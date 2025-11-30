@@ -56,15 +56,43 @@
 - [ ] Create client SDK documentation
 - [ ] Add deployment guide
 
-## Phase 7: Deployment Preparation
-> Priority: **FINAL** - Pre-deployment checklist
+## Phase 7: Deployment Strategies
+> Priority: **HIGH** - Multiple strategy options for deploy instruction
 
-- [ ] Security audit by external party
-- [ ] Testnet deployment and testing
-- [ ] Verify program on Solana Explorer
-- [ ] Set up monitoring and alerts
-- [ ] Create incident response plan
+### Strategy Types
+
+1. **EV Strategy** (Current)
+   - Takes bankroll, min_bet, max_per_square, ore_value, slots_left
+   - Calculates optimal deployment using waterfill algorithm
+   - Deploys based on +EV squares
+
+2. **Percentage Strategy** (New)
+   - Deploy X% of bankroll on Y squares
+   - Deploys in order (square 0, 1, 2, ... up to Y)
+   - No randomization
+   - Equal split across chosen squares
+
+3. **Manual Strategy** (New)
+   - User specifies exact squares and amounts
+   - Squares with same amount can be batched in single CPI call
+   - Full control over deployment
+
+### Implementation Tasks
+
+- [ ] Create `DeployStrategy` enum (EV, Percentage, Manual)
+- [ ] Implement percentage-based deployment processor
+- [ ] Implement manual deployment processor
+- [ ] Refactor current EV logic into strategy pattern
+- [ ] Add strategy selection to instruction
+- [ ] Add tests for each strategy
+- [ ] Update instruction builders
+
+## Phase 8: Deployment & Products
+> Priority: **FINAL** - Production deployment and tooling
+
 - [ ] Mainnet deployment
+- [ ] Create bot for automated deployments
+- [ ] Create frontend UI
 
 ---
 
@@ -78,12 +106,14 @@
 | Phase 4: Code Quality | ✅ Complete | 100% (6/6) |
 | Phase 5: Testing | ✅ Complete | 100% (6/6) |
 | Phase 6: Documentation | 🟡 In Progress | 50% (3/6) |
-| Phase 7: Deployment | 🔴 Not Started | 0% |
+| Phase 7: Strategies | 🔴 Not Started | 0% |
+| Phase 8: Deployment | 🔴 Not Started | 0% |
 
 ---
 
 ## Notes
 
 - Phases 1-5 complete! All critical fixes, hardening, optimizations, code quality, and testing done.
-- Comprehensive test coverage with 19+ unit tests
-- Consider external audit before deployment
+- 21+ unit tests with comprehensive coverage
+- Phase 7 introduces flexible deployment strategies for different use cases
+- Phase 8 is final production deployment with bot and frontend

@@ -10,56 +10,52 @@ _None currently active_
 
 ## Up Next
 
-### Task 17: Add Inline Documentation
-**Priority:** 🟡 Medium
+### Task 20: Implement Deployment Strategies
+**Priority:** 🔴 High
 
-- Document public functions in `instruction.rs`
-- Document processor functions
-- Document state structs and fields
+**Phase 7 - Strategy Implementation:**
+
+1. **Create DeployStrategy enum**
+   - `EV` - Current waterfill algorithm
+   - `Percentage` - X% on Y squares in order
+   - `Manual` - User-specified squares and amounts
+
+2. **Percentage Strategy**
+   - Args: `bankroll`, `num_squares`, `percentage`
+   - Deploys equal amounts on squares 0 to (num_squares - 1)
+   - No randomization
+
+3. **Manual Strategy**
+   - Args: Array of (square_index, amount) pairs
+   - Batch squares with same amount in single CPI
+   - Full user control
+
+4. **Refactor EV Strategy**
+   - Move current logic to separate function
+   - Keep existing params: bankroll, min_bet, max_per_square, ore_value, slots_left
 
 ---
 
 ## Backlog
 
-- [ ] Task 18: Create client SDK documentation
-- [ ] Task 19: Deployment guide
+- [ ] Task 21: Add tests for Percentage strategy
+- [ ] Task 22: Add tests for Manual strategy
+- [ ] Task 23: Update instruction builders for strategies
+- [ ] Task 24: Mainnet deployment
+- [ ] Task 25: Create deployment bot
+- [ ] Task 26: Create frontend UI
 
 ---
 
 ## Completed
 
-### ✅ Task 16b: Use Custom Errors + Add Error Tests
+### ✅ Task 16b: Use Custom Errors + Fix Tests
 **Completed:** 2025-11-30
-
-**Changes:**
-
-Updated code to use all custom `EvoreError` variants:
-- `ManagerNotInitialized` - used in all 4 processors
-- `InvalidPDA` - used in all 4 processors
-- `InvalidFeeCollector` - used in ev_deploy
-- `NoDeployments` - used in ev_deploy
-- `ArithmeticOverflow` - used in ev_deploy
-
-**New tests:**
-- `test_no_profitable_deployments` - EV calc finds no profitable squares
 
 ---
 
 ### ✅ Task 16: Edge Case Tests
 **Completed:** 2025-11-30
-
-**Tests added:**
-
-**EvDeploy:**
-- `test_zero_bankroll` - Deploy with 0 bankroll (NoDeployments error)
-- `test_no_profitable_deployments` - EV is negative
-- `test_invalid_round_id` - Deploy with non-existent round
-
-**ClaimSOL:**
-- `test_no_rewards` - Claim with zero SOL rewards
-
-**ClaimORE:**
-- `test_no_rewards` - Claim with zero ORE rewards
 
 ---
 
@@ -68,12 +64,12 @@ Updated code to use all custom `EvoreError` variants:
 
 ---
 
-### ✅ Task 10: Phase 4 - Code Quality (Complete)
+### ✅ Task 10: Phase 4 - Code Quality
 **Completed:** 2025-11-30
 
 ---
 
-### ✅ Task 9: Refactor Test Setup for Unit Testing
+### ✅ Task 9: Refactor Test Setup
 **Completed:** 2025-11-30
 
 ---
@@ -83,7 +79,7 @@ Updated code to use all custom `EvoreError` variants:
 
 ---
 
-### ✅ Task 7: Add Bump Parameter for Deterministic CU Usage
+### ✅ Task 7: Add Bump Parameter
 **Completed:** 2025-11-30
 
 ---
@@ -97,20 +93,20 @@ Updated code to use all custom `EvoreError` variants:
 
 ---
 
-### ✅ Task 4: Add PDA Address Validation (All Remaining Processors)
+### ✅ Task 4: Add PDA Address Validation
 **Completed:** 2025-11-30
 
 ---
 
-### ✅ Task 3: Add PDA Address Validation (process_ev_deploy.rs)
+### ✅ Task 3: Add PDA Validation (ev_deploy)
 **Completed:** 2025-11-30
 
 ---
 
-### ✅ Task 2: Add Fee Collector Address Verification
+### ✅ Task 2: Add Fee Collector Verification
 **Completed:** 2025-11-30
 
 ---
 
-### ✅ Task 1: Fix Critical Fee Transfer Bug
+### ✅ Task 1: Fix Fee Transfer Bug
 **Completed:** 2025-11-30
