@@ -1,13 +1,9 @@
-use std::mem::size_of;
-
 use solana_program::{
     account_info::AccountInfo, program_error::ProgramError, system_program
 };
 use steel::*;
 
-use crate::{
-    state::Manager
-};
+use crate::state::Manager;
 
 pub fn process_create_manager(
     accounts: &[AccountInfo],

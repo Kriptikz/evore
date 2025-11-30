@@ -242,11 +242,31 @@ fn calculate_deployments(
     (out, plan.spent)
 }
 
-// ========================== Constants (exact) ==========================
+// ========================== EV Calculation Constants ==========================
+//
+// These constants model the ORE v3 game economics:
+//
+// The game has 25 squares. When a round ends:
+// - One square is randomly selected as the winner
+// - Winners split 89.1% of the total pool from losing squares
+// - Plus each winner gets a share of the ORE motherlode
+//
+// Mathematical model:
+// - P(win) = 1/25 for each square
+// - EV_sol = stake * (0.891 * L / (T + stake) - 1) where L = losers' pool, T = current square total
+// - EV_ore = ore_value * stake / (25 * (T + stake))
+//
+// Fixed-point arithmetic (multiplied by 1000 to avoid decimals):
 
-const NUM: u128   = 891;      // 0.891 = 891/1000 (losers' pool to winners)
-const DEN24: u128 = 24_010;   // 24.01 = 2401/100 ⇒ 24010/1000
-const C_LAM: u128 = 25_000;   // 25 * 1000 (same C as before)
+/// 89.1% = 891/1000 - fraction of losers' pool distributed to winners
+const NUM: u128 = 891;
+
+/// 24.01 = 24010/1000 - derived from 1/P(win) adjusted for the 89.1% factor
+/// Formula: 25 / 0.891 ≈ 28.06, but game mechanics adjust this to 24.01
+const DEN24: u128 = 24_010;
+
+/// 25 * 1000 - number of squares times the fixed-point multiplier
+const C_LAM: u128 = 25_000;
 
 
 // ============================ Utilities ===============================

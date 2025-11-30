@@ -4,7 +4,7 @@ use solana_program::{
 use steel::*;
 
 use crate::{
-    error::EvoreError, instruction::{EvDeploy, MMClaimORE, MMClaimSOL}, ore_api::{self, Board, Round}, state::Manager
+    error::EvoreError, instruction::MMClaimORE, ore_api::{self}, state::Manager
 };
 
 pub fn process_claim_ore(

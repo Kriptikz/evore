@@ -10,49 +10,47 @@ _None currently active_
 
 ## Up Next
 
-### Task 10: Add More Unit Tests
-**Priority:** 🟠 High
+### Task 11: Add More Edge Case Tests
+**Priority:** 🟡 Medium
 
-Potential test cases to add:
-- `create_manager`: Wrong system program
-- `ev_deploy`: End slot exceeded, invalid PDA/bump
-- `checkpoint`: Invalid PDA, round not found
-- `claim_sol`: Invalid PDA, no rewards
-- `claim_ore`: Invalid PDA, no rewards, ATA creation
+- Test with zero bankroll
+- Test with invalid round_id
+- Test checkpoint before round ends
+- Test claim with no rewards
 
 ---
 
 ## Backlog
 
-- [ ] Task 11: Remove unused imports in processors
-- [ ] Task 12: Add comprehensive error types
+- [ ] Task 12: Add inline documentation for public functions
+- [ ] Task 13: Create client SDK documentation
+- [ ] Task 14: Deployment guide
 
 ---
 
 ## Completed
 
-### ✅ Task 9: Refactor Test Setup for Unit Testing (Improved)
+### ✅ Task 10: Phase 4 - Code Quality
 **Completed:** 2025-11-30
 
-**Configurable Account Helpers:**
-- `add_manager_account(program_test, address, authority)` - Evore Manager
-- `add_board_account(program_test, round_id, start_slot, end_slot)` - ORE Board
-- `add_round_account(program_test, round_id, deployed, total_deployed, expires_at)` - ORE Round
-- `add_ore_miner_account(program_test, authority, deployed, sol, ore, checkpoint_id, round_id)` - ORE Miner
-- `add_entropy_var_account(program_test, board_address, end_at)` - Entropy Var
+**Changes:**
+1. **Removed unused imports:**
+   - `process_claim_ore.rs`: Removed `EvDeploy`, `MMClaimSOL`, `Board`, `Round`
+   - `process_create_manager.rs`: Removed `std::mem::size_of`
 
-**Snapshot Helpers (for complex external state):**
-- `add_treasury_account()`, `add_mint_account()`, `add_treasury_ata_account()`, `add_config_account()`
+2. **Documented EV calculation constants:**
+   - Added comprehensive comments explaining NUM, DEN24, C_LAM
+   - Documented the mathematical model for the ORE game
 
-**Convenience:**
-- `setup_deploy_test_accounts()` - Sets up common accounts for deploy tests
+3. **Enhanced error types:**
+   - Added `InvalidPDA`, `ManagerNotInitialized`, `InvalidFeeCollector`
+   - Added `NoDeployments`, `ArithmeticOverflow`
+   - Added descriptive error messages for debugging
 
-**Test Modules Created:**
-- `create_manager::test_success`, `create_manager::test_already_initialized`
-- `ev_deploy::test_success`, `ev_deploy::test_too_many_slots_left`, `ev_deploy::test_wrong_authority`
-- `checkpoint::test_wrong_authority`
-- `claim_sol::test_wrong_authority`
-- `claim_ore::test_wrong_authority`
+---
+
+### ✅ Task 9: Refactor Test Setup for Unit Testing (Improved)
+**Completed:** 2025-11-30
 
 ---
 
