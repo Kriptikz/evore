@@ -4,7 +4,7 @@ use solana_program::{
 use steel::*;
 
 use crate::{
-    consts::MIN_DEPLOY_FEE, error::EvoreError, instruction::EvDeploy, ore_api::{self, Board, Round}, state::Manager
+    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, error::EvoreError, instruction::EvDeploy, ore_api::{self, Board, Round}, state::Manager
 };
 
 pub fn process_ev_deploy(
@@ -69,6 +69,10 @@ pub fn process_ev_deploy(
 
     if *system_program.key != system_program::id() {
         return Err(ProgramError::IncorrectProgramId);
+    }
+
+    if *fee_collector_account_info.key != FEE_COLLECTOR {
+        return Err(ProgramError::InvalidAccountData);
     }
 
     let manager = manager_account_info

@@ -6,7 +6,7 @@
 > Priority: **IMMEDIATE** - Must complete before any deployment
 
 - [x] Fix fee transfer bug in `process_ev_deploy.rs` (transfers `total_deployed` instead of `fee_amount`)
-- [ ] Add fee collector address verification in `process_ev_deploy.rs`
+- [x] Add fee collector address verification in `process_ev_deploy.rs`
 - [ ] Add PDA address validation in `process_ev_deploy.rs`
 - [ ] Add PDA address validation in `process_checkpoint.rs`
 - [ ] Add PDA address validation in `process_claim_sol.rs`
@@ -74,7 +74,7 @@
 
 | Phase | Status | Completion |
 |-------|--------|------------|
-| Phase 1: Security Fixes | 🟡 In Progress | 14% (1/7) |
+| Phase 1: Security Fixes | 🟡 In Progress | 29% (2/7) |
 | Phase 2: Security Hardening | 🔴 Not Started | 0% |
 | Phase 3: Code Quality | 🔴 Not Started | 0% |
 | Phase 4: Testing | 🔴 Not Started | 0% |
