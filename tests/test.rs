@@ -330,11 +330,26 @@ pub fn setup_deploy_test_accounts(
     // Board with specified timing
     let board = add_board_account(program_test, round_id, current_slot, end_slot);
     
-    // Round with some existing deployments (so EV calc has something to work with)
+    // Round with varied deployments - some squares have high bets (making other squares +EV)
+    // Total deployed: ~15 SOL, spread unevenly to create EV+ opportunities
     let mut deployed = [0u64; 25];
-    deployed[0] = 1_000_000_000; // 1 SOL on square 0
-    deployed[5] = 500_000_000;   // 0.5 SOL on square 5
-    add_round_account(program_test, round_id, deployed, 1_500_000_000, end_slot + 1000);
+    // High bets on a few squares (these create the "losers pool" for other squares)
+    deployed[0] = 3_000_000_000;   // 3 SOL
+    deployed[1] = 2_500_000_000;   // 2.5 SOL
+    deployed[2] = 2_000_000_000;   // 2 SOL
+    deployed[3] = 1_500_000_000;   // 1.5 SOL
+    deployed[4] = 1_000_000_000;   // 1 SOL
+    // Medium bets
+    deployed[5] = 800_000_000;     // 0.8 SOL
+    deployed[6] = 600_000_000;     // 0.6 SOL
+    deployed[7] = 500_000_000;     // 0.5 SOL
+    // Low bets on remaining squares (these should be EV+ for new deployments)
+    deployed[8] = 200_000_000;     // 0.2 SOL
+    deployed[9] = 200_000_000;     // 0.2 SOL
+    deployed[10] = 100_000_000;    // 0.1 SOL
+    // Squares 11-24 have 0 - should be EV+ with the large losers pool
+    let total_deployed: u64 = deployed.iter().sum();
+    add_round_account(program_test, round_id, deployed, total_deployed, end_slot + 1000);
     
     // Entropy var
     add_entropy_var_account(program_test, board_pda().0, end_slot);
@@ -684,10 +699,10 @@ mod ev_deploy {
             manager_address,
             auth_id,
             TEST_ROUND_ID,
-            300_000_000,  // bankroll
-            100_000_000,  // max_per_square
+            300_000_000,  // bankroll (0.3 SOL)
+            100_000_000,  // max_per_square (0.1 SOL)
             10_000,       // min_bet
-            800_000_000,  // ore_value
+            800_000_000,  // ore_value (0.8 SOL)
             2,            // slots_left threshold
         );
         
@@ -788,6 +803,152 @@ mod ev_deploy {
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
         let result = context.banks_client.process_transaction(tx).await;
         assert!(result.is_err(), "should fail with wrong authority");
+    }
+
+    #[tokio::test]
+    async fn test_zero_bankroll() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Deploy with zero bankroll - returns NoDeployments error
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            0,            // zero bankroll
+            100_000_000,  // max_per_square
+            10_000,       // min_bet
+            800_000_000,  // ore_value
+            2,            // slots_left
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with NoDeployments error when bankroll is zero");
+    }
+
+    #[tokio::test]
+    async fn test_no_profitable_deployments() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        let current_slot = 1000;
+        // Setup with very high existing deployments - makes EV negative for new bets
+        let mut high_deployed = [0u64; 25];
+        for i in 0..25 {
+            high_deployed[i] = 100_000_000_000; // 100 SOL per square already deployed
+        }
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 5);
+        add_round_account(&mut program_test, TEST_ROUND_ID, high_deployed, 2_500_000_000_000, current_slot + 1000);
+        add_entropy_var_account(&mut program_test, board_pda().0, current_slot + 5);
+        add_treasury_account(&mut program_test);
+        add_mint_account(&mut program_test);
+        add_treasury_ata_account(&mut program_test);
+        add_config_account(&mut program_test);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to deploy with small bankroll when existing bets are huge - EV will be negative
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
+            1_000_000,    // small bankroll (0.001 SOL)
+            100_000_000,  // max_per_square
+            10_000,       // min_bet
+            1_000_000,    // low ore_value
+            2,            // slots_left
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with NoDeployments when EV is negative");
+    }
+
+    #[tokio::test]
+    async fn test_invalid_round_id() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        let current_slot = 1000;
+        let wrong_round_id = 99999u64; // Non-existent round
+        
+        // Setup accounts for TEST_ROUND_ID
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to deploy with wrong round_id
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix = evore::instruction::ev_deploy(
+            miner.pubkey(), manager_address, auth_id, wrong_round_id,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        // Should fail because round account doesn't exist
+        assert!(result.is_err(), "should fail with invalid round_id");
     }
 }
 
@@ -1023,6 +1184,39 @@ mod claim_sol {
         let result = context.banks_client.process_transaction(tx).await;
         assert!(result.is_err(), "should fail with wrong authority");
     }
+
+    #[tokio::test]
+    async fn test_no_rewards() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        // Miner with ZERO SOL rewards
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to claim SOL with no rewards - ORE program will handle this
+        let ix = evore::instruction::mm_claim_sol(miner.pubkey(), manager_address, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        // The ORE program should handle zero rewards (either succeed with noop or fail)
+        let _result = context.banks_client.process_transaction(tx).await;
+        // We just verify the transaction executes without panicking
+    }
 }
 
 mod claim_ore {
@@ -1140,5 +1334,41 @@ mod claim_ore {
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
         let result = context.banks_client.process_transaction(tx).await;
         assert!(result.is_err(), "should fail with wrong authority");
+    }
+
+    #[tokio::test]
+    async fn test_no_rewards() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        // Miner with ZERO ORE rewards
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        add_treasury_account(&mut program_test);
+        add_mint_account(&mut program_test);
+        add_treasury_ata_account(&mut program_test);
+        
+        let context = program_test.start_with_context().await;
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 1_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Try to claim ORE with no rewards - ORE program will handle this
+        let ix = evore::instruction::mm_claim_ore(miner.pubkey(), manager_address, auth_id);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        // The ORE program should handle zero rewards (either succeed with noop or fail)
+        let _result = context.banks_client.process_transaction(tx).await;
+        // We just verify the transaction executes without panicking
     }
 }

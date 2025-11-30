@@ -41,7 +41,7 @@ pub fn process_checkpoint(
     }
 
     if manager_account_info.data_is_empty() {
-        return Err(ProgramError::InvalidAccountData);
+        return Err(EvoreError::ManagerNotInitialized.into());
     }
 
     if *ore_program.key != ore_api::id() {
@@ -71,10 +71,10 @@ pub fn process_checkpoint(
             &[args.bump],
         ],
         &crate::id(),
-    ).map_err(|_| ProgramError::InvalidSeeds)?;
+    ).map_err(|_| EvoreError::InvalidPDA)?;
 
     if managed_miner_auth_pda != *managed_miner_auth_account_info.key {
-        return Err(ProgramError::InvalidSeeds);
+        return Err(EvoreError::InvalidPDA.into());
     }
 
     let checkpoint_accounts = 

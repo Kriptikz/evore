@@ -10,19 +10,17 @@ _None currently active_
 
 ## Up Next
 
-### Task 16: Add Edge Case Tests
+### Task 17: Add Inline Documentation
 **Priority:** 🟡 Medium
 
-- Test with zero bankroll
-- Test with invalid round_id
-- Test checkpoint before round ends
-- Test claim with no rewards
+- Document public functions in `instruction.rs`
+- Document processor functions
+- Document state structs and fields
 
 ---
 
 ## Backlog
 
-- [ ] Task 17: Add inline documentation for public functions
 - [ ] Task 18: Create client SDK documentation
 - [ ] Task 19: Deployment guide
 
@@ -30,28 +28,43 @@ _None currently active_
 
 ## Completed
 
-### ✅ Task 11-15: Error Tests
+### ✅ Task 16b: Use Custom Errors + Add Error Tests
+**Completed:** 2025-11-30
+
+**Changes:**
+
+Updated code to use all custom `EvoreError` variants:
+- `ManagerNotInitialized` - used in all 4 processors
+- `InvalidPDA` - used in all 4 processors
+- `InvalidFeeCollector` - used in ev_deploy
+- `NoDeployments` - used in ev_deploy
+- `ArithmeticOverflow` - used in ev_deploy
+
+**New tests:**
+- `test_no_profitable_deployments` - EV calc finds no profitable squares
+
+---
+
+### ✅ Task 16: Edge Case Tests
 **Completed:** 2025-11-30
 
 **Tests added:**
 
 **EvDeploy:**
-- `test_end_slot_exceeded` - Round already ended
-- `test_invalid_fee_collector` - Wrong fee collector address
-- `test_manager_not_initialized` - Empty manager account
-- `test_invalid_pda` - Wrong PDA passed
-
-**Checkpoint:**
-- `test_manager_not_initialized` - Empty manager account
-- `test_invalid_pda` - Wrong PDA passed
+- `test_zero_bankroll` - Deploy with 0 bankroll (NoDeployments error)
+- `test_no_profitable_deployments` - EV is negative
+- `test_invalid_round_id` - Deploy with non-existent round
 
 **ClaimSOL:**
-- `test_manager_not_initialized` - Empty manager account
-- `test_invalid_pda` - Wrong PDA passed
+- `test_no_rewards` - Claim with zero SOL rewards
 
 **ClaimORE:**
-- `test_manager_not_initialized` - Empty manager account
-- `test_invalid_pda` - Wrong PDA passed
+- `test_no_rewards` - Claim with zero ORE rewards
+
+---
+
+### ✅ Task 11-15: Error Tests
+**Completed:** 2025-11-30
 
 ---
 

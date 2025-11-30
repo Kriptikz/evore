@@ -60,7 +60,7 @@ pub fn process_ev_deploy(
     }
 
     if manager_account_info.data_is_empty() {
-        return Err(ProgramError::InvalidAccountData);
+        return Err(EvoreError::ManagerNotInitialized.into());
     }
 
     if *ore_program.key != ore_api::id() {
@@ -76,7 +76,7 @@ pub fn process_ev_deploy(
     }
 
     if *fee_collector_account_info.key != FEE_COLLECTOR {
-        return Err(ProgramError::InvalidAccountData);
+        return Err(EvoreError::InvalidFeeCollector.into());
     }
 
     let manager = manager_account_info
@@ -98,10 +98,10 @@ pub fn process_ev_deploy(
             &[args.bump],
         ],
         &crate::id(),
-    ).map_err(|_| ProgramError::InvalidSeeds)?;
+    ).map_err(|_| EvoreError::InvalidPDA)?;
 
     if managed_miner_auth_pda != *managed_miner_auth_account_info.key {
-        return Err(ProgramError::InvalidSeeds);
+        return Err(EvoreError::InvalidPDA.into());
     }
 
     let (squares, total_deployed) = calculate_deployments(
@@ -113,7 +113,7 @@ pub fn process_ev_deploy(
     );
 
     if total_deployed == 0 {
-        return Ok(())
+        return Err(EvoreError::NoDeployments.into());
     }
 
     let deploy_accounts = 
@@ -174,7 +174,7 @@ pub fn process_ev_deploy(
         let managed_miner_auth_key = deploy_accounts[0].key.clone();
 
         // cpi deploy amount on square
-        let amt = amt.try_into().map_err(|_| { ProgramError::ArithmeticOverflow })?;
+        let amt = amt.try_into().map_err(|_| EvoreError::ArithmeticOverflow)?;
         solana_program::program::invoke_signed(
             &ore_api::deploy(
                 managed_miner_auth_key,
