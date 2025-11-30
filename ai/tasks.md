@@ -10,50 +10,40 @@ _None currently active_
 
 ## Up Next
 
-### Task 7: Add Bump Parameter for Deterministic CU Usage
-**Priority:** 🟠 High  
-**Goal:** Make CU consumption deterministic by avoiding `find_program_address` on-chain
+### Task 8: Add Writable Account Checks
+**Priority:** 🟠 High
 
-**Changes Required:**
+**Files & Changes:**
 
-#### 1. Update Instruction Structs (`src/instruction.rs`)
-Add `bump: u8` field to each instruction that uses PDAs:
-- `EvDeploy` - add `bump: u8`
-- `MMCheckpoint` - add `bump: u8`
-- `MMClaimSOL` - add `bump: u8`
-- `MMClaimORE` - add `bump: u8`
-
-#### 2. Update Processors
-Replace in each processor:
-```rust
-// Before (variable CU):
-let managed_miner_auth_pda = Pubkey::find_program_address(&seeds, &crate::id());
-
-// After (fixed CU):
-let managed_miner_auth_pda = Pubkey::create_program_address(
-    &[...seeds, &[args.bump]],
-    &crate::id()
-)?;
-// Then verify it matches the provided account
-```
-
-#### 3. Update Instruction Builders (`src/instruction.rs`)
-Compute bump client-side using `find_program_address` and pass it to instruction.
-
-#### 4. Update Tests
-Use deterministic keypairs so bumps are consistent.
+1. **`src/processor/process_claim_sol.rs`** - Add writable check for `managed_miner_auth_account_info`
+2. **`src/processor/process_claim_ore.rs`** - Add writable checks for mutable accounts
+3. **`src/processor/process_checkpoint.rs`** - Add writable check for `managed_miner_auth_account_info`
 
 ---
 
 ## Backlog
 
-- [ ] Task 8: Add writable account checks (all processors)
 - [ ] Task 9: Remove unused imports
 - [ ] Task 10: Add comprehensive error types
+- [ ] Task 11: Update tests with deterministic keypairs
 
 ---
 
 ## Completed
+
+### ✅ Task 7: Add Bump Parameter for Deterministic CU Usage
+**Completed:** 2025-11-30
+
+**Files modified:**
+- `src/instruction.rs` - Added `bump: u8` to EvDeploy, MMCheckpoint, MMClaimSOL, MMClaimORE
+- `src/processor/process_ev_deploy.rs` - Use `create_program_address` with args.bump
+- `src/processor/process_checkpoint.rs` - Use `create_program_address` with args.bump
+- `src/processor/process_claim_sol.rs` - Use `create_program_address` with args.bump
+- `src/processor/process_claim_ore.rs` - Use `create_program_address` with args.bump
+
+**Pattern:** Client computes bump via `find_program_address`, passes it in instruction data. On-chain uses `create_program_address` (O(1) CU) instead of `find_program_address` (O(n) CU).
+
+---
 
 ### ✅ Task 6: Add Program Verifications
 **Completed:** 2025-11-30

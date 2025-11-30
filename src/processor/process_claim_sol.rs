@@ -48,16 +48,18 @@ pub fn process_claim_sol(
         return Err(EvoreError::NotAuthorized.into());
     }
 
-    let managed_miner_auth_pda = Pubkey::find_program_address(
+    // Use create_program_address with bump from instruction data for deterministic CU usage
+    let managed_miner_auth_pda = Pubkey::create_program_address(
         &[
             crate::consts::MANAGED_MINER_AUTH,
             manager_account_info.key.as_ref(),
             &auth_id.to_le_bytes(),
+            &[args.bump],
         ],
         &crate::id(),
-    );
+    ).map_err(|_| ProgramError::InvalidSeeds)?;
 
-    if managed_miner_auth_pda.0 != *managed_miner_auth_account_info.key {
+    if managed_miner_auth_pda != *managed_miner_auth_account_info.key {
         return Err(ProgramError::InvalidSeeds);
     }
 
@@ -79,7 +81,7 @@ pub fn process_claim_sol(
             crate::consts::MANAGED_MINER_AUTH,
             manager_account_info.key.as_ref(),
             &auth_id.to_le_bytes(),
-            &[managed_miner_auth_pda.1],
+            &[args.bump],
         ]],
     )?;
 
@@ -101,7 +103,7 @@ pub fn process_claim_sol(
             crate::consts::MANAGED_MINER_AUTH,
             manager_account_info.key.as_ref(),
             &auth_id.to_le_bytes(),
-            &[managed_miner_auth_pda.1],
+            &[args.bump],
         ]],
     )?;
 

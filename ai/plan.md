@@ -21,12 +21,10 @@
 ## Phase 3: Optimization (High - CU Determinism)
 > Priority: **HIGH** - Required for predictable CU usage
 
-- [ ] Add `bump` parameter to all instruction structs
-- [ ] Replace `find_program_address` with `create_program_address` + bump verification
-- [ ] Update instruction builders to accept/compute bump client-side
+- [x] Add `bump` parameter to all instruction structs
+- [x] Replace `find_program_address` with `create_program_address` + bump verification
+- [x] Update instruction builders to accept/compute bump client-side
 - [ ] Update tests with deterministic keypairs
-
-**Why:** `find_program_address` iterates through bump values (255→0), causing variable CU consumption. By passing bump as a parameter and using `create_program_address`, CU usage becomes deterministic.
 
 ## Phase 4: Code Quality (Medium)
 > Priority: **MEDIUM** - Good practice improvements
@@ -72,7 +70,7 @@
 |-------|--------|------------|
 | Phase 1: Security Fixes | ✅ Complete | 100% (4/4) |
 | Phase 2: Security Hardening | 🟡 In Progress | 25% (1/4) |
-| Phase 3: Optimization | 🔴 Not Started | 0% |
+| Phase 3: Optimization | 🟡 In Progress | 75% (3/4) |
 | Phase 4: Code Quality | 🔴 Not Started | 0% |
 | Phase 5: Testing | 🔴 Not Started | 0% |
 | Phase 6: Documentation | 🟡 In Progress | 33% (2/6) |
@@ -83,6 +81,6 @@
 ## Notes
 
 - Phase 1 complete! All critical security fixes done.
-- Phase 3 (CU optimization) prioritized - required for deterministic testing
-- Testing (Phase 5) should run in parallel with other phases
+- Phase 3 (CU optimization) mostly complete - bump parameters added
+- Tests need updating with deterministic keypairs for consistent CU measurements
 - Consider external audit after Phase 2 completion

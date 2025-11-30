@@ -40,6 +40,7 @@ pub struct EvDeploy {
     pub min_bet: [u8; 8],
     pub ore_value: [u8; 8],
     pub slots_left: [u8; 8],
+    pub bump: u8,
 }
 
 instruction!(Instructions, EvDeploy);
@@ -54,12 +55,11 @@ pub fn ev_deploy(
     min_bet: u64,
     ore_value: u64,
     slots_left: u64,
-
 ) -> Instruction {
-    let managed_miner_auth_address = managed_miner_auth_pda(manager, auth_id);
-    let ore_miner_address = miner_pda(managed_miner_auth_address.0);
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
 
-    let authority = managed_miner_auth_address.0;
+    let authority = managed_miner_auth_address;
     let automation_address = automation_pda(authority).0;
     let board_address = board_pda().0;
     let round_address = round_pda(round_id).0;
@@ -70,7 +70,7 @@ pub fn ev_deploy(
         accounts: vec![
             AccountMeta::new(signer, true),
             AccountMeta::new(manager, false),
-            AccountMeta::new(managed_miner_auth_address.0, false),
+            AccountMeta::new(managed_miner_auth_address, false),
             AccountMeta::new(ore_miner_address.0, false),
             AccountMeta::new(FEE_COLLECTOR, false),
             AccountMeta::new(automation_address, false),
@@ -88,6 +88,7 @@ pub fn ev_deploy(
             min_bet: min_bet.to_le_bytes(),
             ore_value: ore_value.to_le_bytes(),
             slots_left: slots_left.to_le_bytes(),
+            bump,
         }.to_bytes(),
     }
 }
@@ -96,13 +97,14 @@ pub fn ev_deploy(
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MMCheckpoint {
     pub auth_id: [u8; 8],
+    pub bump: u8,
 }
 
 instruction!(Instructions, MMCheckpoint);
 
 pub fn mm_checkpoint(signer: Pubkey, manager: Pubkey, round_id: u64, auth_id: u64) -> Instruction {
-    let managed_miner_auth_address = managed_miner_auth_pda(manager, auth_id);
-    let ore_miner_address = miner_pda(managed_miner_auth_address.0);
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
     let treasury_address = ore_api::TREASURY_ADDRESS;
 
     let board_address = board_pda();
@@ -113,7 +115,7 @@ pub fn mm_checkpoint(signer: Pubkey, manager: Pubkey, round_id: u64, auth_id: u6
         accounts: vec![
             AccountMeta::new(signer, true),
             AccountMeta::new(manager, false),
-            AccountMeta::new(managed_miner_auth_address.0, false),
+            AccountMeta::new(managed_miner_auth_address, false),
             AccountMeta::new(ore_miner_address.0, false),
             AccountMeta::new(treasury_address, false),
             AccountMeta::new(board_address.0, false),
@@ -123,6 +125,7 @@ pub fn mm_checkpoint(signer: Pubkey, manager: Pubkey, round_id: u64, auth_id: u6
         ],
         data: MMCheckpoint {
             auth_id: auth_id.to_le_bytes(),
+            bump,
         }.to_bytes(),
     }
 }
@@ -131,26 +134,28 @@ pub fn mm_checkpoint(signer: Pubkey, manager: Pubkey, round_id: u64, auth_id: u6
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MMClaimSOL {
     pub auth_id: [u8; 8],
+    pub bump: u8,
 }
 
 instruction!(Instructions, MMClaimSOL);
 
 pub fn mm_claim_sol(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instruction {
-    let managed_miner_auth_address = managed_miner_auth_pda(manager, auth_id);
-    let ore_miner_address = miner_pda(managed_miner_auth_address.0);
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
 
     Instruction {
         program_id: crate::id(),
         accounts: vec![
             AccountMeta::new(signer, true),
             AccountMeta::new(manager, false),
-            AccountMeta::new(managed_miner_auth_address.0, false),
+            AccountMeta::new(managed_miner_auth_address, false),
             AccountMeta::new(ore_miner_address.0, false),
             AccountMeta::new_readonly(system_program::id(), false),
             AccountMeta::new_readonly(ore_api::id(), false),
         ],
         data: MMClaimSOL {
             auth_id: auth_id.to_le_bytes(),
+            bump,
         }.to_bytes(),
     }
 }
@@ -159,15 +164,17 @@ pub fn mm_claim_sol(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instructio
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MMClaimORE {
     pub auth_id: [u8; 8],
+    pub bump: u8,
 }
+
 instruction!(Instructions, MMClaimORE);
 
 pub fn mm_claim_ore(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instruction {
-    let managed_miner_auth_address = managed_miner_auth_pda(manager, auth_id);
-    let ore_miner_address = miner_pda(managed_miner_auth_address.0);
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
     let treasury_address = treasury_pda().0;
     let treasury_tokens_address = get_associated_token_address(&treasury_address, &ore_api::MINT_ADDRESS);
-    let recipient_address = get_associated_token_address(&managed_miner_auth_address.0, &ore_api::MINT_ADDRESS);
+    let recipient_address = get_associated_token_address(&managed_miner_auth_address, &ore_api::MINT_ADDRESS);
     let signer_recipient_address = get_associated_token_address(&signer, &ore_api::MINT_ADDRESS);
 
     Instruction {
@@ -175,7 +182,7 @@ pub fn mm_claim_ore(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instructio
         accounts: vec![
             AccountMeta::new(signer, true),
             AccountMeta::new(manager, false),
-            AccountMeta::new(managed_miner_auth_address.0, false),
+            AccountMeta::new(managed_miner_auth_address, false),
             AccountMeta::new(ore_miner_address.0, false),
             AccountMeta::new(ore_api::MINT_ADDRESS, false),
             AccountMeta::new(recipient_address, false),
@@ -189,6 +196,7 @@ pub fn mm_claim_ore(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instructio
         ],
         data: MMClaimORE {
             auth_id: auth_id.to_le_bytes(),
+            bump,
         }.to_bytes(),
     }
 }
