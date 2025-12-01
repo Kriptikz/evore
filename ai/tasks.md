@@ -4,24 +4,168 @@
 
 ## Active
 
-_None - Bot operational on mainnet!_
+### Task 25: Dashboard TUI
+**Priority:** 🔴 High
+
+Get the ratatui dashboard working with proper layout.
+
+**Layout (see plan.md for ASCII mockup):**
+1. **Header** - Round, slot, phase, blockhash
+2. **Bot Blocks** - One per bot with icon, config, status, rewards
+3. **Board Grid** - 5x5 with totals + bot deployment overlay
+4. **Transaction Log** - Scrollable with error details
+
+**Subtasks:**
+
+*Phase 1: Fix Existing*
+- [ ] Review existing code in `bot/src/tui.rs`
+- [ ] Fix any issues with current implementation
+- [ ] Understand ratatui layout system
+
+*Phase 2: Header Section*
+- [ ] Round ID, slot, end_slot, slots_left
+- [ ] Round phase (Active, Intermission, Waiting Reset, Waiting Start)
+- [ ] Blockhash (truncated), RPC name
+
+*Phase 3: Bot Blocks*
+- [ ] Unique emoji per bot (🤖 🎯 🎲 💎 🚀)
+- [ ] Auth ID, strategy, bankroll
+- [ ] Status with countdown
+- [ ] Last deployed round, claimable rewards
+
+*Phase 4: Board Grid*
+- [ ] 5x5 grid layout
+- [ ] Total deployed per square
+- [ ] Bot icons showing who deployed where
+- [ ] Color coding by amount
+
+*Phase 5: Transaction Log*
+- [ ] Scrollable log widget
+- [ ] Timestamp, bot icon, action, signature
+- [ ] **Error details for failed txs**
+
+*Phase 6: Error Inspection*
+- [ ] Fetch transaction error from RPC when status is failed
+- [ ] Parse error into human-readable message
+- [ ] Display: "EndSlotExceeded", "TooManySlotsLeft", "NoDeployments", etc.
+
+**Key ratatui concepts to learn:**
+- `Frame`, `Rect` for layout
+- `Block`, `Paragraph`, `Table` widgets
+- `Layout::default().constraints()` for splitting areas
+- `Stylize` trait for colors
 
 ---
 
 ## Up Next
 
-### Task 25: Frontend UI
-**Priority:** 🟡 Medium
+### Task 26: Multi-Bot Architecture Refactor
+**Priority:** 🔴 High
 
-- Dashboard for round monitoring
-- Manual deployment interface
-- Wallet connection
-- Claim interface
+Refactor bot to support multiple parallel bots with shared services and optimized RPC.
+
+See `plan.md` Phase 11 for full architecture diagrams and details.
+
+---
+
+#### Phase 11a: Shared Services
+
+**Task 26a: BoardTracker**
+- Websocket `accountSubscribe` to Board PDA
+- Provides: `round_id`, `start_slot`, `end_slot`
+- Detects new round started, round ended
+
+**Task 26b: RoundTracker**
+- Websocket `accountSubscribe` to current Round PDA
+- Provides: `deployed[25]`, `total_deployed`
+- Switches subscription when `round_id` changes
+
+**Task 26c: BlockhashCache**
+- Periodic RPC fetch (2s normally, 500ms when slots_left < 10)
+- Shared via Arc
+
+---
+
+#### Phase 11b: Transaction Pipeline
+
+**Task 26d: TxSender Task**
+- Reads from mpsc channel
+- Sends instantly (no blocking)
+- Queues signature for confirmation
+
+**Task 26e: TxConfirmer Task**
+- Collects pending signatures
+- Batch `getSignatureStatuses` (up to 256 per call)
+- **Fetch transaction error details for failed txs**
+- Parse errors into human-readable messages
+- Returns `TxResult { signature, status, error, slot_landed }` via oneshot
+
+---
+
+#### Phase 11c: Bot Refactor
+
+**Task 26f: BotConfig Struct**
+```rust
+struct BotConfig {
+    name: String,
+    auth_id: u64,
+    strategy: DeployStrategy,
+    slots_left: u64,
+    bankroll: u64,
+    strategy_params: StrategyParams,
+}
+```
+
+**Task 26g: BotState Struct**
+```rust
+struct BotState {
+    config: BotConfig,
+    state: BotPhase,  // Idle, Waiting, Deploying, Deployed, Checkpointing
+    last_deployed_round: Option<u64>,
+    last_checkpointed_round: Option<u64>,
+    pending_signatures: Vec<Signature>,
+}
+```
+
+**Task 26h: Refactor Bot to Use Shared Services**
+- Bot receives trackers via Arc
+- Bot sends txs via mpsc channel
+- Bot receives confirmations via oneshot
+
+---
+
+#### Phase 11d: Multi-Bot Coordination
+
+**Task 26i: RoundCoordinator**
+- Holds all bots + shared services
+- Main loop checks round lifecycle
+- Triggers checkpoint/claim when new round starts
+- Triggers deploy when slots_left threshold reached
+
+**Task 26j: Multi-Bot Spawning**
+- Load bot configs from file or CLI
+- Spawn each bot as async task
+- All share same services via Arc
+
+---
+
+**Subtasks Summary:**
+- [ ] 26a: BoardTracker (websocket)
+- [ ] 26b: RoundTracker (websocket, switches on round change)
+- [ ] 26c: BlockhashCache (periodic RPC)
+- [ ] 26d: TxSender task (instant send)
+- [ ] 26e: TxConfirmer task (batch status)
+- [ ] 26f: BotConfig struct
+- [ ] 26g: BotState struct + state machine
+- [ ] 26h: Refactor bot to use shared services
+- [ ] 26i: RoundCoordinator
+- [ ] 26j: Multi-bot spawning from config
 
 ---
 
 ## Backlog
 
+- Task 27: Frontend UI (web dashboard)
 - Add inline documentation for all public functions
 - Create client SDK documentation
 - Enable priority fee when needed

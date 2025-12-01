@@ -59,30 +59,6 @@
 ## Phase 7: Deployment Strategies
 > Priority: **HIGH** - Multiple strategy options for deploy instruction
 
-### Strategy Types
-
-1. **EV Strategy** (Current)
-   - Takes bankroll, min_bet, max_per_square, ore_value, slots_left
-   - Calculates optimal deployment using waterfill algorithm
-   - Deploys based on +EV squares
-
-2. **Percentage Strategy** (New)
-   - Args: `percentage`, `squares_count`, `bankroll`
-   - For each square 0 to (squares_count - 1):
-     - Calculate amount to own `percentage` of that square
-     - Formula: `amount = P * T / (1 - P)` where T = current square total
-     - Example: Square has 1 SOL, want 10% → deploy 0.111 SOL (0.111/1.111 = 10%)
-   - Continues until bankroll exhausted
-   - Same amounts can be batched in single CPI call
-   - No randomization - deploys in order
-
-3. **Manual Strategy** (New)
-   - User specifies exact squares and amounts
-   - Squares with same amount can be batched in single CPI call
-   - Full control over deployment
-
-### Implementation Tasks
-
 - [x] Create `DeployStrategy` enum (EV, Percentage, Manual)
 - [x] Implement percentage-based deployment processor
 - [x] Implement manual deployment processor
@@ -98,48 +74,8 @@
 - [x] Convert to Cargo workspace
 - [x] Create bot crate structure
 
-## Phase 9: Evore Bot ✅
-> Priority: **HIGH** - Automated deployment bot
-
-### Overview
-
-Bot for automated EV deployments with spam strategy to land transactions in final slots.
-
-### Configuration
-
-**.env file:**
-```
-RPC_URL=https://your-rpc.com
-WS_URL=wss://your-rpc.com
-KEYPAIR_PATH=/path/to/signer.json      # Signer keypair (pays fees, signs txs)
-MANAGER_PATH=/path/to/manager.json     # Manager keypair (separate account)
-```
-
-**Key distinction:**
-- **Signer** - Pays transaction fees, must have SOL balance
-- **Manager** - Separate keypair, owns the Manager account and controls managed miner auths
-
-### Deployment Strategy (EV + Spam)
-
-1. **Timing**: Deploy at configurable slots_left, starts sending 50ms before target slot
-2. **Spam Mode**: Send transactions every 100ms until end_slot reached
-3. **Fire-and-forget**: Skip preflight, 0 retries - we handle manually
-4. **Confirm later**: Check which transactions landed after spam window
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `status` | Show current round, slots remaining, deployments |
-| `info` | Display managed_miner_auth PDA for website lookup |
-| `deploy` | Single EV deployment (spam mode at round end) |
-| `run` | Continuous loop: checkpoint → claim SOL → deploy → repeat |
-| `checkpoint` | Manual checkpoint (auto-detects round from miner) |
-| `claim-sol` | Manual SOL claim |
-| `create-manager` | Create Manager account |
-| `dashboard` | Live TUI dashboard |
-
-### Implementation Tasks
+## Phase 9: Evore Bot v1 ✅
+> Priority: **HIGH** - Basic automated deployment bot
 
 - [x] Project setup (Cargo workspace, .env support)
 - [x] RPC client (skip preflight, 0 retries)
@@ -150,13 +86,433 @@ MANAGER_PATH=/path/to/manager.json     # Manager keypair (separate account)
 - [x] Continuous deploy loop with auto checkpoint & claim SOL
 - [x] CLI with subcommands
 - [x] Manager keypair loading (separate from signer)
-- [x] Balance display (signer, managed_miner_auth, miner rewards)
-- [x] Round lifecycle handling (intermission, reset waiting, MAX end_slot)
-- [x] Auto-detect checkpoint round from miner account
-- [x] Claim SOL only if rewards_sol > 0
+- [x] Balance display and round lifecycle handling
 - [x] Priority fee code ready (disabled for now)
 
-## Phase 10: Frontend UI
+## Phase 10: Dashboard TUI
+> Priority: **HIGH** - Live monitoring dashboard
+
+### Overview
+Ratatui-based terminal UI for real-time monitoring of rounds, deployments, and bot status.
+
+### Layout Design
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                              HEADER                                      │
+│  Round: 1234  │  Slot: 345678901 / 345679000  │  Slots Left: 99         │
+│  Phase: Active  │  Blockhash: 7xK3...  │  RPC: helius                    │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────────┐  ┌─────────────────────────────┐
+│  🤖 Bot 1 (auth_id=1)       │  │  🎯 Bot 2 (auth_id=2)       │
+│  Strategy: EV               │  │  Strategy: Percentage       │
+│  Bankroll: 0.5 SOL          │  │  Bankroll: 1.0 SOL          │
+│  Status: ⏳ Waiting (87)    │  │  Status: ✅ Deployed        │
+│  Last Deploy: Round 1233    │  │  Last Deploy: Round 1234    │
+│  Rewards: 0.023 SOL         │  │  Rewards: 0.041 SOL         │
+└─────────────────────────────┘  └─────────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                            BOARD (5x5)                                   │
+├─────────────┬─────────────┬─────────────┬─────────────┬─────────────────┤
+│  0: 1.234   │  1: 0.567   │  2: 2.100   │  3: 0.890   │  4: 1.456       │
+│  🤖 0.05    │             │  🎯 0.10    │             │  🤖🎯 0.15      │
+├─────────────┼─────────────┼─────────────┼─────────────┼─────────────────┤
+│  5: 0.321   │  6: 1.789   │  ...        │             │                 │
+│             │  🤖 0.08    │             │             │                 │
+├─────────────┼─────────────┼─────────────┼─────────────┼─────────────────┤
+│             │             │             │             │                 │
+└─────────────┴─────────────┴─────────────┴─────────────┴─────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│                         TRANSACTION LOG                                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  [12:34:56] 🤖 SENT  5xKj3...  slot=345678950                           │
+│  [12:34:56] 🎯 SENT  7mNp2...  slot=345678950                           │
+│  [12:34:57] 🤖 ✅    5xKj3...  CONFIRMED                                │
+│  [12:34:57] 🎯 ❌    7mNp2...  EndSlotExceeded (slot was 345679001)     │
+│  [12:34:58] 🤖 ❌    9qRs1...  NoDeployments (all squares -EV)          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Features
+
+**Header Section:**
+- [ ] Round ID, current slot, end slot, slots remaining
+- [ ] Round phase (Active, Intermission, Waiting Reset, Waiting Start)
+- [ ] Current blockhash (truncated)
+- [ ] RPC endpoint name
+
+**Bot Blocks:**
+- [ ] Unique emoji/icon per bot (🤖 🎯 🎲 💎 🚀 etc.)
+- [ ] Auth ID and strategy type
+- [ ] Bankroll amount
+- [ ] Current status with countdown (Waiting, Deploying, Deployed, Checkpointing)
+- [ ] Last deployed round
+- [ ] Claimable rewards (SOL, ORE)
+
+**Board Section:**
+- [ ] 5x5 grid showing all 25 squares
+- [ ] Total deployed per square (from Round account)
+- [ ] Bot icons + amounts showing which bots deployed where
+- [ ] Color coding (high deployment = brighter)
+
+**Transaction Log:**
+- [ ] Scrollable log of recent transactions
+- [ ] Shows: timestamp, bot icon, action (SENT/CONFIRMED/FAILED)
+- [ ] Signature (truncated)
+- [ ] **Error details for failed txs** (fetched from RPC)
+
+### Transaction Error Inspection
+
+When a transaction fails, fetch the actual error:
+
+```rust
+// After sending, queue signature for confirmation
+// TxConfirmer checks status and fetches error if failed
+
+struct TxResult {
+    signature: Signature,
+    status: TxStatus,  // Confirmed, Failed, Timeout
+    error: Option<TransactionError>,  // Actual error from chain
+    slot_landed: Option<u64>,  // What slot it landed in (if any)
+}
+
+// Common errors to display:
+// - "EndSlotExceeded" - Transaction landed after round ended
+// - "TooManySlotsLeft" - Transaction landed too early  
+// - "NoDeployments" - EV calculation found no profitable squares
+// - "InsufficientFunds" - Not enough SOL
+// - "Custom(0x1)" -> "NotAuthorized"
+// - etc.
+```
+
+### Implementation Tasks
+- [ ] Fix and verify existing dashboard code
+- [ ] Implement header section with live updates
+- [ ] Implement bot blocks (dynamic based on config)
+- [ ] Implement 5x5 board grid with deployment overlay
+- [ ] Implement transaction log with scrolling
+- [ ] Add error fetching for failed transactions
+- [ ] Parse and display human-readable error messages
+- [ ] Add keyboard shortcuts (q=quit, tab=switch focus, etc.)
+
+## Phase 11: Multi-Bot Architecture
+> Priority: **HIGH** - Parallel bots with optimized RPC
+
+### Overview
+Refactor to support multiple bots running in parallel with different auth_ids and strategies, while minimizing RPC calls.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Shared Services                              │
+├──────────────┬──────────────┬───────────────┬───────────────────────┤
+│ SlotTracker  │ BoardTracker │ RoundTracker  │ BlockhashCache        │
+│ (WS slot)    │ (WS account) │ (WS account)  │ (periodic RPC)        │
+└──────────────┴──────────────┴───────────────┴───────────────────────┘
+                                    │
+              ┌─────────────────────┼─────────────────────┐
+              ▼                     ▼                     ▼
+        ┌──────────┐          ┌──────────┐          ┌──────────┐
+        │  Bot 1   │          │  Bot 2   │          │  Bot 3   │
+        │ auth_id=1│          │ auth_id=2│          │ auth_id=3│
+        │ EV strat │          │ % strat  │          │ Manual   │
+        │ state:   │          │ state:   │          │ state:   │
+        │ Waiting  │          │ Deployed │          │ Waiting  │
+        └────┬─────┘          └────┬─────┘          └────┬─────┘
+             │                     │                     │
+             └─────────────────────┼─────────────────────┘
+                                   ▼
+                          ┌─────────────────┐
+                          │   TX Channel    │
+                          │ (mpsc sender)   │
+                          └────────┬────────┘
+                                   ▼
+                          ┌─────────────────┐
+                          │   TX Sender     │◄─── Reads instantly, no blocking
+                          │   (async task)  │
+                          └────────┬────────┘
+                                   ▼
+                          ┌─────────────────┐
+                          │  TX Confirmer   │◄─── Batch getSignatureStatuses
+                          │  (async task)   │     Returns results via oneshot
+                          └─────────────────┘
+```
+
+---
+
+### Shared Services (Detail)
+
+#### 1. SlotTracker (existing)
+- Websocket subscription to slot updates
+- `get_slot() -> u64`
+- All bots read from same Arc<SlotTracker>
+
+#### 2. BoardTracker (new)
+- Websocket `accountSubscribe` to Board PDA
+- Provides: `round_id`, `start_slot`, `end_slot`
+- Detects: new round started, round ended
+- Events: `BoardUpdated { round_id, start_slot, end_slot }`
+
+#### 3. RoundTracker (new)  
+- Websocket `accountSubscribe` to current Round PDA
+- Provides: `deployed[25]`, `total_deployed`, `motherlode`
+- Updates whenever anyone deploys
+- Switches subscription when `round_id` changes
+
+#### 4. BlockhashCache (new)
+- Periodic RPC fetch (every 2 seconds normally)
+- Fast refresh in deploy window (every 500ms when slots_left < 10)
+- `get_blockhash() -> Hash`
+
+---
+
+### BotConfig Struct
+
+```rust
+struct BotConfig {
+    /// Unique name for logging
+    name: String,
+    
+    /// Auth ID for this bot's managed miner
+    auth_id: u64,
+    
+    /// Deployment strategy
+    strategy: DeployStrategy,
+    
+    /// When to start deploying (slots before end)
+    slots_left: u64,
+    
+    /// Bankroll for this bot
+    bankroll: u64,
+    
+    /// Strategy-specific params
+    strategy_params: StrategyParams,
+}
+
+enum StrategyParams {
+    EV { max_per_square: u64, min_bet: u64, ore_value: u64 },
+    Percentage { percentage: u64, squares_count: u64 },
+    Manual { amounts: [u64; 25] },
+}
+```
+
+---
+
+### Bot State Machine
+
+Each bot maintains its own state for the current round:
+
+```
+                    ┌─────────────────┐
+                    │   Idle          │◄─── Round not active (end_slot=MAX)
+                    └────────┬────────┘
+                             │ Round started (end_slot set)
+                             ▼
+                    ┌─────────────────┐
+                    │   Waiting       │◄─── Waiting for deploy window
+                    │                 │     (slots_left > threshold)
+                    └────────┬────────┘
+                             │ Deploy window reached
+                             ▼
+                    ┌─────────────────┐
+                    │   Deploying     │◄─── Spamming transactions
+                    │                 │     (slots_left <= threshold)
+                    └────────┬────────┘
+                             │ Round ended (slot >= end_slot)
+                             ▼
+                    ┌─────────────────┐
+                    │   Deployed      │◄─── Waiting for next round
+                    │                 │     (need to checkpoint this round)
+                    └────────┬────────┘
+                             │ New round started
+                             ▼
+                    ┌─────────────────┐
+                    │  Checkpointing  │◄─── Checkpoint previous round
+                    │                 │     Claim rewards if any
+                    └────────┬────────┘
+                             │ Done
+                             ▼
+                         (back to Waiting)
+```
+
+**Per-bot tracking:**
+```rust
+struct BotState {
+    config: BotConfig,
+    current_round_id: u64,
+    state: BotPhase,  // Idle, Waiting, Deploying, Deployed, Checkpointing
+    last_deployed_round: Option<u64>,
+    last_checkpointed_round: Option<u64>,
+    pending_signatures: Vec<Signature>,
+}
+```
+
+---
+
+### Round Lifecycle Coordination
+
+**RoundCoordinator** - Orchestrates all bots based on shared state:
+
+```rust
+struct RoundCoordinator {
+    bots: Vec<Bot>,
+    slot_tracker: Arc<SlotTracker>,
+    board_tracker: Arc<BoardTracker>,
+    round_tracker: Arc<RoundTracker>,
+    blockhash_cache: Arc<BlockhashCache>,
+    tx_sender: mpsc::Sender<TxRequest>,
+}
+```
+
+**Main loop logic:**
+```
+loop {
+    let slot = slot_tracker.get_slot();
+    let board = board_tracker.get_board();
+    
+    // Handle round lifecycle states
+    if board.end_slot == u64::MAX {
+        // All bots: Idle state
+        continue;
+    }
+    
+    if slot >= board.end_slot {
+        // Round ended - all bots in Deployed state
+        // Wait for new round
+        continue;
+    }
+    
+    let slots_left = board.end_slot - slot;
+    
+    // New round detected?
+    if board.round_id > last_round_id {
+        // Trigger checkpointing for bots that deployed last round
+        for bot in &mut bots {
+            if bot.needs_checkpoint() {
+                bot.start_checkpoint();
+            }
+        }
+    }
+    
+    // For each bot, check if it should deploy
+    for bot in &mut bots {
+        if bot.state == Waiting && slots_left <= bot.config.slots_left {
+            bot.start_deploying(&round_tracker, &tx_sender);
+        }
+    }
+}
+```
+
+---
+
+### Transaction Pipeline (Detail)
+
+#### TxRequest
+```rust
+struct TxRequest {
+    transaction: Transaction,
+    response_tx: oneshot::Sender<TxResult>,
+}
+
+struct TxResult {
+    signature: Signature,
+    confirmed: bool,
+    error: Option<String>,
+}
+```
+
+#### TxSender Task
+```rust
+async fn tx_sender_task(
+    mut rx: mpsc::Receiver<TxRequest>,
+    rpc: RpcClient,
+    pending_tx: mpsc::Sender<PendingSig>,
+) {
+    while let Some(req) = rx.recv().await {
+        // Send immediately, no waiting
+        match rpc.send_transaction_no_wait(&req.transaction) {
+            Ok(sig) => {
+                // Queue for confirmation
+                pending_tx.send(PendingSig { sig, response_tx: req.response_tx });
+            }
+            Err(e) => {
+                req.response_tx.send(TxResult { error: Some(e) });
+            }
+        }
+    }
+}
+```
+
+#### TxConfirmer Task
+```rust
+async fn tx_confirmer_task(
+    mut rx: mpsc::Receiver<PendingSig>,
+    rpc: RpcClient,
+) {
+    let mut pending: Vec<PendingSig> = vec![];
+    
+    loop {
+        // Collect pending signatures
+        while let Ok(sig) = rx.try_recv() {
+            pending.push(sig);
+        }
+        
+        if pending.is_empty() {
+            sleep(100ms).await;
+            continue;
+        }
+        
+        // Batch check status (up to 256 signatures per call)
+        let sigs: Vec<Signature> = pending.iter().map(|p| p.sig).collect();
+        let statuses = rpc.get_signature_statuses(&sigs);
+        
+        // Send results back
+        for (i, status) in statuses.iter().enumerate() {
+            if status.is_some() {
+                let p = pending.remove(i);
+                p.response_tx.send(TxResult { confirmed: true, ... });
+            }
+        }
+        
+        sleep(500ms).await;  // Check every 500ms
+    }
+}
+```
+
+---
+
+### Implementation Tasks (Revised)
+
+**Phase 11a: Shared Services**
+- [ ] Create `BoardTracker` (websocket accountSubscribe to Board PDA)
+- [ ] Create `RoundTracker` (websocket accountSubscribe to Round PDA, switches on round change)
+- [ ] Create `BlockhashCache` (periodic RPC, fast refresh in deploy window)
+- [ ] Wrap all trackers in Arc for sharing
+
+**Phase 11b: Transaction Pipeline**
+- [ ] Define `TxRequest`, `TxResult`, `PendingSig` structs
+- [ ] Create `TxSender` async task
+- [ ] Create `TxConfirmer` async task with batch status checking
+- [ ] Create mpsc channels for pipeline
+
+**Phase 11c: Bot Refactor**
+- [ ] Define `BotConfig` struct
+- [ ] Define `BotState` struct with state machine
+- [ ] Refactor single bot to use shared services
+- [ ] Bot receives trackers via Arc, sends txs via channel
+
+**Phase 11d: Multi-Bot Coordination**
+- [ ] Create `RoundCoordinator` struct
+- [ ] Implement round lifecycle detection (new round, round end)
+- [ ] Implement per-bot checkpoint/claim scheduling
+- [ ] Spawn multiple bots from config file/CLI
+- [ ] Coordinate deploy timing across bots
+
+## Phase 12: Frontend UI
 > Priority: **LOW** - Future
 
 - [ ] Dashboard for round monitoring
@@ -178,15 +534,17 @@ MANAGER_PATH=/path/to/manager.json     # Manager keypair (separate account)
 | Phase 6: Documentation | 🟡 In Progress | 67% (4/6) |
 | Phase 7: Strategies | ✅ Complete | 100% (7/7) |
 | Phase 8: Mainnet Deployment | ✅ Complete | 100% (3/3) |
-| Phase 9: Evore Bot | ✅ Complete | 100% (13/13) |
-| Phase 10: Frontend UI | 🔴 Not Started | 0% |
+| Phase 9: Evore Bot v1 | ✅ Complete | 100% (11/11) |
+| Phase 10: Dashboard TUI | 🟡 In Progress | 0% (0/6) |
+| Phase 11: Multi-Bot Architecture | 🔴 Not Started | 0% (0/9) |
+| Phase 12: Frontend UI | 🔴 Not Started | 0% |
 
 ---
 
 ## Notes
 
-- Phases 1-9 complete! Program deployed to mainnet, bot operational.
+- Phases 1-9 complete! Program deployed to mainnet, basic bot operational.
 - Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
 - 27+ unit tests with comprehensive coverage
 - Workspace structure: `program/` (Solana program), `bot/` (deployment bot)
-- Bot tested on mainnet with successful deployments
+- Next: Dashboard TUI, then multi-bot architecture refactor
