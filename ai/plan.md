@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-12-01
+> Last Updated: 2025-12-01 (updated with shared constants, round lifecycle, config format, accountSubscribe notes)
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
@@ -93,7 +93,9 @@
 > Priority: **HIGH** - Live monitoring dashboard
 
 ### Overview
-Ratatui-based terminal UI for real-time monitoring of rounds, deployments, and bot status.
+Ratatui-based terminal UI for real-time **monitoring** of rounds, deployments, and bot status.
+
+**Important:** TUI is monitoring-only. Bots deploy automatically based on config file parameters. TUI does not control deployments - it displays real-time state from shared services.
 
 ### Layout Design
 
@@ -298,18 +300,22 @@ Refactor to support multiple bots running in parallel with different auth_ids an
 - Websocket subscription to slot updates
 - `get_slot() -> u64`
 - All bots read from same Arc<SlotTracker>
+- **Note:** Currently uses `std::thread::spawn` - consider migrating to `tokio::spawn` for consistency (not blocking, current approach works)
 
 #### 2. BoardTracker (new)
 - Websocket `accountSubscribe` to Board PDA
 - Provides: `round_id`, `start_slot`, `end_slot`
 - Detects: new round started, round ended
 - Events: `BoardUpdated { round_id, start_slot, end_slot }`
+- **Note:** `accountSubscribe` returns account data in base64 - decode directly, no extra RPC call needed
+- **Note:** Occasional stale data from RPC forks possible - monitor but don't over-engineer initially
 
 #### 3. RoundTracker (new)  
 - Websocket `accountSubscribe` to current Round PDA
 - Provides: `deployed[25]`, `total_deployed`, `motherlode`
 - Updates whenever anyone deploys
 - Switches subscription when `round_id` changes
+- **Note:** Uses same base64 decoding as BoardTracker
 
 #### 4. BlockhashCache (new)
 - Periodic RPC fetch (every 2 seconds normally)
@@ -339,6 +345,10 @@ struct BotConfig {
     
     /// Strategy-specific params
     strategy_params: StrategyParams,
+    
+    /// Per-bot keypair paths (optional, falls back to defaults)
+    signer_path: Option<String>,
+    manager_path: Option<String>,
 }
 
 enum StrategyParams {
@@ -347,6 +357,64 @@ enum StrategyParams {
     Manual { amounts: [u64; 25] },
 }
 ```
+
+---
+
+### Config File Format (TOML)
+
+`.env` contains only RPC/WS URLs. Bot configuration in separate TOML file.
+
+```toml
+# bot/config.toml
+
+# Default keypairs (used if bot doesn't specify its own)
+[defaults]
+signer_path = "~/.config/solana/id.json"
+manager_path = "./manager.json"
+
+[[bots]]
+name = "ev-bot-1"
+auth_id = 1
+strategy = "EV"
+slots_left = 2
+bankroll = 100_000_000
+# Uses default signer and manager
+
+[bots.strategy_params]
+max_per_square = 100_000_000
+min_bet = 10_000
+ore_value = 800_000_000
+
+[[bots]]
+name = "pct-bot-1"
+auth_id = 2
+strategy = "Percentage"
+slots_left = 2
+bankroll = 50_000_000
+# Override with different keypairs
+signer_path = "./wallets/signer2.json"
+manager_path = "./wallets/manager2.json"
+
+[bots.strategy_params]
+percentage = 1000  # 10% in basis points
+squares_count = 5
+
+[[bots]]
+name = "manual-bot-1"
+auth_id = 1  # Same auth_id but different manager = different miner
+strategy = "Manual"
+slots_left = 1
+manager_path = "./wallets/manager3.json"
+# Uses default signer (fee payer can be shared)
+
+[bots.strategy_params]
+amounts = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 50000000, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+```
+
+**Keypair Resolution:**
+1. Bot-level `signer_path` / `manager_path` if specified
+2. Fall back to `[defaults]` section
+3. Error if neither exists
 
 ---
 
@@ -518,12 +586,16 @@ async fn tx_confirmer_task(
         let sigs: Vec<Signature> = pending.iter().map(|p| p.sig).collect();
         let statuses = rpc.get_signature_statuses(&sigs);
         
-        // Send results back
-        for (i, status) in statuses.iter().enumerate() {
-            if status.is_some() {
-                let p = pending.remove(i);
-                p.response_tx.send(TxResult { confirmed: true, ... });
-            }
+        // Collect confirmed indices first, then remove in reverse order
+        // (removing by index during forward iteration causes index shift bugs)
+        let confirmed: Vec<usize> = statuses.iter()
+            .enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|_| i))
+            .collect();
+        
+        for i in confirmed.into_iter().rev() {
+            let p = pending.remove(i);
+            p.response_tx.send(TxResult { confirmed: true, ... });
         }
         
         sleep(500ms).await;  // Check every 500ms
@@ -559,6 +631,7 @@ async fn tx_confirmer_task(
 - [ ] Implement per-bot checkpoint/claim scheduling
 - [ ] Spawn multiple bots from config file/CLI
 - [ ] Coordinate deploy timing across bots
+- [ ] Add graceful shutdown (`Ctrl+C` handler) - cleanup websockets, cancel pending txs
 
 ## Phase 12: Frontend UI
 > Priority: **LOW** - Future
@@ -586,6 +659,36 @@ async fn tx_confirmer_task(
 | Phase 10: Dashboard TUI | 🟡 In Progress | 0% (0/6) |
 | Phase 11: Multi-Bot Architecture | 🔴 Not Started | 0% (0/9) |
 | Phase 12: Frontend UI | 🔴 Not Started | 0% |
+
+---
+
+## Reference: Shared Constants
+
+| Constant | Value | Usage |
+|----------|-------|-------|
+| `INTERMISSION_SLOTS` | 35 | Slots between round end and reset |
+| `CHECKPOINT_FEE` | 10,000 lamports | Required by ORE v3 for checkpoint |
+| `MIN_DEPLOY_FEE` | 10,000 lamports | Minimum fee for deploy instruction |
+| CU Limit (Deploy) | 1,400,000 | Compute budget for deploy tx |
+| Program ID | `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb` | Evore program |
+
+---
+
+## Reference: Round Lifecycle States
+
+```
+State 1: end_slot == u64::MAX
+  → Round reset complete, waiting for first deployer to start round
+
+State 2: current_slot < end_slot
+  → Round active, deployments allowed
+
+State 3: current_slot >= end_slot && (current_slot - end_slot) < 35
+  → Intermission period, no deployments, waiting for reset
+
+State 4: current_slot >= end_slot + 35
+  → Ready for reset, anyone can call reset instruction
+```
 
 ---
 

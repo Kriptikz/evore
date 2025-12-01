@@ -12,6 +12,23 @@ use tokio::time::sleep;
 use crate::client::EvoreClient;
 use crate::slot_tracker::SlotTracker;
 
+/// Result of a transaction send attempt
+#[derive(Debug, Clone)]
+pub struct TxSendResult {
+    pub signature: Signature,
+    pub slot: u64,
+    pub confirmed: bool,
+    pub error: Option<String>,
+}
+
+/// Deploy result for TUI
+#[derive(Debug)]
+pub struct DeployResult {
+    pub success: bool,
+    pub transactions: Vec<TxSendResult>,
+    pub error: Option<String>,
+}
+
 /// Parameters for EV deployment
 #[derive(Debug, Clone)]
 pub struct EvDeployParams {
@@ -322,6 +339,128 @@ pub async fn single_deploy(
     println!("\n📊 Result: {}/{} transactions confirmed", confirmed, signatures.len());
     
     Ok(signatures)
+}
+
+/// Quiet deploy for TUI - no println!, returns detailed results
+pub async fn deploy_quiet(
+    client: &EvoreClient,
+    slot_tracker: &SlotTracker,
+    signer: &Keypair,
+    manager: &Pubkey,
+    auth_id: u64,
+    params: &EvDeployParams,
+) -> DeployResult {
+    let board = match client.get_board() {
+        Ok(b) => b,
+        Err(e) => return DeployResult {
+            success: false,
+            transactions: vec![],
+            error: Some(format!("Failed to get board: {}", e)),
+        },
+    };
+    
+    let current_slot = slot_tracker.get_slot();
+    
+    // Check round state
+    if board.end_slot == u64::MAX {
+        return DeployResult {
+            success: false,
+            transactions: vec![],
+            error: Some("Round not started (end_slot=MAX)".to_string()),
+        };
+    }
+    
+    if current_slot >= board.end_slot {
+        return DeployResult {
+            success: false,
+            transactions: vec![],
+            error: Some("Round ended".to_string()),
+        };
+    }
+    
+    // Determine send interval based on slots_left
+    let send_interval_ms = if params.slots_left > 10 {
+        0 // Single send
+    } else if params.slots_left >= 5 {
+        400 // Medium urgency
+    } else {
+        100 // High urgency
+    };
+    
+    let mut transactions: Vec<TxSendResult> = Vec::new();
+    
+    // Send loop
+    loop {
+        let current = slot_tracker.get_slot();
+        
+        // Stop if we've reached end slot
+        if current >= board.end_slot {
+            break;
+        }
+        
+        // Get fresh blockhash
+        let blockhash = slot_tracker.get_blockhash();
+        if blockhash == Hash::default() {
+            sleep(Duration::from_millis(10)).await;
+            continue;
+        }
+        
+        let tx = build_ev_deploy_tx(
+            signer,
+            manager,
+            auth_id,
+            board.round_id,
+            params,
+            blockhash,
+        );
+        
+        match client.send_transaction_no_wait(&tx) {
+            Ok(sig) => {
+                transactions.push(TxSendResult {
+                    signature: sig,
+                    slot: current,
+                    confirmed: false,
+                    error: None,
+                });
+            }
+            Err(e) => {
+                transactions.push(TxSendResult {
+                    signature: Signature::default(),
+                    slot: current,
+                    confirmed: false,
+                    error: Some(e.to_string()),
+                });
+            }
+        }
+        
+        // Single send mode - break after first tx
+        if send_interval_ms == 0 {
+            break;
+        }
+        
+        sleep(Duration::from_millis(send_interval_ms)).await;
+    }
+    
+    // Wait and check confirmations
+    if !transactions.is_empty() {
+        sleep(Duration::from_secs(3)).await;
+        
+        for tx_result in &mut transactions {
+            if tx_result.signature != Signature::default() {
+                if client.confirm_transaction(&tx_result.signature).unwrap_or(false) {
+                    tx_result.confirmed = true;
+                }
+            }
+        }
+    }
+    
+    let any_confirmed = transactions.iter().any(|t| t.confirmed);
+    
+    DeployResult {
+        success: any_confirmed,
+        transactions,
+        error: None,
+    }
 }
 
 /// Continuous deployment loop using websocket slot tracking

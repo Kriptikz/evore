@@ -1,6 +1,6 @@
 # Current Tasks
 
-> Last Updated: 2025-12-01
+> Last Updated: 2025-12-01 (updated Task 25 monitoring-only, Task 26 subtasks, backlog)
 
 ## Active
 
@@ -8,6 +8,8 @@
 **Priority:** 🔴 High
 
 Get the ratatui dashboard working with proper layout.
+
+**Important:** TUI is **monitoring-only**. Bots deploy automatically based on config file parameters. TUI does not control deployments - it displays real-time state from shared services.
 
 **Layout (see plan.md for ASCII mockup):**
 1. **Header** - Round, slot, phase, blockhash
@@ -185,25 +187,30 @@ struct BotState {
 ---
 
 **Subtasks Summary:**
-- [ ] 26a: BoardTracker (websocket)
+- [ ] 26a: BoardTracker (websocket, base64 decode account data)
 - [ ] 26b: RoundTracker (websocket, switches on round change)
 - [ ] 26c: BlockhashCache (periodic RPC)
 - [ ] 26d: TxSender task (instant send)
 - [ ] 26e: TxConfirmer task (batch status)
-- [ ] 26f: BotConfig struct
+- [ ] 26f: BotConfig struct (with per-bot signer/manager paths)
 - [ ] 26g: BotState struct + state machine
 - [ ] 26h: Refactor bot to use shared services
 - [ ] 26i: RoundCoordinator
 - [ ] 26j: Multi-bot spawning from config
+- [ ] 26k: Config file parsing (TOML format, see plan.md)
+- [ ] 26l: Graceful shutdown (`Ctrl+C` handler)
+
+**Note:** Consider migrating `SlotTracker` from `std::thread::spawn` to `tokio::spawn` for consistency with async architecture (not blocking, current approach works).
 
 ---
 
 ## Backlog
 
 - Task 27: Frontend UI (web dashboard)
+- Add `ClaimOre` CLI command (instruction exists in `mm_claim_ore`, command missing in bot)
 - Add inline documentation for all public functions
 - Create client SDK documentation
-- Enable priority fee when needed
+- Enable priority fee when needed (add `--priority-fee` CLI flag)
 
 ---
 

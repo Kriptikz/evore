@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
 use solana_sdk::{
@@ -6,16 +6,19 @@ use solana_sdk::{
     signature::{read_keypair_file, Keypair},
     signer::Signer,
 };
+use tokio::sync::mpsc;
 
+mod bot_task;
 mod client;
 mod deploy;
 mod slot_tracker;
 mod tui;
 
+use bot_task::{run_bot_task, BotConfig};
 use client::{print_managed_miner_info, EvoreClient};
 use deploy::{continuous_deploy, single_deploy, EvDeployParams};
 use slot_tracker::{http_to_ws_url, SlotTracker};
-use tui::{App, DeployStatus, EventType};
+use tui::{App, BotState, TuiUpdate};
 
 #[derive(Parser, Debug)]
 #[command(name = "evore-bot")]
@@ -130,13 +133,33 @@ enum Commands {
     
     /// Live TUI dashboard with real-time updates
     Dashboard {
-        /// Bankroll in lamports (for EV calculation)
-        #[arg(long, default_value = "100000000")]
+        /// Bankroll in lamports
+        #[arg(long)]
         bankroll: u64,
+        
+        /// Max per square in lamports
+        #[arg(long, default_value = "100000000")]
+        max_per_square: u64,
+        
+        /// Min bet in lamports
+        #[arg(long, default_value = "10000")]
+        min_bet: u64,
+        
+        /// ORE value in lamports (for EV calculation)
+        #[arg(long, default_value = "800000000")]
+        ore_value: u64,
+        
+        /// Slots left threshold for deployment
+        #[arg(long, default_value = "2")]
+        slots_left: u64,
         
         /// Auth ID
         #[arg(long, default_value = "1")]
         auth_id: u64,
+        
+        /// Deploy strategy (EV, Percentage, Manual)
+        #[arg(long, default_value = "EV")]
+        strategy: String,
     },
 }
 
@@ -439,18 +462,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         
-        Commands::Dashboard { bankroll, auth_id } => {
+        Commands::Dashboard { bankroll, max_per_square, min_bet, ore_value, slots_left, auth_id, strategy } => {
             let signer = load_signer_keypair(args.keypair.as_ref())?;
             let manager_keypair = load_manager_keypair(args.manager_path.as_ref())?;
             let manager = manager_keypair.pubkey();
             
+            let params = EvDeployParams {
+                bankroll: *bankroll,
+                max_per_square: *max_per_square,
+                min_bet: *min_bet,
+                ore_value: *ore_value,
+                slots_left: *slots_left,
+            };
+            
             run_dashboard(
                 &args.rpc_url,
                 get_ws_url(&args),
-                signer.pubkey(),
+                &signer,
                 manager,
                 *auth_id,
-                *bankroll,
+                params,
+                strategy.clone(),
                 client,
             ).await?;
         }
@@ -462,10 +494,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_dashboard(
     rpc_url: &str,
     ws_url: String,
-    signer: Pubkey,
+    signer: &Keypair,
     manager: Pubkey,
     auth_id: u64,
-    bankroll: u64,
+    params: EvDeployParams,
+    strategy: String,
     client: EvoreClient,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Set panic hook to restore terminal on panic
@@ -479,36 +512,59 @@ async fn run_dashboard(
     let mut terminal = tui::init()?;
     
     // Create app state
-    let mut app = App::new(rpc_url.to_string(), signer, manager, auth_id);
-    app.bankroll = bankroll;
-    app.log("Dashboard started", EventType::Info);
+    let mut app = App::new(rpc_url);
+    
+    // Create bot state
+    let bot_name = format!("bot-{}", auth_id);
+    let bot = BotState::new(
+        bot_name.clone(),
+        auth_id,
+        strategy,
+        params.bankroll,
+        params.slots_left,
+        signer.pubkey(),
+        manager,
+        params.max_per_square,
+        params.min_bet,
+        params.ore_value,
+    );
+    app.add_bot(bot);
     
     // Start slot tracker
-    let slot_tracker = SlotTracker::new(&ws_url);
+    let slot_tracker = Arc::new(SlotTracker::new(&ws_url));
     slot_tracker.start_slot_subscription()?;
     slot_tracker.start_blockhash_subscription(rpc_url)?;
-    app.log(format!("Connected to {}", ws_url), EventType::Success);
     
-    // Initial fetch
-    match client.get_board() {
-        Ok(board) => {
-            app.log(format!("Round {} loaded", board.round_id), EventType::Info);
-            let round_id = board.round_id;
-            app.board = Some(board);
-            
-            if let Ok(round) = client.get_round(round_id) {
-                app.round = Some(round);
-            }
-        }
-        Err(e) => {
-            app.log(format!("Failed to get board: {}", e), EventType::Error);
-        }
-    }
+    // Wait for initial connection
+    tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
     
-    let mut last_update = std::time::Instant::now();
+    // Wrap client and signer in Arc for sharing with bot task
+    let client = Arc::new(client);
+    let signer_bytes = signer.to_bytes();
+    let signer = Arc::new(Keypair::try_from(signer_bytes.as_slice())?);
     
-    // Main loop with error handling
-    let result = run_dashboard_loop(&mut terminal, &mut app, &client, &slot_tracker, &mut last_update);
+    // Create channel for bot → TUI updates
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<TuiUpdate>();
+    
+    // Create bot config
+    let bot_config = BotConfig {
+        name: bot_name,
+        bot_index: 0,
+        auth_id,
+        manager,
+        params,
+    };
+    
+    // Spawn bot task
+    let bot_client = client.clone();
+    let bot_slot_tracker = slot_tracker.clone();
+    let bot_signer = signer.clone();
+    tokio::spawn(async move {
+        run_bot_task(bot_config, bot_client, bot_slot_tracker, bot_signer, update_tx).await;
+    });
+    
+    // Main TUI loop - just render and poll updates
+    let result = run_tui_loop(&mut terminal, &mut app, &mut update_rx, &slot_tracker).await;
     
     // Always restore terminal
     tui::restore()?;
@@ -516,46 +572,43 @@ async fn run_dashboard(
     result
 }
 
-fn run_dashboard_loop(
+/// Simple TUI loop - just polls for updates from bot tasks and renders
+/// 
+/// Bot logic runs in separate tokio task, TUI just displays state
+async fn run_tui_loop(
     terminal: &mut tui::Tui,
     app: &mut App,
-    client: &EvoreClient,
-    slot_tracker: &SlotTracker,
-    last_update: &mut std::time::Instant,
+    update_rx: &mut mpsc::UnboundedReceiver<TuiUpdate>,
+    slot_tracker: &Arc<SlotTracker>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     while app.running {
-        // Update slot from tracker
-        app.update_slot(slot_tracker.get_slot());
-        
-        // Periodic refresh of board/round (every 2 seconds)
-        if last_update.elapsed() > Duration::from_secs(2) {
-            if let Ok(board) = client.get_board() {
-                let round_id = board.round_id;
-                
-                // Check if new round
-                if app.board.as_ref().map(|b| b.round_id) != Some(round_id) {
-                    app.log(format!("New round: {}", round_id), EventType::Info);
-                    app.deploy_status = DeployStatus::Idle;
-                    app.transactions_sent = 0;
-                    app.transactions_confirmed = 0;
-                }
-                
-                app.board = Some(board);
-                
-                if let Ok(round) = client.get_round(round_id) {
-                    app.round = Some(round);
+        // Poll for updates from bot task (non-blocking)
+        loop {
+            match update_rx.try_recv() {
+                Ok(update) => app.apply_update(update),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    // Bot task died - exit
+                    app.running = false;
+                    break;
                 }
             }
-            *last_update = std::time::Instant::now();
         }
+        
+        // Update slot/blockhash from tracker (for display freshness)
+        app.update_slot(slot_tracker.get_slot());
+        app.update_blockhash(slot_tracker.get_blockhash());
         
         // Draw UI
         terminal.draw(|frame| tui::draw(frame, app))?;
         
-        // Handle input
+        // Handle input (non-blocking check)
         if tui::handle_input(app)? {
             break;
         }
+        
+        // Small sleep to prevent busy loop
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
     }
     
     Ok(())
