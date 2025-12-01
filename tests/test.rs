@@ -978,6 +978,351 @@ mod ev_deploy {
     }
 }
 
+mod percentage_deploy {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_success_with_balance_verification() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts - round ending in 5 slots
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        
+        // Add ore miner for our managed auth
+        add_ore_miner_account(
+            &mut program_test,
+            managed_miner_auth.0,
+            [0u64; 25],
+            0, 0,
+            TEST_ROUND_ID - 1,
+            TEST_ROUND_ID - 1,
+        );
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund accounts
+        let miner_initial = 2_000_000_000u64;
+        let fee_collector_initial = 1_000_000u64;
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), miner_initial);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, fee_collector_initial);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Get balances before
+        let miner_balance_before = context.banks_client.get_balance(miner.pubkey()).await.unwrap();
+        let fee_collector_balance_before = context.banks_client.get_balance(FEE_COLLECTOR).await.unwrap();
+        
+        // Create manager and deploy using percentage strategy
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
+        let ix2 = evore::instruction::percentage_deploy(
+            miner.pubkey(),
+            manager_address,
+            auth_id,
+            TEST_ROUND_ID,
+            500_000_000,  // bankroll (0.5 SOL)
+            1000,         // 10% (1000 basis points)
+            5,            // deploy to 5 squares
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_limit_ix, ix1, ix2],
+            Some(&miner.pubkey()),
+            &[&miner, &manager_keypair],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.expect("percentage_deploy should succeed");
+        
+        // Get balances after
+        let miner_balance_after = context.banks_client.get_balance(miner.pubkey()).await.unwrap();
+        let fee_collector_balance_after = context.banks_client.get_balance(FEE_COLLECTOR).await.unwrap();
+        
+        // Verify balances changed
+        assert!(
+            fee_collector_balance_after > fee_collector_balance_before,
+            "Fee collector should receive fee"
+        );
+        assert!(
+            miner_balance_after < miner_balance_before,
+            "Miner should pay for deployments + fee"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_zero_percentage() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Deploy with 0% - should fail with NoDeployments
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix = evore::instruction::percentage_deploy(
+            miner.pubkey(),
+            manager_address,
+            auth_id,
+            TEST_ROUND_ID,
+            500_000_000,  // bankroll
+            0,            // 0% - invalid
+            5,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with 0 percentage");
+    }
+
+    #[tokio::test]
+    async fn test_zero_squares_count() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Deploy with 0 squares - should fail with NoDeployments
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix = evore::instruction::percentage_deploy(
+            miner.pubkey(),
+            manager_address,
+            auth_id,
+            TEST_ROUND_ID,
+            500_000_000,  // bankroll
+            1000,         // 10%
+            0,            // 0 squares - invalid
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with 0 squares_count");
+    }
+}
+
+mod manual_deploy {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_success_with_balance_verification() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Setup accounts
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund accounts
+        let miner_initial = 2_000_000_000u64;
+        let fee_collector_initial = 1_000_000u64;
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), miner_initial);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, fee_collector_initial);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Get balances before
+        let miner_balance_before = context.banks_client.get_balance(miner.pubkey()).await.unwrap();
+        let fee_collector_balance_before = context.banks_client.get_balance(FEE_COLLECTOR).await.unwrap();
+        
+        // Create manual amounts - deploy specific amounts to specific squares
+        let mut amounts = [0u64; 25];
+        amounts[0] = 50_000_000;  // 0.05 SOL on square 0
+        amounts[5] = 100_000_000; // 0.1 SOL on square 5
+        amounts[10] = 75_000_000; // 0.075 SOL on square 10
+        
+        // Create manager and deploy using manual strategy
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
+        let ix2 = evore::instruction::manual_deploy(
+            miner.pubkey(),
+            manager_address,
+            auth_id,
+            TEST_ROUND_ID,
+            amounts,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_limit_ix, ix1, ix2],
+            Some(&miner.pubkey()),
+            &[&miner, &manager_keypair],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.expect("manual_deploy should succeed");
+        
+        // Get balances after
+        let miner_balance_after = context.banks_client.get_balance(miner.pubkey()).await.unwrap();
+        let fee_collector_balance_after = context.banks_client.get_balance(FEE_COLLECTOR).await.unwrap();
+        
+        // Verify balances changed
+        assert!(
+            fee_collector_balance_after > fee_collector_balance_before,
+            "Fee collector should receive fee"
+        );
+        assert!(
+            miner_balance_after < miner_balance_before,
+            "Miner should pay for deployments + fee"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_all_zeros() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        // Pre-create manager
+        add_manager_account(&mut program_test, manager_address, miner.pubkey());
+        
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Deploy with all zeros - should fail with NoDeployments
+        let amounts = [0u64; 25];
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix = evore::instruction::manual_deploy(
+            miner.pubkey(),
+            manager_address,
+            auth_id,
+            TEST_ROUND_ID,
+            amounts,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[cu_limit_ix, ix], Some(&miner.pubkey()), &[&miner], blockhash);
+        let result = context.banks_client.process_transaction(tx).await;
+        assert!(result.is_err(), "should fail with all zero amounts");
+    }
+
+    #[tokio::test]
+    async fn test_single_square() {
+        let mut program_test = setup_programs();
+        
+        let miner = Keypair::new();
+        let manager_keypair = Keypair::new();
+        let manager_address = manager_keypair.pubkey();
+        let auth_id = 1u64;
+        let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
+        
+        let current_slot = 1000;
+        let _board = setup_deploy_test_accounts(&mut program_test, TEST_ROUND_ID, current_slot, 5);
+        add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
+        
+        let mut context = program_test.start_with_context().await;
+        let _ = context.warp_to_slot(current_slot + 3);
+        
+        // Fund
+        let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), 2_000_000_000);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, 1_000_000_000);
+        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, 1_000_000);
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(&[ix0, ix1, ix2], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
+        context.banks_client.process_transaction(tx).await.unwrap();
+        
+        // Deploy to single square
+        let mut amounts = [0u64; 25];
+        amounts[12] = 100_000_000; // 0.1 SOL on square 12 only
+        
+        let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+        let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
+        let ix2 = evore::instruction::manual_deploy(
+            miner.pubkey(),
+            manager_address,
+            auth_id,
+            TEST_ROUND_ID,
+            amounts,
+        );
+        
+        let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
+        let tx = Transaction::new_signed_with_payer(
+            &[cu_limit_ix, ix1, ix2],
+            Some(&miner.pubkey()),
+            &[&miner, &manager_keypair],
+            blockhash,
+        );
+        context.banks_client.process_transaction(tx).await.expect("single square deploy should succeed");
+    }
+}
+
 mod checkpoint {
     use super::*;
 

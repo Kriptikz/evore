@@ -1,56 +1,47 @@
 # Current Tasks
 
-> Last Updated: 2025-11-30
+> Last Updated: 2025-12-01
 
 ## Active
 
-_None currently active_
+### Task 21: Add tests for Percentage and Manual strategies
+**Priority:** 🔴 High
+
+**Tests needed:**
+- Percentage strategy success with balance verification
+- Percentage strategy edge cases (0 percentage, 100% percentage, 0 squares_count)
+- Manual strategy success with balance verification
+- Manual strategy edge cases (all zeros, single square, all 25 squares)
 
 ---
 
 ## Up Next
 
-### Task 20: Implement Deployment Strategies
-**Priority:** 🔴 High
-
-**Phase 7 - Strategy Implementation:**
-
-1. **Create DeployStrategy enum**
-   - `EV` - Current waterfill algorithm
-   - `Percentage` - X% on Y squares in order
-   - `Manual` - User-specified squares and amounts
-
-2. **Percentage Strategy**
-   - Args: `percentage`, `squares_count`, `bankroll`
-   - For each square (0 to squares_count - 1):
-     - Calculate amount to own `percentage` of that square
-     - Formula: `amount = P * T / (1 - P)` where T = current square total
-   - Continues until bankroll exhausted
-   - Same amounts batched in single CPI call
-
-3. **Manual Strategy**
-   - Args: Array of (square_index, amount) pairs
-   - Batch squares with same amount in single CPI
-   - Full user control
-
-4. **Refactor EV Strategy**
-   - Move current logic to separate function
-   - Keep existing params: bankroll, min_bet, max_per_square, ore_value, slots_left
+_Continue with Phase 7 testing_
 
 ---
 
 ## Backlog
 
-- [ ] Task 21: Add tests for Percentage strategy
-- [ ] Task 22: Add tests for Manual strategy
-- [ ] Task 23: Update instruction builders for strategies
-- [ ] Task 24: Mainnet deployment
-- [ ] Task 25: Create deployment bot
-- [ ] Task 26: Create frontend UI
+- [ ] Task 22: Mainnet deployment
+- [ ] Task 23: Create deployment bot
+- [ ] Task 24: Create frontend UI
 
 ---
 
 ## Completed
+
+### ✅ Task 20: Implement Deployment Strategies
+**Completed:** 2025-12-01
+
+- Created `DeployStrategy` enum (EV, Percentage, Manual)
+- Implemented `calculate_percentage_deployments` function
+- Implemented `calculate_manual_deployments` function
+- Refactored to `calculate_ev_deployments` function
+- Updated `MMDeploy` struct with strategy discriminant in data array
+- Added `ev_deploy`, `percentage_deploy`, `manual_deploy` instruction builders
+
+---
 
 ### ✅ Task 16b: Use Custom Errors + Fix Tests
 **Completed:** 2025-11-30
