@@ -4,21 +4,31 @@
 
 ## Active
 
-### Task 22: Mainnet Deployment
+### Task 24: Bot - Testing on Mainnet
 **Priority:** 🔴 High
 
-**Steps:**
-1. Build program for mainnet: `cargo build-sbf`
-2. Deploy to Solana mainnet
-3. Verify deployment
-4. Test basic functionality on mainnet
+**Test checklist:**
+- [ ] `status` - View current round
+- [ ] `info` - Display managed_miner_auth PDA
+- [ ] `deploy` - Single EV deployment with spam
+- [ ] `run` - Continuous loop with auto checkpoint/claim
+- [ ] `checkpoint` - Manual checkpoint
+- [ ] `claim-sol` - Manual SOL claim
+
+**Setup:**
+```bash
+# .env in bot/ directory
+RPC_URL=https://your-rpc.com
+WS_URL=wss://your-rpc.com  # Optional
+KEYPAIR_PATH=/path/to/signer.json
+MANAGER_PATH=/path/to/manager.json
+```
 
 ---
 
 ## Up Next
 
-- Task 23: Create deployment bot
-- Task 24: Create frontend UI
+- Task 25: Frontend UI
 
 ---
 
@@ -29,6 +39,42 @@ _None_
 ---
 
 ## Completed
+
+### ✅ Task 23: Bot - Websocket Slot Tracking
+**Completed:** 2025-12-01
+
+- Added SlotTracker with websocket subscription
+- Real-time slot updates (not 400ms estimates)
+- Spam until slot passes end_slot
+- Fresh blockhash polling
+
+---
+
+### ✅ Task 22-27: Bot Implementation
+**Completed:** 2025-12-01
+
+**Implemented:**
+- RPC client with fire-and-forget sending
+- Round state fetching (get_board, get_round, get_slot)
+- Transaction building (deploy, checkpoint, claim_sol)
+- Spam deployment: 10 txs over 1000ms in last 2 slots
+- Single deploy command (`deploy`)
+- Continuous loop command (`run`) with auto checkpoint & claim SOL
+- CLI with subcommands: status, info, deploy, run, checkpoint, claim-sol
+- .env support for configuration
+
+---
+
+### ✅ Task 22: Mainnet Deployment
+**Completed:** 2025-12-01
+
+- Built program with `cargo build-sbf`
+- Deployed to Solana mainnet
+- Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
+- Converted project to Cargo workspace
+- Created bot crate structure
+
+---
 
 ### ✅ Task 21: Strategy Tests
 **Completed:** 2025-12-01
