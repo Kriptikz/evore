@@ -4,29 +4,19 @@ use solana_program::{
 use steel::*;
 
 use crate::{
-    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::{DeployStrategy, EvDeploy}, ore_api::{self, Board, Round}, state::Manager
+    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::{MMDeploy, DeployStrategy}, ore_api::{self, Board, Round}, state::Manager
 };
 
-pub fn process_ev_deploy(
+pub fn process_mm_deploy(
     accounts: &[AccountInfo],
     instruction_data: &[u8],
 ) -> Result<(), ProgramError> {
-    let args = EvDeploy::try_from_bytes(instruction_data)?;
+    let args = MMDeploy::try_from_bytes(instruction_data)?;
     let auth_id = u64::from_le_bytes(args.auth_id);
-    let bankroll = u64::from_le_bytes(args.bankroll);
-    let max_per_square = u64::from_le_bytes(args.max_per_square);
-    let min_bet = u64::from_le_bytes(args.min_bet);
-    let ore_value = u64::from_le_bytes(args.ore_value);
-    let slots_left = u64::from_le_bytes(args.slots_left);
     
-    // Validate strategy - currently only EV is supported
-    let strategy = DeployStrategy::try_from(args.strategy)
+    // Parse strategy enum with its data
+    let strategy = args.get_strategy()
         .map_err(|_| ProgramError::InvalidInstructionData)?;
-    
-    if strategy != DeployStrategy::EV {
-        return Err(ProgramError::InvalidInstructionData);
-    }
-
 
     let [
             signer,
@@ -53,10 +43,12 @@ pub fn process_ev_deploy(
         return Err(EvoreError::EndSlotExceeded.into());
     }
 
-    let current_slots_left = board.end_slot - clock.slot;
-
-    if current_slots_left > slots_left {
-        return Err(EvoreError::TooManySlotsLeft.into());
+    // EV strategy has slots_left check
+    if let DeployStrategy::EV { slots_left, .. } = strategy {
+        let current_slots_left = board.end_slot - clock.slot;
+        if current_slots_left > slots_left {
+            return Err(EvoreError::TooManySlotsLeft.into());
+        }
     }
 
     if !signer.is_signer {
@@ -112,13 +104,15 @@ pub fn process_ev_deploy(
         return Err(EvoreError::InvalidPDA.into());
     }
 
-    let (squares, total_deployed) = calculate_deployments(
-        round,
-        bankroll,
-        min_bet,
-        max_per_square,
-        ore_value
-    );
+    // Calculate deployments based on strategy
+    let (squares, total_deployed) = match strategy {
+        DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, .. } => {
+            calculate_ev_deployments(round, bankroll, min_bet, max_per_square, ore_value)
+        },
+        DeployStrategy::Percentage { bankroll, percentage, squares_count } => {
+            calculate_percentage_deployments(round, bankroll, percentage, squares_count)
+        },
+    };
 
     if total_deployed == 0 {
         return Err(EvoreError::NoDeployments.into());
@@ -204,7 +198,63 @@ pub fn process_ev_deploy(
     Ok(())
 }
 
-fn calculate_deployments(
+/// Calculate deployments using percentage strategy
+/// Deploys to own `percentage` (in basis points) of each square, up to `squares_count` squares
+fn calculate_percentage_deployments(
+    round: &Round,
+    bankroll: u64,
+    percentage: u64,      // In basis points (1000 = 10%)
+    squares_count: u64,   // Number of squares to deploy to (1-25)
+) -> ([u128; 25], u64) {
+    let mut out = [0u128; 25];
+    let mut total_spent: u64 = 0;
+    let mut remaining = bankroll;
+    
+    // Validate inputs
+    if percentage == 0 || percentage >= 10000 || squares_count == 0 || squares_count > 25 {
+        return (out, 0);
+    }
+    
+    // For batching: collect amounts per square, then we can batch later
+    // Formula: amount = P * T / (10000 - P)
+    // where P = percentage in basis points, T = current square total
+    
+    for i in 0..(squares_count as usize).min(25) {
+        let current_total = round.deployed[i];
+        
+        // Skip empty squares (can't calculate percentage of 0)
+        if current_total == 0 {
+            continue;
+        }
+        
+        // amount = (percentage * current_total) / (10000 - percentage)
+        // Using u128 to avoid overflow
+        let p = percentage as u128;
+        let t = current_total as u128;
+        let amount_u128 = (p * t) / (10000 - p);
+        
+        // Clamp to u64
+        let amount = amount_u128.min(u64::MAX as u128) as u64;
+        
+        if amount == 0 {
+            continue;
+        }
+        
+        if amount > remaining {
+            // Can't afford this square, stop here
+            break;
+        }
+        
+        out[i] = amount as u128;
+        total_spent = total_spent.saturating_add(amount);
+        remaining = remaining.saturating_sub(amount);
+    }
+    
+    (out, total_spent)
+}
+
+/// Calculate deployments using EV waterfill strategy
+fn calculate_ev_deployments(
     round: &Round,
     bankroll: u64,
     min_bet: u64,

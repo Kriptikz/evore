@@ -39,8 +39,8 @@ pub fn process_instruction(
         Instructions::CreateManager => {
             process_create_manager::process_create_manager(accounts, data)?;
         }
-        Instructions::EvDeploy => {
-            process_ev_deploy::process_ev_deploy(accounts, data)?;
+        Instructions::MMDeploy => {
+            process_mm_deploy::process_mm_deploy(accounts, data)?;
         }
         Instructions::MMCheckpoint => {
             process_checkpoint::process_checkpoint(accounts, data)?;
