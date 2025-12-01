@@ -160,11 +160,14 @@ pub fn process_mm_deploy(
             managed_miner_auth_account_info.clone(),
             system_program.clone(),
         ];
+    // Include checkpoint fee in transfer (ORE miner needs to hold this)
+    let transfer_amount = total_deployed.saturating_add(ore_api::CHECKPOINT_FEE);
+    
     solana_program::program::invoke(
         &solana_program::system_instruction::transfer(
             signer.key,
             managed_miner_auth_account_info.key,
-            total_deployed,
+            transfer_amount,
         ),
         &transfer_accounts,
     )?;
@@ -179,7 +182,7 @@ pub fn process_mm_deploy(
         let managed_miner_auth_key = deploy_accounts[0].key.clone();
 
         // cpi deploy amount on square
-        let amt = amt.try_into().map_err(|_| EvoreError::ArithmeticOverflow)?;
+        let amt: u64 = amt.try_into().map_err(|_| EvoreError::ArithmeticOverflow)?;
         solana_program::program::invoke_signed(
             &ore_api::deploy(
                 managed_miner_auth_key,

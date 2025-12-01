@@ -30,6 +30,10 @@ pub const TREASURY_ADDRESS: Pubkey = pubkey!("45db2FSR4mcXdSVVZbKbwojU6uYDpMyhpE
 
 pub const INTERMISSION_SLOTS: u64 = 35;
 
+/// The checkpoint fee that miners must hold (in lamports)
+/// This is required by ORE v3 for the checkpoint operation
+pub const CHECKPOINT_FEE: u64 = 10_000; // 0.00001 SOL
+
 /// The address of the mint account.
 pub const MINT_ADDRESS: Pubkey = pubkey!("oreoU2P8bN6jkk3jbaiVxYnG1dCXcYxwhwyK9jSybcp");
 
