@@ -112,6 +112,9 @@ pub fn process_mm_deploy(
         DeployStrategy::Percentage { bankroll, percentage, squares_count } => {
             calculate_percentage_deployments(round, bankroll, percentage, squares_count)
         },
+        DeployStrategy::Manual { amounts } => {
+            calculate_manual_deployments(amounts)
+        },
     };
 
     if total_deployed == 0 {
@@ -251,6 +254,25 @@ fn calculate_percentage_deployments(
     }
     
     (out, total_spent)
+}
+
+/// Calculate deployments using manual strategy
+/// Simply uses the provided amounts directly
+fn calculate_manual_deployments(
+    amounts: [u64; 25],
+) -> ([u128; 25], u64) {
+    let mut out = [0u128; 25];
+    let mut total: u64 = 0;
+    
+    for i in 0..25 {
+        let amount = amounts[i];
+        if amount > 0 {
+            out[i] = u128::from(amount);
+            total = total.saturating_add(amount);
+        }
+    }
+    
+    (out, total)
 }
 
 /// Calculate deployments using EV waterfill strategy

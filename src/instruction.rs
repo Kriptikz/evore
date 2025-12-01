@@ -30,7 +30,10 @@ pub enum DeployStrategy {
         percentage: u64,      // In basis points (1000 = 10%)
         squares_count: u64,   // Number of squares (1-25)
     },
-    // Manual { ... },  // Future
+    /// Manual: specify exact amounts for each of the 25 squares
+    Manual {
+        amounts: [u64; 25],   // Amount to deploy on each square (0 = skip)
+    },
 }
 
 impl DeployStrategy {
@@ -39,6 +42,7 @@ impl DeployStrategy {
         match self {
             DeployStrategy::EV { .. } => 0,
             DeployStrategy::Percentage { .. } => 1,
+            DeployStrategy::Manual { .. } => 2,
         }
     }
 }
@@ -63,25 +67,34 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
 
 /// On-chain MMDeploy instruction data (Pod/Zeroable)
 /// 
-/// Layout (64 bytes total for Pod alignment):
+/// Layout (272 bytes total):
 /// - auth_id: [u8; 8] - Manager auth ID
 /// - bump: u8 - PDA bump
 /// - _pad: [u8; 7] - Padding for alignment
-/// - data: [u8; 48] - Strategy data where:
-///   - data[0]: strategy discriminant (0 = EV, 1 = Percentage)
-///   - data[1..9]: bankroll
-///   - data[9..17]: max_per_square (EV) or percentage (Percentage)
-///   - data[17..25]: min_bet (EV) or squares_count (Percentage)
-///   - data[25..33]: ore_value (EV only)
-///   - data[33..41]: slots_left (EV only)
-///   - data[41..48]: unused padding
+/// - data: [u8; 256] - Strategy data where:
+///   - data[0]: strategy discriminant (0 = EV, 1 = Percentage, 2 = Manual)
+///   
+///   EV (strategy = 0):
+///     - data[1..9]: bankroll
+///     - data[9..17]: max_per_square
+///     - data[17..25]: min_bet
+///     - data[25..33]: ore_value
+///     - data[33..41]: slots_left
+///   
+///   Percentage (strategy = 1):
+///     - data[1..9]: bankroll
+///     - data[9..17]: percentage (basis points)
+///     - data[17..25]: squares_count
+///   
+///   Manual (strategy = 2):
+///     - data[1..201]: 25 x u64 amounts (one per square)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MMDeploy {
     pub auth_id: [u8; 8],
     pub bump: u8,
     pub _pad: [u8; 7],
-    pub data: [u8; 48],  // [strategy(1), bankroll(8), param1(8), param2(8), param3(8), param4(8), padding(7)]
+    pub data: [u8; 256],
 }
 
 instruction!(Instructions, MMDeploy);
@@ -89,7 +102,7 @@ instruction!(Instructions, MMDeploy);
 impl MMDeploy {
     /// Create MMDeploy instruction data from auth_id, bump, and strategy enum
     pub fn new(auth_id: u64, bump: u8, strategy: DeployStrategy) -> Self {
-        let mut data = [0u8; 48];
+        let mut data = [0u8; 256];
         
         match strategy {
             DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left } => {
@@ -105,7 +118,14 @@ impl MMDeploy {
                 data[1..9].copy_from_slice(&bankroll.to_le_bytes());
                 data[9..17].copy_from_slice(&percentage.to_le_bytes());
                 data[17..25].copy_from_slice(&squares_count.to_le_bytes());
-                // data[25..] remains zero (unused)
+            },
+            DeployStrategy::Manual { amounts } => {
+                data[0] = 2; // Manual strategy
+                for (i, amount) in amounts.iter().enumerate() {
+                    let start = 1 + i * 8;
+                    let end = start + 8;
+                    data[start..end].copy_from_slice(&amount.to_le_bytes());
+                }
             },
         }
         
@@ -120,20 +140,30 @@ impl MMDeploy {
     /// Parse the strategy from the instruction data
     pub fn get_strategy(&self) -> Result<DeployStrategy, ()> {
         let strategy = self.data[0];
-        let bankroll = u64::from_le_bytes(self.data[1..9].try_into().unwrap());
         
         match strategy {
-            0 => {
+            0 => { // EV
+                let bankroll = u64::from_le_bytes(self.data[1..9].try_into().unwrap());
                 let max_per_square = u64::from_le_bytes(self.data[9..17].try_into().unwrap());
                 let min_bet = u64::from_le_bytes(self.data[17..25].try_into().unwrap());
                 let ore_value = u64::from_le_bytes(self.data[25..33].try_into().unwrap());
                 let slots_left = u64::from_le_bytes(self.data[33..41].try_into().unwrap());
                 Ok(DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left })
             },
-            1 => {
+            1 => { // Percentage
+                let bankroll = u64::from_le_bytes(self.data[1..9].try_into().unwrap());
                 let percentage = u64::from_le_bytes(self.data[9..17].try_into().unwrap());
                 let squares_count = u64::from_le_bytes(self.data[17..25].try_into().unwrap());
                 Ok(DeployStrategy::Percentage { bankroll, percentage, squares_count })
+            },
+            2 => { // Manual
+                let mut amounts = [0u64; 25];
+                for i in 0..25 {
+                    let start = 1 + i * 8;
+                    let end = start + 8;
+                    amounts[i] = u64::from_le_bytes(self.data[start..end].try_into().unwrap());
+                }
+                Ok(DeployStrategy::Manual { amounts })
             },
             _ => Err(()),
         }
@@ -220,6 +250,25 @@ pub fn percentage_deploy(
         percentage,
         squares_count,
     };
+
+    Instruction {
+        program_id: crate::id(),
+        accounts,
+        data: MMDeploy::new(auth_id, bump, strategy).to_bytes(),
+    }
+}
+
+/// Deploy using manual strategy - specify exact amounts for each square
+pub fn manual_deploy(
+    signer: Pubkey,
+    manager: Pubkey,
+    auth_id: u64,
+    round_id: u64,
+    amounts: [u64; 25],   // Amount to deploy on each square (0 = skip)
+) -> Instruction {
+    let (accounts, bump) = build_deploy_accounts(signer, manager, auth_id, round_id);
+    
+    let strategy = DeployStrategy::Manual { amounts };
 
     Instruction {
         program_id: crate::id(),
