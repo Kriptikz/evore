@@ -678,17 +678,15 @@ mod ev_deploy {
         let mut context = program_test.start_with_context().await;
         let _ = context.warp_to_slot(current_slot + 3); // 2 slots left
         
-        // Fund accounts
+        // Fund accounts (NOT managed_miner_auth - processor calculates and transfers what's needed)
         let miner_initial_balance = 2_000_000_000u64;
-        let managed_miner_initial_balance = 1_000_000_000u64;
         let fee_collector_initial_balance = 1_000_000u64;
         
         let ix0 = system_instruction::transfer(&context.payer.pubkey(), &miner.pubkey(), miner_initial_balance);
-        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &managed_miner_auth.0, managed_miner_initial_balance);
-        let ix2 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, fee_collector_initial_balance);
+        let ix1 = system_instruction::transfer(&context.payer.pubkey(), &FEE_COLLECTOR, fee_collector_initial_balance);
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(
-            &[ix0, ix1, ix2],
+            &[ix0, ix1],
             Some(&context.payer.pubkey()),
             &[&context.payer],
             blockhash,

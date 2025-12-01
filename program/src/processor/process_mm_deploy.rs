@@ -153,24 +153,50 @@ pub fn process_mm_deploy(
         &transfer_fee_accounts,
     )?;
 
-    // transfer total_deployed amount to managed miner auth pda for cpi deployments
+    // Transfer funds to managed_miner_auth PDA for CPI deployments
+    // The PDA must always retain: rent_exempt_minimum + CHECKPOINT_FEE
+    // Plus we need enough for: total_deployed + miner_rent (if first deploy)
     let transfer_accounts = 
         vec![
             signer.clone(),
             managed_miner_auth_account_info.clone(),
             system_program.clone(),
         ];
-    // Include checkpoint fee in transfer (ORE miner needs to hold this)
-    let transfer_amount = total_deployed.saturating_add(ore_api::CHECKPOINT_FEE);
     
-    solana_program::program::invoke(
-        &solana_program::system_instruction::transfer(
-            signer.key,
-            managed_miner_auth_account_info.key,
-            transfer_amount,
-        ),
-        &transfer_accounts,
-    )?;
+    // Minimum rent for 0-byte account (PDA has no data)
+    const AUTH_PDA_RENT: u64 = 890_880;
+    
+    // Miner account rent: ORE creates miner account on first deploy
+    let miner_rent = if ore_miner_account_info.data_is_empty() {
+        let size = 8 + std::mem::size_of::<ore_api::Miner>();
+        solana_program::rent::Rent::default().minimum_balance(size)
+    } else {
+        0
+    };
+    
+    // Required balance after transaction:
+    // - AUTH_PDA_RENT: keep PDA rent-exempt
+    // - CHECKPOINT_FEE: ORE checkpoint requires this
+    // - total_deployed: funds for deployments
+    // - miner_rent: if miner account needs creation
+    let required_balance = AUTH_PDA_RENT
+        .saturating_add(ore_api::CHECKPOINT_FEE)
+        .saturating_add(total_deployed)
+        .saturating_add(miner_rent);
+    
+    let current_balance = managed_miner_auth_account_info.lamports();
+    let transfer_amount = required_balance.saturating_sub(current_balance);
+    
+    if transfer_amount > 0 {
+        solana_program::program::invoke(
+            &solana_program::system_instruction::transfer(
+                signer.key,
+                managed_miner_auth_account_info.key,
+                transfer_amount,
+            ),
+            &transfer_accounts,
+        )?;
+    }
 
     for i in 0..25 {
         let amt = squares[i];
@@ -305,11 +331,14 @@ fn calculate_ev_deployments(
     );
 
     // Widen u64 to u128 for the caller (safe widening cast)
+    // Also compute actual total from per_square to ensure consistency
     let mut out = [0u128; 25];
+    let mut actual_total: u64 = 0;
     for i in 0..25 {
         out[i] = u128::from(plan.per_square[i]);
+        actual_total = actual_total.saturating_add(plan.per_square[i]);
     }
-    (out, plan.spent)
+    (out, actual_total)
 }
 
 // ========================== EV Calculation Constants ==========================

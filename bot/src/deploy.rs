@@ -122,11 +122,17 @@ pub async fn single_deploy(
     let slots_remaining = board.end_slot.saturating_sub(current_slot);
     println!("Slots Left:   {}\n", slots_remaining);
     
-    // Calculate deploy window: start deploying at (end_slot - slots_left)
-    let deploy_start_slot = board.end_slot.saturating_sub(params.slots_left);
+    // Calculate deploy window
+    // For single send (slots_left > 10), wait 1 extra slot to ensure on-chain check passes
+    let deploy_start_slot = if params.slots_left > 10 {
+        board.end_slot.saturating_sub(params.slots_left - 1) // Wait for 1 fewer slot remaining
+    } else {
+        board.end_slot.saturating_sub(params.slots_left)
+    };
     
     if current_slot < deploy_start_slot {
-        println!("Waiting for deploy window (slot {})...", deploy_start_slot);
+        let target_slots_left = board.end_slot.saturating_sub(deploy_start_slot);
+        println!("Waiting for deploy window (slot {}, {} slots left)...", deploy_start_slot, target_slots_left);
         slot_tracker.wait_until_slot(deploy_start_slot).await;
         println!("Deploy window reached!");
     }
@@ -141,7 +147,7 @@ pub async fn single_deploy(
     };
     
     if send_interval_ms == 0 {
-        println!("\n📤 Single send mode (slots_left > 10)\n");
+        println!("\n📤 Single send mode (slots_left > 10, waiting for {} slots left)\n", params.slots_left - 1);
     } else {
         println!("\n🚀 Spam mode: sending every {}ms until slot {}\n", send_interval_ms, board.end_slot);
     }
