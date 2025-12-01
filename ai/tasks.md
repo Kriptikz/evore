@@ -1,114 +1,25 @@
 # Current Tasks
 
-> Last Updated: 2025-12-01 (Task 25 complete, architecture refactored)
+> Last Updated: 2025-12-01 (Task 26 complete - Multi-Bot Architecture)
 
 ## Active
 
-### Task 26: Multi-Bot Architecture Refactor
-**Priority:** 🔴 High
-
-Refactor bot to support multiple parallel bots with shared services and optimized RPC.
-
-See `plan.md` Phase 11 for full architecture diagrams and details.
-
-#### Phase 11a: Shared Services
-
-**Task 26a: BoardTracker**
-- Websocket `accountSubscribe` to Board PDA
-- Provides: `round_id`, `start_slot`, `end_slot`
-- Detects new round started, round ended
-
-**Task 26b: RoundTracker**
-- Websocket `accountSubscribe` to current Round PDA
-- Provides: `deployed[25]`, `total_deployed`
-- Switches subscription when `round_id` changes
-
-**Task 26c: BlockhashCache**
-- Periodic RPC fetch (2s normally, 500ms when slots_left < 10)
-- Shared via Arc
+No active tasks. Phase 11 complete.
 
 ---
 
-#### Phase 11b: Transaction Pipeline
+## Up Next
 
-**Task 26d: TxSender Task**
-- Reads from mpsc channel
-- Sends instantly (no blocking)
-- Queues signature for confirmation
+### Task 27: Wire Up Multi-Bot Dashboard
+**Priority:** 🟡 Medium
 
-**Task 26e: TxConfirmer Task**
-- Collects pending signatures
-- Batch `getSignatureStatuses` (up to 256 per call)
-- **Fetch transaction error details for failed txs**
-- Parse errors into human-readable messages
-- Returns `TxResult { signature, status, error, slot_landed }` via oneshot
+Integrate the new multi-bot architecture with the dashboard command.
 
----
-
-#### Phase 11c: Bot Refactor
-
-**Task 26f: BotConfig Struct**
-```rust
-struct BotConfig {
-    name: String,
-    auth_id: u64,
-    strategy: DeployStrategy,
-    slots_left: u64,
-    bankroll: u64,
-    strategy_params: StrategyParams,
-}
-```
-
-**Task 26g: BotState Struct**
-```rust
-struct BotState {
-    config: BotConfig,
-    state: BotPhase,  // Idle, Waiting, Deploying, Deployed, Checkpointing
-    last_deployed_round: Option<u64>,
-    last_checkpointed_round: Option<u64>,
-    pending_signatures: Vec<Signature>,
-}
-```
-
-**Task 26h: Refactor Bot to Use Shared Services**
-- Bot receives trackers via Arc
-- Bot sends txs via mpsc channel
-- Bot receives confirmations via oneshot
-
----
-
-#### Phase 11d: Multi-Bot Coordination
-
-**Task 26i: RoundCoordinator**
-- Holds all bots + shared services
-- Main loop checks round lifecycle
-- Triggers checkpoint/claim when new round starts
-- Triggers deploy when slots_left threshold reached
-
-**Task 26j: Multi-Bot Spawning**
-- Load bot configs from file or CLI
-- Spawn each bot as async task
-- All share same services via Arc
-
----
-
-**Subtasks Summary:**
-- [ ] 26a: BoardTracker (websocket, base64 decode account data)
-- [ ] 26b: RoundTracker (websocket, switches on round change)
-- [ ] 26c: BlockhashCache (periodic RPC)
-- [ ] 26d: TxSender task (instant send)
-- [ ] 26e: TxConfirmer task (batch status)
-- [ ] 26f: BotConfig struct (with per-bot signer/manager paths)
-- [ ] 26g: BotState struct + state machine
-- [ ] 26h: Refactor bot to use shared services
-- [ ] 26i: RoundCoordinator
-- [ ] 26j: Multi-bot spawning from config
-- [ ] 26k: Config file parsing (TOML format, see plan.md)
-- [ ] 26l: Graceful shutdown (`Ctrl+C` handler)
-
-**Note:** Consider migrating `SlotTracker` from `std::thread::spawn` to `tokio::spawn` for consistency with async architecture (not blocking, current approach works).
-
----
+**Subtasks:**
+- [ ] Add `--config` flag to dashboard command for TOML config file
+- [ ] Replace `run_bot_task` with `RoundCoordinator`
+- [ ] Update TUI to handle dynamic bot count
+- [ ] Test with multi-bot config file
 
 ## Backlog
 
@@ -121,6 +32,28 @@ struct BotState {
 ---
 
 ## Completed
+
+### ✅ Task 26: Multi-Bot Architecture Refactor
+**Completed:** 2025-12-01
+
+**New modules created:**
+- `board_tracker.rs` - WebSocket subscription to Board PDA
+- `round_tracker.rs` - WebSocket subscription to Round PDA (auto-switches on round change)
+- `blockhash_cache.rs` - Periodic RPC blockhash fetch with adaptive rate
+- `tx_pipeline.rs` - TxSender (instant send) + TxConfirmer (batch status check)
+- `config.rs` - BotConfig with strategy params, TOML config parsing
+- `bot_state.rs` - BotPhase state machine with P&L tracking
+- `bot_runner.rs` - Refactored bot using shared services
+- `coordinator.rs` - RoundCoordinator for multi-bot orchestration
+- `shutdown.rs` - Graceful Ctrl+C handler
+
+**Architecture:**
+- All bots share services via Arc (SlotTracker, BoardTracker, RoundTracker, BlockhashCache)
+- Each bot runs as independent tokio task
+- Coordinator spawns and manages multiple bots from TOML config
+- Ready for dashboard integration
+
+---
 
 ### ✅ Task 25: Dashboard TUI
 **Completed:** 2025-12-01

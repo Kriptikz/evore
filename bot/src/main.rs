@@ -8,11 +8,20 @@ use solana_sdk::{
 };
 use tokio::sync::mpsc;
 
+mod blockhash_cache;
+mod board_tracker;
+mod bot_runner;
+mod bot_state;
 mod bot_task;
 mod client;
+mod config;
+mod coordinator;
 mod deploy;
+mod round_tracker;
+mod shutdown;
 mod slot_tracker;
 mod tui;
+mod tx_pipeline;
 
 use bot_task::{run_bot_task, BotConfig};
 use client::{print_managed_miner_info, EvoreClient};
@@ -133,24 +142,28 @@ enum Commands {
     
     /// Live TUI dashboard with real-time updates
     Dashboard {
-        /// Bankroll in lamports
+        /// Path to TOML config file (overrides CLI args)
         #[arg(long)]
+        config: Option<String>,
+        
+        /// Bankroll in lamports (ignored if --config provided)
+        #[arg(long, default_value = "220000000")]
         bankroll: u64,
         
         /// Max per square in lamports
-        #[arg(long, default_value = "100000000")]
+        #[arg(long, default_value = "10000000")]
         max_per_square: u64,
         
         /// Min bet in lamports
-        #[arg(long, default_value = "10000")]
+        #[arg(long, default_value = "1000000")]
         min_bet: u64,
         
         /// ORE value in lamports (for EV calculation)
-        #[arg(long, default_value = "800000000")]
+        #[arg(long, default_value = "500000000")]
         ore_value: u64,
         
         /// Slots left threshold for deployment
-        #[arg(long, default_value = "2")]
+        #[arg(long, default_value = "1")]
         slots_left: u64,
         
         /// Auth ID
@@ -462,29 +475,35 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
         }
         
-        Commands::Dashboard { bankroll, max_per_square, min_bet, ore_value, slots_left, auth_id, strategy } => {
-            let signer = load_signer_keypair(args.keypair.as_ref())?;
-            let manager_keypair = load_manager_keypair(args.manager_path.as_ref())?;
-            let manager = manager_keypair.pubkey();
-            
-            let params = EvDeployParams {
-                bankroll: *bankroll,
-                max_per_square: *max_per_square,
-                min_bet: *min_bet,
-                ore_value: *ore_value,
-                slots_left: *slots_left,
-            };
-            
-            run_dashboard(
-                &args.rpc_url,
-                get_ws_url(&args),
-                &signer,
-                manager,
-                *auth_id,
-                params,
-                strategy.clone(),
-                client,
-            ).await?;
+        Commands::Dashboard { config: config_path, bankroll, max_per_square, min_bet, ore_value, slots_left, auth_id, strategy } => {
+            // If config file provided, use the new multi-bot system
+            if let Some(config_file) = config_path {
+                run_dashboard_with_config(&args.rpc_url, get_ws_url(&args), config_file).await?;
+            } else {
+                // Legacy single-bot mode using CLI args
+                let signer = load_signer_keypair(args.keypair.as_ref())?;
+                let manager_keypair = load_manager_keypair(args.manager_path.as_ref())?;
+                let manager = manager_keypair.pubkey();
+                
+                let params = EvDeployParams {
+                    bankroll: *bankroll,
+                    max_per_square: *max_per_square,
+                    min_bet: *min_bet,
+                    ore_value: *ore_value,
+                    slots_left: *slots_left,
+                };
+                
+                run_dashboard(
+                    &args.rpc_url,
+                    get_ws_url(&args),
+                    &signer,
+                    manager,
+                    *auth_id,
+                    params,
+                    strategy.clone(),
+                    client,
+                ).await?;
+            }
         }
     }
     
@@ -612,4 +631,140 @@ async fn run_tui_loop(
     }
     
     Ok(())
+}
+
+/// Run dashboard using TOML config file with new multi-bot architecture
+async fn run_dashboard_with_config(
+    rpc_url: &str,
+    ws_url: String,
+    config_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::config::Config;
+    use crate::coordinator::RoundCoordinator;
+    use crate::shutdown::spawn_shutdown_handler;
+    use std::path::Path;
+    
+    // Load config
+    let config = Config::load(Path::new(config_path))?;
+    
+    if config.bots.is_empty() {
+        return Err("No bots defined in config file".into());
+    }
+    
+    println!("=== Evore Multi-Bot Dashboard ===");
+    println!("Config: {}", config_path);
+    println!("Bots:   {}", config.bots.len());
+    for bot in &config.bots {
+        println!("  - {} (auth_id={}, strategy={:?})", bot.name, bot.auth_id, bot.strategy);
+    }
+    println!();
+    
+    // Set panic hook to restore terminal on panic
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = tui::restore();
+        original_hook(panic_info);
+    }));
+    
+    // Initialize TUI
+    let mut terminal = tui::init()?;
+    
+    // Create app state
+    let mut app = App::new(rpc_url);
+    
+    // Add bot states to app
+    for (index, bot_config) in config.bots.iter().enumerate() {
+        let (max_per_square, min_bet, ore_value) = match &bot_config.strategy_params {
+            crate::config::StrategyParams::EV { max_per_square, min_bet, ore_value } => {
+                (*max_per_square, *min_bet, *ore_value)
+            }
+            _ => (10_000_000, 1_000_000, 500_000_000),
+        };
+        
+        // Load manager to get pubkey
+        let manager_path = config.get_manager_path(bot_config);
+        let manager_keypair = solana_sdk::signature::read_keypair_file(&manager_path)
+            .map_err(|e| format!("Failed to load manager from {:?}: {}", manager_path, e))?;
+        
+        let signer_path = config.get_signer_path(bot_config);
+        let signer_keypair = solana_sdk::signature::read_keypair_file(&signer_path)
+            .map_err(|e| format!("Failed to load signer from {:?}: {}", signer_path, e))?;
+        
+        let bot_state = BotState::new(
+            bot_config.name.clone(),
+            bot_config.auth_id,
+            format!("{:?}", bot_config.strategy),
+            bot_config.bankroll,
+            bot_config.slots_left,
+            signer_keypair.pubkey(),
+            manager_keypair.pubkey(),
+            max_per_square,
+            min_bet,
+            ore_value,
+        );
+        app.add_bot(bot_state);
+    }
+    
+    // Create channel for updates
+    let (update_tx, mut update_rx) = mpsc::unbounded_channel::<TuiUpdate>();
+    
+    // Create coordinator
+    let mut coordinator = RoundCoordinator::new(rpc_url, &ws_url, update_tx.clone())
+        .map_err(|e| format!("Failed to create coordinator: {}", e))?;
+    coordinator.start_services()
+        .map_err(|e| format!("Failed to start services: {}", e))?;
+    
+    // Wait for services to initialize
+    tokio::time::sleep(tokio::time::Duration::from_secs(2)).await;
+    
+    // Spawn bots from config
+    coordinator.spawn_bots_from_config(&config)?;
+    
+    println!("Started {} bot(s). Press 'q' to quit.\n", coordinator.bot_count());
+    
+    // Setup shutdown handler
+    let shutdown = spawn_shutdown_handler();
+    
+    // Create slot tracker for TUI updates
+    let slot_tracker = Arc::new(SlotTracker::new(&ws_url));
+    slot_tracker.start_slot_subscription()?;
+    slot_tracker.start_blockhash_subscription(rpc_url)?;
+    
+    // Main TUI loop
+    let result = async {
+        while app.running && !shutdown.is_shutdown() {
+            // Poll for updates from bot tasks
+            loop {
+                match update_rx.try_recv() {
+                    Ok(update) => app.apply_update(update),
+                    Err(mpsc::error::TryRecvError::Empty) => break,
+                    Err(mpsc::error::TryRecvError::Disconnected) => {
+                        app.running = false;
+                        break;
+                    }
+                }
+            }
+            
+            // Update slot/blockhash
+            app.update_slot(slot_tracker.get_slot());
+            app.update_blockhash(slot_tracker.get_blockhash());
+            
+            // Draw UI
+            terminal.draw(|frame| tui::draw(frame, &app))?;
+            
+            // Handle input
+            if tui::handle_input(&mut app)? {
+                break;
+            }
+            
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }.await;
+    
+    // Cleanup
+    coordinator.abort_all();
+    tui::restore()?;
+    
+    result
 }

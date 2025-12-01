@@ -1,0 +1,218 @@
+//! Bot Configuration - Structs for multi-bot configuration
+//!
+//! Supports loading from TOML config file with per-bot keypair paths.
+
+use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
+
+/// Deployment strategy for a bot
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeployStrategy {
+    /// Expected Value calculation
+    EV,
+    /// Percentage-based deployment
+    Percentage,
+    /// Manual square selection
+    Manual,
+}
+
+impl Default for DeployStrategy {
+    fn default() -> Self {
+        DeployStrategy::EV
+    }
+}
+
+/// Strategy-specific parameters
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum StrategyParams {
+    /// EV strategy parameters
+    EV {
+        /// Maximum amount to deploy per square (lamports)
+        max_per_square: u64,
+        /// Minimum bet threshold (lamports)
+        min_bet: u64,
+        /// Value of 1 ORE in lamports (for EV calculation)
+        ore_value: u64,
+    },
+    /// Percentage strategy parameters
+    Percentage {
+        /// Percentage in basis points (1000 = 10%)
+        percentage: u64,
+        /// Number of squares to deploy to
+        squares_count: u64,
+    },
+    /// Manual strategy parameters
+    Manual {
+        /// Exact amounts to deploy per square
+        amounts: [u64; 25],
+    },
+}
+
+impl Default for StrategyParams {
+    fn default() -> Self {
+        StrategyParams::EV {
+            max_per_square: 100_000_000, // 0.1 SOL
+            min_bet: 10_000,
+            ore_value: 800_000_000, // 0.8 SOL per ORE
+        }
+    }
+}
+
+/// Configuration for a single bot
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BotConfig {
+    /// Unique name for logging/display
+    pub name: String,
+    
+    /// Auth ID for this bot's managed miner
+    pub auth_id: u64,
+    
+    /// Deployment strategy
+    #[serde(default)]
+    pub strategy: DeployStrategy,
+    
+    /// When to start deploying (slots before end)
+    #[serde(default = "default_slots_left")]
+    pub slots_left: u64,
+    
+    /// Bankroll for this bot (lamports)
+    pub bankroll: u64,
+    
+    /// Strategy-specific parameters
+    #[serde(default)]
+    pub strategy_params: StrategyParams,
+    
+    /// Path to signer keypair (optional, falls back to defaults)
+    pub signer_path: Option<PathBuf>,
+    
+    /// Path to manager keypair (optional, falls back to defaults)
+    pub manager_path: Option<PathBuf>,
+}
+
+fn default_slots_left() -> u64 {
+    2
+}
+
+impl BotConfig {
+    /// Create a new EV bot config with defaults
+    pub fn new_ev(
+        name: impl Into<String>,
+        auth_id: u64,
+        bankroll: u64,
+        max_per_square: u64,
+        min_bet: u64,
+        ore_value: u64,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            auth_id,
+            strategy: DeployStrategy::EV,
+            slots_left: 2,
+            bankroll,
+            strategy_params: StrategyParams::EV {
+                max_per_square,
+                min_bet,
+                ore_value,
+            },
+            signer_path: None,
+            manager_path: None,
+        }
+    }
+
+    /// Get manager pubkey from loaded keypair (if available)
+    /// Note: Actual keypair loading happens elsewhere
+    pub fn get_display_name(&self) -> String {
+        format!("{} (auth_id={})", self.name, self.auth_id)
+    }
+}
+
+/// Top-level configuration with defaults and bot list
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Config {
+    /// Default signer keypair path
+    #[serde(default = "default_signer_path")]
+    pub default_signer_path: PathBuf,
+    
+    /// Default manager keypair path
+    #[serde(default = "default_manager_path")]
+    pub default_manager_path: PathBuf,
+    
+    /// List of bots to run
+    #[serde(default)]
+    pub bots: Vec<BotConfig>,
+}
+
+fn default_signer_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_default()
+        .join(".config/solana/id.json")
+}
+
+fn default_manager_path() -> PathBuf {
+    PathBuf::from("./manager.json")
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            default_signer_path: default_signer_path(),
+            default_manager_path: default_manager_path(),
+            bots: Vec::new(),
+        }
+    }
+}
+
+impl Config {
+    /// Load config from TOML file
+    pub fn load(path: &std::path::Path) -> Result<Self, Box<dyn std::error::Error>> {
+        let contents = std::fs::read_to_string(path)?;
+        let config: Config = toml::from_str(&contents)?;
+        Ok(config)
+    }
+
+    /// Get the signer path for a bot (falls back to default)
+    pub fn get_signer_path(&self, bot: &BotConfig) -> PathBuf {
+        bot.signer_path
+            .clone()
+            .unwrap_or_else(|| self.default_signer_path.clone())
+    }
+
+    /// Get the manager path for a bot (falls back to default)
+    pub fn get_manager_path(&self, bot: &BotConfig) -> PathBuf {
+        bot.manager_path
+            .clone()
+            .unwrap_or_else(|| self.default_manager_path.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_bot_config_new_ev() {
+        let config = BotConfig::new_ev("test-bot", 1, 100_000_000, 50_000_000, 10_000, 800_000_000);
+        assert_eq!(config.name, "test-bot");
+        assert_eq!(config.auth_id, 1);
+        assert_eq!(config.strategy, DeployStrategy::EV);
+    }
+
+    #[test]
+    fn test_config_default() {
+        let config = Config::default();
+        assert!(config.bots.is_empty());
+    }
+
+    #[test]
+    fn test_strategy_params_serialize() {
+        let params = StrategyParams::EV {
+            max_per_square: 100_000_000,
+            min_bet: 10_000,
+            ore_value: 800_000_000,
+        };
+        let serialized = toml::to_string(&params).unwrap();
+        assert!(serialized.contains("max_per_square"));
+    }
+}
