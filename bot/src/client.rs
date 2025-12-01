@@ -1,4 +1,7 @@
-use solana_client::rpc_client::RpcClient;
+use solana_client::{
+    rpc_client::RpcClient,
+    rpc_config::RpcSendTransactionConfig,
+};
 use solana_sdk::{
     commitment_config::CommitmentConfig,
     pubkey::Pubkey,
@@ -7,7 +10,7 @@ use solana_sdk::{
 };
 use std::time::Duration;
 
-use evore::ore_api::{board_pda, round_pda, Board, Round};
+use evore::ore_api::{board_pda, miner_pda, round_pda, Board, Miner, Round};
 use evore::state::{managed_miner_auth_pda, Manager};
 use steel::AccountDeserialize;
 
@@ -51,12 +54,17 @@ impl EvoreClient {
     }
 
     /// Send transaction without waiting for confirmation
-    /// Returns signature immediately for later confirmation
+    /// Skips preflight and sets 0 retries - we handle retries manually
     pub fn send_transaction_no_wait(
         &self,
         transaction: &Transaction,
     ) -> Result<Signature, Box<dyn std::error::Error>> {
-        let signature = self.rpc.send_transaction(transaction)?;
+        let config = RpcSendTransactionConfig {
+            skip_preflight: true,
+            max_retries: Some(0),
+            ..Default::default()
+        };
+        let signature = self.rpc.send_transaction_with_config(transaction, config)?;
         Ok(signature)
     }
 
@@ -82,6 +90,25 @@ impl EvoreClient {
             }
             Err(e) => {
                 // Check if it's an "account not found" error
+                let err_str = e.to_string();
+                if err_str.contains("AccountNotFound") || err_str.contains("could not find account") {
+                    Ok(None)
+                } else {
+                    Err(e.into())
+                }
+            }
+        }
+    }
+    
+    /// Get ORE Miner account for an authority (returns None if doesn't exist)
+    pub fn get_miner(&self, authority: &Pubkey) -> Result<Option<Miner>, Box<dyn std::error::Error>> {
+        let (miner_address, _) = miner_pda(*authority);
+        match self.rpc.get_account(&miner_address) {
+            Ok(account) => {
+                let miner = Miner::try_from_bytes(&account.data)?;
+                Ok(Some(*miner))
+            }
+            Err(e) => {
                 let err_str = e.to_string();
                 if err_str.contains("AccountNotFound") || err_str.contains("could not find account") {
                     Ok(None)

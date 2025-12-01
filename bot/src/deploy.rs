@@ -34,6 +34,11 @@ impl Default for EvDeployParams {
     }
 }
 
+/// Priority fee in microlamports per compute unit (for future use)
+/// 100,000 microlamports/CU * 1,400,000 CU = 140,000 lamports = 0.00014 SOL
+#[allow(dead_code)]
+const PRIORITY_FEE_MICROLAMPORTS: u64 = 100_000;
+
 /// Build EV deploy transaction
 pub fn build_ev_deploy_tx(
     signer: &Keypair,
@@ -44,6 +49,8 @@ pub fn build_ev_deploy_tx(
     recent_blockhash: Hash,
 ) -> Transaction {
     let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+    // Priority fee disabled for now
+    // let cu_price_ix = ComputeBudgetInstruction::set_compute_unit_price(PRIORITY_FEE_MICROLAMPORTS);
     let deploy_ix = evore::instruction::ev_deploy(
         signer.pubkey(),
         *manager,
@@ -111,16 +118,76 @@ pub async fn single_deploy(
 ) -> Result<Vec<Signature>, Box<dyn std::error::Error>> {
     println!("=== Single Deploy ===\n");
     
+    // Get PDAs
+    let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(*manager, auth_id);
+    let (ore_miner_pda, _) = evore::ore_api::miner_pda(managed_miner_auth);
+    
+    // Show account balances
+    println!("--- Account Balances ---");
+    let signer_balance = client.rpc.get_balance(&signer.pubkey()).unwrap_or(0);
+    println!("Signer ({}):", signer.pubkey());
+    println!("  Balance: {} lamports ({:.6} SOL)", signer_balance, signer_balance as f64 / 1e9);
+    
+    let auth_balance = client.rpc.get_balance(&managed_miner_auth).unwrap_or(0);
+    println!("Managed Miner Auth ({}):", managed_miner_auth);
+    println!("  Balance: {} lamports ({:.6} SOL)", auth_balance, auth_balance as f64 / 1e9);
+    
+    if let Ok(Some(miner)) = client.get_miner(&managed_miner_auth) {
+        println!("ORE Miner ({}):", ore_miner_pda);
+        println!("  Last Round:     {}", miner.round_id);
+        println!("  Checkpointed:   {}", miner.checkpoint_id);
+        println!("  Rewards SOL:    {} lamports ({:.6} SOL)", miner.rewards_sol, miner.rewards_sol as f64 / 1e9);
+        println!("  Rewards ORE:    {} ({:.9} ORE)", miner.rewards_ore, miner.rewards_ore as f64 / 1e11);
+    } else {
+        println!("ORE Miner: Not created yet (first deploy will create it)");
+    }
+    println!();
+    
     // Get current state
     let board = client.get_board()?;
     let current_slot = slot_tracker.get_slot();
     
+    println!("--- Round Info ---");
     println!("Round ID:     {}", board.round_id);
-    println!("Current Slot: {} (via websocket)", current_slot);
-    println!("End Slot:     {}", board.end_slot);
+    println!("Start Slot:   {}", board.start_slot);
+    if board.end_slot == u64::MAX {
+        println!("End Slot:     MAX (waiting for first deployer)");
+    } else {
+        println!("End Slot:     {}", board.end_slot);
+    }
+    println!("Current Slot: {}", current_slot);
+    
+    // Handle round lifecycle edge cases
+    if board.end_slot == u64::MAX {
+        println!("\n⏳ Round not started yet (end_slot=MAX). Waiting for first deployer...");
+        // Wait for round to actually start
+        loop {
+            sleep(Duration::from_millis(500)).await;
+            if let Ok(b) = client.get_board() {
+                if b.end_slot != u64::MAX {
+                    println!("✓ Round started! New end_slot: {}", b.end_slot);
+                    // Recurse with updated board
+                    return Box::pin(single_deploy(client, slot_tracker, signer, manager, auth_id, params)).await;
+                }
+            }
+            print!("\r  Waiting... slot {}   ", slot_tracker.get_slot());
+            std::io::Write::flush(&mut std::io::stdout())?;
+        }
+    }
+    
+    if current_slot >= board.end_slot {
+        let slots_past = current_slot.saturating_sub(board.end_slot);
+        if slots_past < evore::ore_api::INTERMISSION_SLOTS {
+            println!("\n⏳ Round ended, in intermission ({}/{} slots)...", slots_past, evore::ore_api::INTERMISSION_SLOTS);
+        } else {
+            println!("\n⏳ Round ended, waiting for reset...");
+        }
+        return Err("Round not active".into());
+    }
     
     let slots_remaining = board.end_slot.saturating_sub(current_slot);
-    println!("Slots Left:   {}\n", slots_remaining);
+    println!("Slots Left:   {}", slots_remaining);
+    println!();
     
     // Calculate deploy window
     // For single send (slots_left > 10), wait 1 extra slot to ensure on-chain check passes
@@ -130,11 +197,43 @@ pub async fn single_deploy(
         board.end_slot.saturating_sub(params.slots_left)
     };
     
-    if current_slot < deploy_start_slot {
+    // Wait until one slot BEFORE deploy_start_slot, then wait 200ms more
+    // This starts sending ~200ms before the actual target slot (halfway through previous slot)
+    let wait_until_slot = deploy_start_slot.saturating_sub(1);
+    
+    if current_slot < wait_until_slot {
         let target_slots_left = board.end_slot.saturating_sub(deploy_start_slot);
-        println!("Waiting for deploy window (slot {}, {} slots left)...", deploy_start_slot, target_slots_left);
-        slot_tracker.wait_until_slot(deploy_start_slot).await;
-        println!("Deploy window reached!");
+        println!("--- Waiting for Deploy Window ---");
+        println!("Target: slot {} ({} slots left)", deploy_start_slot, target_slots_left);
+        println!("Will start sending at slot {} + 100ms", wait_until_slot);
+        
+        // Show countdown while waiting for slot before target
+        let mut last_slot = current_slot;
+        loop {
+            let now_slot = slot_tracker.get_slot();
+            if now_slot >= wait_until_slot {
+                break;
+            }
+            if now_slot != last_slot {
+                let slots_until = wait_until_slot.saturating_sub(now_slot);
+                let slots_left = board.end_slot.saturating_sub(now_slot);
+                print!("\r  Slot {} | {} slots until pre-deploy | {} slots until end   ", now_slot, slots_until, slots_left);
+                std::io::Write::flush(&mut std::io::stdout())?;
+                last_slot = now_slot;
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+        
+        // Wait additional 100ms (quarter through the slot before target)
+        println!("\n  Slot {} reached, waiting 100ms...", wait_until_slot);
+        sleep(Duration::from_millis(100)).await;
+        println!("✓ Deploy window reached! Starting to send...");
+    } else if current_slot < deploy_start_slot {
+        // We're already in the slot before target, just wait the 100ms
+        println!("--- Deploy Window ---");
+        println!("Already at slot {}, waiting 100ms before sending...", current_slot);
+        sleep(Duration::from_millis(100)).await;
+        println!("✓ Starting to send...");
     }
     
     // Determine send strategy based on slots_left
@@ -146,11 +245,13 @@ pub async fn single_deploy(
         100 // High urgency: every 100ms
     };
     
+    println!();
     if send_interval_ms == 0 {
-        println!("\n📤 Single send mode (slots_left > 10, waiting for {} slots left)\n", params.slots_left - 1);
+        println!("📤 Single send mode (slots_left > 10)");
     } else {
-        println!("\n🚀 Spam mode: sending every {}ms until slot {}\n", send_interval_ms, board.end_slot);
+        println!("🚀 Spam mode: sending every {}ms until slot {} (end)", send_interval_ms, board.end_slot);
     }
+    println!();
     
     let mut signatures: Vec<Signature> = Vec::new();
     let mut tx_count = 0;
@@ -159,9 +260,10 @@ pub async fn single_deploy(
     loop {
         let current = slot_tracker.get_slot();
         
-        // Stop if we've passed the end slot
-        if current > board.end_slot {
-            println!("\n⏱️  Passed end slot {}, stopping", board.end_slot);
+        // Stop if we've reached end slot (last deployable slot is end_slot - 1)
+        // ORE deploy fails if clock.slot >= board.end_slot
+        if current >= board.end_slot {
+            println!("\n⏱️  Reached end slot {}, stopping (last deployable was {})", board.end_slot, board.end_slot - 1);
             break;
         }
         
@@ -240,6 +342,7 @@ pub async fn continuous_deploy(
     println!("\nPress Ctrl+C to stop\n");
     
     let mut last_round_deployed: Option<u64> = None;
+    let mut last_round_checkpointed: Option<u64> = None;
     
     loop {
         // Get current state
@@ -253,48 +356,84 @@ pub async fn continuous_deploy(
         };
         
         let current_slot = slot_tracker.get_slot();
-        let slots_remaining = board.end_slot.saturating_sub(current_slot);
         
         // Check if this is a new round we haven't deployed to
         let already_deployed = last_round_deployed == Some(board.round_id);
         
-        // If we're past the round end, do checkpoint and claim
-        if current_slot > board.end_slot {
-            if let Some(last_round) = last_round_deployed {
-                println!("\n--- Round {} ended, checkpointing and claiming ---", last_round);
-                
-                // Wait for blockhash
-                let blockhash = loop {
-                    let bh = slot_tracker.get_blockhash();
-                    if bh != Hash::default() {
-                        break bh;
-                    }
-                    sleep(Duration::from_millis(100)).await;
-                };
-                
-                // Checkpoint
-                let checkpoint_tx = build_checkpoint_tx(signer, manager, auth_id, last_round, blockhash);
-                match client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
-                    Ok(sig) => println!("✓ Checkpoint confirmed: {}", sig),
-                    Err(e) => println!("✗ Checkpoint failed: {}", e),
-                }
-                
-                // Claim SOL
-                sleep(Duration::from_millis(500)).await;
-                let blockhash = slot_tracker.get_blockhash();
-                let claim_tx = build_claim_sol_tx(signer, manager, auth_id, blockhash);
-                match client.rpc.send_and_confirm_transaction(&claim_tx) {
-                    Ok(sig) => println!("✓ Claim SOL confirmed: {}", sig),
-                    Err(e) => println!("✗ Claim SOL failed: {}", e),
-                }
-                
-                last_round_deployed = None;
-            }
-            
-            // Wait for new round
-            println!("\rWaiting for new round...");
-            sleep(Duration::from_secs(1)).await;
+        // Handle round lifecycle states:
+        // 1. board.end_slot == u64::MAX: Reset done, waiting for first deployer to start round
+        // 2. current_slot >= board.end_slot: Round ended, in intermission or waiting for reset
+        // 3. current_slot < board.end_slot: Round active
+        
+        if board.end_slot == u64::MAX {
+            // Reset happened but no one has started the round yet
+            print!("\rRound {}: Waiting for round to start (end_slot=MAX)...   ", board.round_id);
+            std::io::Write::flush(&mut std::io::stdout())?;
+            sleep(Duration::from_millis(500)).await;
             continue;
+        }
+        
+        if current_slot >= board.end_slot {
+            // Round ended - could be in intermission or waiting for reset
+            let slots_past_end = current_slot.saturating_sub(board.end_slot);
+            if slots_past_end < evore::ore_api::INTERMISSION_SLOTS {
+                print!("\rRound {}: Intermission ({}/{} slots)...   ", 
+                       board.round_id, slots_past_end, evore::ore_api::INTERMISSION_SLOTS);
+            } else {
+                print!("\rRound {}: Waiting for reset...   ", board.round_id);
+            }
+            std::io::Write::flush(&mut std::io::stdout())?;
+            sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        
+        let slots_remaining = board.end_slot.saturating_sub(current_slot);
+        
+        // Early checkpoint: if >50 slots left AND we have a previous round to checkpoint
+        if slots_remaining > 50 {
+            if let Some(last_round) = last_round_deployed {
+                // Only checkpoint if we haven't already
+                if last_round_checkpointed != Some(last_round) {
+                    println!("\n--- Early checkpoint (>50 slots left): Round {} ---", last_round);
+                    
+                    // Wait for blockhash
+                    let blockhash = loop {
+                        let bh = slot_tracker.get_blockhash();
+                        if bh != Hash::default() {
+                            break bh;
+                        }
+                        sleep(Duration::from_millis(100)).await;
+                    };
+                    
+                    // Checkpoint
+                    let checkpoint_tx = build_checkpoint_tx(signer, manager, auth_id, last_round, blockhash);
+                    match client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
+                        Ok(sig) => {
+                            println!("✓ Checkpoint confirmed: {}", sig);
+                            last_round_checkpointed = Some(last_round);
+                        }
+                        Err(e) => println!("✗ Checkpoint failed: {}", e),
+                    }
+                    
+                    // Claim SOL only if there's something to claim
+                    sleep(Duration::from_millis(500)).await;
+                    let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(*manager, auth_id);
+                    if let Ok(Some(miner)) = client.get_miner(&managed_miner_auth) {
+                        if miner.rewards_sol > 0 {
+                            let blockhash = slot_tracker.get_blockhash();
+                            let claim_tx = build_claim_sol_tx(signer, manager, auth_id, blockhash);
+                            match client.rpc.send_and_confirm_transaction(&claim_tx) {
+                                Ok(sig) => println!("✓ Claim SOL confirmed: {} ({} lamports)", sig, miner.rewards_sol),
+                                Err(e) => println!("✗ Claim SOL failed: {}", e),
+                            }
+                        } else {
+                            println!("ℹ No SOL rewards to claim");
+                        }
+                    }
+                    
+                    continue;
+                }
+            }
         }
         
         // If already deployed this round, just wait

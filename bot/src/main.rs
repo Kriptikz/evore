@@ -107,11 +107,11 @@ enum Commands {
         auth_id: u64,
     },
     
-    /// Checkpoint a round
+    /// Checkpoint a round (auto-detects round_id from miner account if not specified)
     Checkpoint {
-        /// Round ID to checkpoint
+        /// Round ID to checkpoint (optional - auto-detected from miner if not provided)
         #[arg(long)]
-        round_id: u64,
+        round_id: Option<u64>,
         
         /// Auth ID
         #[arg(long, default_value = "1")]
@@ -288,12 +288,74 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let manager_keypair = load_manager_keypair(args.manager_path.as_ref())?;
             let manager = manager_keypair.pubkey();
             
-            println!("Checkpointing round {} for auth_id {}...", round_id, auth_id);
-            println!("Signer:  {}", signer.pubkey());
-            println!("Manager: {}", manager);
+            // Get managed miner auth PDA (this is the miner authority)
+            let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager, *auth_id);
+            
+            println!("=== Checkpoint ===\n");
+            println!("Signer:             {}", signer.pubkey());
+            println!("Manager:            {}", manager);
+            println!("Managed Miner Auth: {}", managed_miner_auth);
+            println!();
+            
+            // Get miner account to check status
+            let miner = match client.get_miner(&managed_miner_auth)? {
+                Some(m) => m,
+                None => {
+                    println!("✗ No miner account found for this managed miner auth.");
+                    println!("  Have you deployed to any rounds yet?");
+                    return Ok(());
+                }
+            };
+            
+            println!("--- Miner Status ---");
+            println!("Last Round Played:   {}", miner.round_id);
+            println!("Last Checkpointed:   {}", miner.checkpoint_id);
+            println!("Claimable SOL:       {} lamports ({:.6} SOL)", miner.rewards_sol, miner.rewards_sol as f64 / 1e9);
+            println!("Claimable ORE:       {} ({:.9} ORE)", miner.rewards_ore, miner.rewards_ore as f64 / 1e11);
+            println!();
+            
+            // Determine which round to checkpoint
+            let target_round = match round_id {
+                Some(id) => *id,
+                None => {
+                    // Auto-detect: checkpoint the last round played if not yet checkpointed
+                    if miner.round_id > miner.checkpoint_id {
+                        miner.round_id
+                    } else {
+                        println!("✓ No checkpoint needed - miner is up to date!");
+                        println!("  round_id ({}) == checkpoint_id ({})", miner.round_id, miner.checkpoint_id);
+                        return Ok(());
+                    }
+                }
+            };
+            
+            // Verify this round needs checkpointing
+            if target_round <= miner.checkpoint_id {
+                println!("✗ Round {} already checkpointed (checkpoint_id = {})", target_round, miner.checkpoint_id);
+                return Ok(());
+            }
+            
+            if target_round > miner.round_id {
+                println!("✗ Round {} hasn't been played yet (last played = {})", target_round, miner.round_id);
+                return Ok(());
+            }
+            
+            // Check if round has ended
+            let board = client.get_board()?;
+            let current_slot = client.get_slot()?;
+            
+            // If target round is the current round, make sure it's ended
+            if target_round == board.round_id && current_slot <= board.end_slot {
+                println!("✗ Round {} is still active!", target_round);
+                println!("  Current slot: {}, End slot: {}", current_slot, board.end_slot);
+                println!("  Wait for the round to end before checkpointing.");
+                return Ok(());
+            }
+            
+            println!("Checkpointing round {}...", target_round);
             
             let blockhash = client.rpc.get_latest_blockhash()?;
-            let tx = deploy::build_checkpoint_tx(&signer, &manager, *auth_id, *round_id, blockhash);
+            let tx = deploy::build_checkpoint_tx(&signer, &manager, *auth_id, target_round, blockhash);
             
             match client.rpc.send_and_confirm_transaction(&tx) {
                 Ok(sig) => println!("✓ Checkpoint confirmed: {}", sig),
