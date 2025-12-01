@@ -389,53 +389,6 @@ pub async fn continuous_deploy(
         
         let slots_remaining = board.end_slot.saturating_sub(current_slot);
         
-        // Early checkpoint: if >50 slots left AND we have a previous round to checkpoint
-        if slots_remaining > 50 {
-            if let Some(last_round) = last_round_deployed {
-                // Only checkpoint if we haven't already
-                if last_round_checkpointed != Some(last_round) {
-                    println!("\n--- Early checkpoint (>50 slots left): Round {} ---", last_round);
-                    
-                    // Wait for blockhash
-                    let blockhash = loop {
-                        let bh = slot_tracker.get_blockhash();
-                        if bh != Hash::default() {
-                            break bh;
-                        }
-                        sleep(Duration::from_millis(100)).await;
-                    };
-                    
-                    // Checkpoint
-                    let checkpoint_tx = build_checkpoint_tx(signer, manager, auth_id, last_round, blockhash);
-                    match client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
-                        Ok(sig) => {
-                            println!("✓ Checkpoint confirmed: {}", sig);
-                            last_round_checkpointed = Some(last_round);
-                        }
-                        Err(e) => println!("✗ Checkpoint failed: {}", e),
-                    }
-                    
-                    // Claim SOL only if there's something to claim
-                    sleep(Duration::from_millis(500)).await;
-                    let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(*manager, auth_id);
-                    if let Ok(Some(miner)) = client.get_miner(&managed_miner_auth) {
-                        if miner.rewards_sol > 0 {
-                            let blockhash = slot_tracker.get_blockhash();
-                            let claim_tx = build_claim_sol_tx(signer, manager, auth_id, blockhash);
-                            match client.rpc.send_and_confirm_transaction(&claim_tx) {
-                                Ok(sig) => println!("✓ Claim SOL confirmed: {} ({} lamports)", sig, miner.rewards_sol),
-                                Err(e) => println!("✗ Claim SOL failed: {}", e),
-                            }
-                        } else {
-                            println!("ℹ No SOL rewards to claim");
-                        }
-                    }
-                    
-                    continue;
-                }
-            }
-        }
-        
         // If already deployed this round, just wait
         if already_deployed {
             print!("\rRound {}: slot {} / {} ({} left), already deployed", 
@@ -445,31 +398,61 @@ pub async fn continuous_deploy(
             continue;
         }
         
-        // Calculate deploy window
-        let deploy_start_slot = board.end_slot.saturating_sub(params.slots_left);
-        
-        // If in deploy window, deploy!
-        if current_slot >= deploy_start_slot {
-            println!("\n\n🎯 Deploy window! Round {} - slot {} (end: {})", 
-                     board.round_id, current_slot, board.end_slot);
-            
-            match single_deploy(client, slot_tracker, signer, manager, auth_id, params).await {
-                Ok(sigs) => {
-                    if !sigs.is_empty() {
-                        last_round_deployed = Some(board.round_id);
+        // New round detected - checkpoint previous round first if needed
+        if let Some(last_round) = last_round_deployed {
+            if last_round_checkpointed != Some(last_round) {
+                println!("\n--- Checkpointing previous round {} ---", last_round);
+                
+                // Wait for blockhash
+                let blockhash = loop {
+                    let bh = slot_tracker.get_blockhash();
+                    if bh != Hash::default() {
+                        break bh;
+                    }
+                    sleep(Duration::from_millis(100)).await;
+                };
+                
+                // Checkpoint
+                let checkpoint_tx = build_checkpoint_tx(signer, manager, auth_id, last_round, blockhash);
+                match client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
+                    Ok(sig) => {
+                        println!("✓ Checkpoint confirmed: {}", sig);
+                        last_round_checkpointed = Some(last_round);
+                    }
+                    Err(e) => println!("✗ Checkpoint failed: {}", e),
+                }
+                
+                // Claim SOL only if there's something to claim
+                sleep(Duration::from_millis(500)).await;
+                let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(*manager, auth_id);
+                if let Ok(Some(miner)) = client.get_miner(&managed_miner_auth) {
+                    if miner.rewards_sol > 0 {
+                        let blockhash = slot_tracker.get_blockhash();
+                        let claim_tx = build_claim_sol_tx(signer, manager, auth_id, blockhash);
+                        match client.rpc.send_and_confirm_transaction(&claim_tx) {
+                            Ok(sig) => println!("✓ Claim SOL confirmed: {} ({} lamports)", sig, miner.rewards_sol),
+                            Err(e) => println!("✗ Claim SOL failed: {}", e),
+                        }
+                    } else {
+                        println!("ℹ No SOL rewards to claim");
                     }
                 }
-                Err(e) => {
-                    println!("Deploy error: {}", e);
+            }
+        }
+        
+        // Call single_deploy immediately - it handles waiting for the right slot
+        println!("\n\n🎯 Round {} active - starting deploy (single_deploy will wait for {} slots left)", 
+                 board.round_id, params.slots_left);
+        
+        match single_deploy(client, slot_tracker, signer, manager, auth_id, params).await {
+            Ok(sigs) => {
+                if !sigs.is_empty() {
+                    last_round_deployed = Some(board.round_id);
                 }
             }
-        } else {
-            // Not in window yet, show status
-            let slots_until_deploy = deploy_start_slot.saturating_sub(current_slot);
-            print!("\rRound {}: slot {} / {} ({} slots until deploy)", 
-                   board.round_id, current_slot, board.end_slot, slots_until_deploy);
-            std::io::Write::flush(&mut std::io::stdout())?;
-            sleep(Duration::from_millis(100)).await;
+            Err(e) => {
+                println!("Deploy error: {}", e);
+            }
         }
     }
 }
