@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-11-30
+> Last Updated: 2025-12-01
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
@@ -52,9 +52,9 @@
 - [x] Create security audit document
 - [x] Create program architecture documentation
 - [x] Document EV calculation constants
+- [x] Create bot README with commands
 - [ ] Add inline documentation for all public functions
 - [ ] Create client SDK documentation
-- [ ] Add deployment guide
 
 ## Phase 7: Deployment Strategies
 > Priority: **HIGH** - Multiple strategy options for deploy instruction
@@ -98,7 +98,7 @@
 - [x] Convert to Cargo workspace
 - [x] Create bot crate structure
 
-## Phase 9: Evore Bot
+## Phase 9: Evore Bot ✅
 > Priority: **HIGH** - Automated deployment bot
 
 ### Overview
@@ -110,6 +110,7 @@ Bot for automated EV deployments with spam strategy to land transactions in fina
 **.env file:**
 ```
 RPC_URL=https://your-rpc.com
+WS_URL=wss://your-rpc.com
 KEYPAIR_PATH=/path/to/signer.json      # Signer keypair (pays fees, signs txs)
 MANAGER_PATH=/path/to/manager.json     # Manager keypair (separate account)
 ```
@@ -120,10 +121,10 @@ MANAGER_PATH=/path/to/manager.json     # Manager keypair (separate account)
 
 ### Deployment Strategy (EV + Spam)
 
-1. **Timing**: Deploy in last 2 slots (~800ms before round end)
-2. **Spam Mode**: Send 10 transactions over 1000ms (1 every 100ms)
-3. **Fire-and-forget**: Don't wait for confirmation during spam
-4. **Confirm later**: Check which transactions landed after round ends
+1. **Timing**: Deploy at configurable slots_left, starts sending 50ms before target slot
+2. **Spam Mode**: Send transactions every 100ms until end_slot reached
+3. **Fire-and-forget**: Skip preflight, 0 retries - we handle manually
+4. **Confirm later**: Check which transactions landed after spam window
 
 ### Commands
 
@@ -132,21 +133,28 @@ MANAGER_PATH=/path/to/manager.json     # Manager keypair (separate account)
 | `status` | Show current round, slots remaining, deployments |
 | `info` | Display managed_miner_auth PDA for website lookup |
 | `deploy` | Single EV deployment (spam mode at round end) |
-| `run` | Continuous loop: deploy → checkpoint → claim SOL → repeat |
-| `checkpoint` | Manual checkpoint for a specific round |
+| `run` | Continuous loop: checkpoint → claim SOL → deploy → repeat |
+| `checkpoint` | Manual checkpoint (auto-detects round from miner) |
 | `claim-sol` | Manual SOL claim |
+| `create-manager` | Create Manager account |
+| `dashboard` | Live TUI dashboard |
 
 ### Implementation Tasks
 
 - [x] Project setup (Cargo workspace, .env support)
-- [x] RPC client (send without confirmation wait)
-- [x] Round state fetching (get_board, get_round, get_slot)
+- [x] RPC client (skip preflight, 0 retries)
+- [x] Websocket slot tracking (real-time slot updates)
+- [x] Round state fetching (get_board, get_round, get_miner)
 - [x] Transaction building (deploy, checkpoint, claim_sol)
-- [x] Single deploy with spam mode
+- [x] Single deploy with spam mode + countdown display
 - [x] Continuous deploy loop with auto checkpoint & claim SOL
 - [x] CLI with subcommands
-- [ ] Manager keypair loading (separate from signer)
-- [ ] Error handling and logging improvements
+- [x] Manager keypair loading (separate from signer)
+- [x] Balance display (signer, managed_miner_auth, miner rewards)
+- [x] Round lifecycle handling (intermission, reset waiting, MAX end_slot)
+- [x] Auto-detect checkpoint round from miner account
+- [x] Claim SOL only if rewards_sol > 0
+- [x] Priority fee code ready (disabled for now)
 
 ## Phase 10: Frontend UI
 > Priority: **LOW** - Future
@@ -167,18 +175,18 @@ MANAGER_PATH=/path/to/manager.json     # Manager keypair (separate account)
 | Phase 3: Optimization | ✅ Complete | 100% (4/4) |
 | Phase 4: Code Quality | ✅ Complete | 100% (6/6) |
 | Phase 5: Testing | ✅ Complete | 100% (6/6) |
-| Phase 6: Documentation | 🟡 In Progress | 50% (3/6) |
+| Phase 6: Documentation | 🟡 In Progress | 67% (4/6) |
 | Phase 7: Strategies | ✅ Complete | 100% (7/7) |
 | Phase 8: Mainnet Deployment | ✅ Complete | 100% (3/3) |
-| Phase 9: Evore Bot | 🟡 In Progress | 78% (7/9) |
+| Phase 9: Evore Bot | ✅ Complete | 100% (13/13) |
 | Phase 10: Frontend UI | 🔴 Not Started | 0% |
 
 ---
 
 ## Notes
 
-- Phases 1-8 complete! Program deployed to mainnet.
+- Phases 1-9 complete! Program deployed to mainnet, bot operational.
 - Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
 - 27+ unit tests with comprehensive coverage
 - Workspace structure: `program/` (Solana program), `bot/` (deployment bot)
-- Phase 9 is the automated bot for deploying and claiming
+- Bot tested on mainnet with successful deployments

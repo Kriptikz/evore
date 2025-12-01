@@ -4,41 +4,50 @@
 
 ## Active
 
-### Task 24: Bot - Testing on Mainnet
-**Priority:** 🔴 High
-
-**Test checklist:**
-- [ ] `status` - View current round
-- [ ] `info` - Display managed_miner_auth PDA
-- [ ] `deploy` - Single EV deployment with spam
-- [ ] `run` - Continuous loop with auto checkpoint/claim
-- [ ] `checkpoint` - Manual checkpoint
-- [ ] `claim-sol` - Manual SOL claim
-
-**Setup:**
-```bash
-# .env in bot/ directory
-RPC_URL=https://your-rpc.com
-WS_URL=wss://your-rpc.com  # Optional
-KEYPAIR_PATH=/path/to/signer.json
-MANAGER_PATH=/path/to/manager.json
-```
+_None - Bot operational on mainnet!_
 
 ---
 
 ## Up Next
 
-- Task 25: Frontend UI
+### Task 25: Frontend UI
+**Priority:** 🟡 Medium
+
+- Dashboard for round monitoring
+- Manual deployment interface
+- Wallet connection
+- Claim interface
 
 ---
 
 ## Backlog
 
-_None_
+- Add inline documentation for all public functions
+- Create client SDK documentation
+- Enable priority fee when needed
 
 ---
 
 ## Completed
+
+### ✅ Task 24: Bot - Mainnet Testing & Refinements
+**Completed:** 2025-12-01
+
+**Improvements made during testing:**
+- Fixed round lifecycle handling (intermission, reset waiting, MAX end_slot)
+- Auto-detect checkpoint round from miner account
+- Checkpoint command verifies if needed before executing
+- Skip preflight + 0 retries for deploy transactions
+- Claim SOL only if rewards_sol > 0
+- Balance display (signer, managed_miner_auth, miner rewards)
+- Live slot countdown while waiting for deploy window
+- Start sending 50ms before target slot (configurable)
+- Stop sending at end_slot (last deployable is end_slot - 1)
+- Continuous deploy calls single_deploy immediately (handles waiting internally)
+- Priority fee code ready (disabled for now)
+- Bot README with all commands
+
+---
 
 ### ✅ Task 23: Bot - Websocket Slot Tracking
 **Completed:** 2025-12-01
