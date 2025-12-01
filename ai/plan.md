@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-12-01 (updated with shared constants, round lifecycle, config format, accountSubscribe notes)
+> Last Updated: 2025-12-01 (Phase 10 complete - Dashboard TUI with bot_task architecture)
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
@@ -89,13 +89,46 @@
 - [x] Balance display and round lifecycle handling
 - [x] Priority fee code ready (disabled for now)
 
-## Phase 10: Dashboard TUI
-> Priority: **HIGH** - Live monitoring dashboard
+## Phase 10: Dashboard TUI ✅
+> Priority: **HIGH** - Live monitoring dashboard (COMPLETE)
 
 ### Overview
 Ratatui-based terminal UI for real-time **monitoring** of rounds, deployments, and bot status.
 
-**Important:** TUI is monitoring-only. Bots deploy automatically based on config file parameters. TUI does not control deployments - it displays real-time state from shared services.
+**Important:** TUI is monitoring-only. Bots deploy automatically based on config file parameters. TUI does not control deployments - it displays real-time state from bot tasks via channels.
+
+### Architecture (Implemented)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                         TUI Thread                               │
+│  - Renders UI based on App state                                 │
+│  - Handles keyboard input                                        │
+│  - Receives updates via mpsc channel                             │
+└─────────────────────────────────────────────────────────────────┘
+                              ▲
+                              │ mpsc channel (TuiUpdate enum)
+                              │
+┌─────────────────────────────────────────────────────────────────┐
+│                      Bot Task (tokio::spawn)                     │
+│  - Runs deployment loop independently                            │
+│  - Sends status updates to TUI                                   │
+│  - Uses SlotTracker for timing                                   │
+│  - Handles checkpoint, claim, deploy                             │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+**TuiUpdate enum:**
+- `SlotUpdate { slot, blockhash }`
+- `BoardUpdate(Board)`
+- `RoundUpdate(Round)`
+- `BotStatusUpdate { bot_index, status }`
+- `BotMinerUpdate { bot_index, miner }`
+- `BotDeployedUpdate { bot_index, amount, round_id }`
+- `BotStatsUpdate { bot_index, rounds_participated, rounds_won, current_claimable_sol, current_ore }`
+- `BotSignerBalanceUpdate { bot_index, balance }`
+- `TxEvent { bot_name, action, signature, error }`
+- `Error(String)`
 
 ### Layout Design
 
@@ -144,109 +177,77 @@ Ratatui-based terminal UI for real-time **monitoring** of rounds, deployments, a
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
-### Features
+### Features (Implemented)
 
 **Header Section:**
-- [ ] Round ID, current slot, end slot, slots remaining
-- [ ] Round phase (Active, Intermission, Waiting Reset, Waiting Start)
-- [ ] Session duration (how long dashboard has been running)
-- [ ] RPC endpoint name
+- [x] Round ID, current slot, end slot, slots remaining
+- [x] Round phase (Active, Intermission, Waiting Reset, Waiting Start)
+- [x] Session duration (how long dashboard has been running)
+- [x] RPC endpoint name
+- [x] Blockhash (truncated)
 
 **Bot Blocks:**
-- [ ] Strategy-based icons with uniqueness:
-  - EV: 📊 📈 💹 🎰 🎲 (chart/gambling themed)
-  - Percentage: 📐 🔢 🎯 ％ (math themed)
-  - Manual: ✋ 🎮 🕹️ 👆 (hand/control themed)
-  - Multiple bots same strategy: add number suffix (📊₁ 📊₂)
-- [ ] Auth ID and strategy type
-- [ ] Bankroll amount
-- [ ] Current status with countdown (Waiting, Deploying, Deployed, Checkpointing)
-- [ ] **This round: total_deployed amount**
-- [ ] **Claimable rewards: SOL and ORE**
-- [ ] **Session stats** (in-memory, resets on restart):
+- [x] Strategy-based icons (📊 EV, 📐 Percentage, ✋ Manual)
+- [x] Auth ID and strategy type
+- [x] Bankroll amount
+- [x] Signer (fee payer) SOL balance
+- [x] Current status with countdown (Idle, Waiting, Deploying, Deployed, Checkpointing)
+- [x] This round: deployed amount
+- [x] Claimable rewards: SOL and ORE
+- [x] Session stats with P&L tracking (can go negative):
   - Time running
   - Rounds participated
   - Wins and win rate (%)
-  - SOL + ORE earned this session
+  - SOL + ORE P&L (green if positive, red if negative)
 
 **Board Section:**
-- [ ] 5x5 grid showing all 25 squares
-- [ ] Total deployed per square (from Round account)
-- [ ] Each bot's deployment shown separately: icon + amount
-- [ ] Multiple bots on same square: each on own line with their amount
-- [ ] Color coding (high deployment = brighter)
+- [x] 5x5 grid showing all 25 squares
+- [x] Total deployed per square (from Round account)
+- [x] Color coding (high deployment = brighter)
+- [ ] Each bot's deployment shown separately (multi-bot feature, Phase 11)
 
 **Transaction Log:**
-- [ ] Scrollable log of recent transactions
-- [ ] Shows: timestamp, bot icon, action (SENT/CONFIRMED/FAILED)
-- [ ] Signature (truncated)
-- [ ] **Error details for failed txs** (fetched from RPC)
+- [x] Scrollable log of recent transactions
+- [x] Shows: timestamp, bot name, action (SENT/OK/FAIL)
+- [x] Signature (truncated)
+- [x] Error messages for failed txs
 
-### Session Statistics (In-Memory)
+### Session Statistics (Implemented)
 
 Track per session without extra RPC calls. Stored in RAM, resets on restart.
 
 ```rust
-struct SessionStats {
-    started_at: Instant,
-}
-
 struct BotSessionStats {
     started_at: Instant,
     rounds_participated: u64,
-    rounds_won: u64,           // Won = checkpoint showed rewards > 0
-    sol_earned: u64,           // Cumulative SOL earned this session
-    ore_earned: u64,           // Cumulative ORE earned this session
-    last_rewards_sol: u64,     // rewards_sol before last checkpoint
-    last_rewards_ore: u64,     // rewards_ore before last checkpoint
-    // Derived:
-    // - running_time = Instant::now() - started_at
-    // - win_rate = rounds_won / rounds_participated * 100
+    rounds_won: u64,
+    // P&L tracking (can go negative)
+    starting_claimable_sol: u64,  // Set on first stats update
+    current_claimable_sol: u64,   // Updated after each checkpoint
+    starting_ore: u64,
+    current_ore: u64,
 }
+
+// P&L calculation:
+// sol_pnl = current_claimable_sol - starting_claimable_sol (can be negative!)
+// ore_pnl = current_ore - starting_ore
 ```
 
-**When to update:**
+**Update logic:**
 - `rounds_participated += 1` when bot successfully deploys
-- Before checkpoint: store `last_rewards_sol` and `last_rewards_ore` from miner account
-- After checkpoint: 
-  - `new_rewards = miner.rewards_sol - last_rewards_sol` (delta)
-  - `sol_earned += new_rewards` if positive
-  - `ore_earned += (miner.rewards_ore - last_rewards_ore)` if positive
-  - `rounds_won += 1` if either increased
+- After checkpoint: update `current_claimable_sol` and `current_ore` from miner
+- `rounds_won += 1` if delta > 0
+- First stats update sets `starting_*` values for P&L baseline
 
-### Transaction Error Inspection
-
-When a transaction fails, fetch the actual error:
-
-```rust
-// After sending, queue signature for confirmation
-// TxConfirmer checks status and fetches error if failed
-
-struct TxResult {
-    signature: Signature,
-    status: TxStatus,  // Confirmed, Failed, Timeout
-    error: Option<TransactionError>,  // Actual error from chain
-    slot_landed: Option<u64>,  // What slot it landed in (if any)
-}
-
-// Common errors to display:
-// - "EndSlotExceeded" - Transaction landed after round ended
-// - "TooManySlotsLeft" - Transaction landed too early  
-// - "NoDeployments" - EV calculation found no profitable squares
-// - "InsufficientFunds" - Not enough SOL
-// - "Custom(0x1)" -> "NotAuthorized"
-// - etc.
-```
-
-### Implementation Tasks
-- [ ] Fix and verify existing dashboard code
-- [ ] Implement header section with live updates
-- [ ] Implement bot blocks (dynamic based on config)
-- [ ] Implement 5x5 board grid with deployment overlay
-- [ ] Implement transaction log with scrolling
-- [ ] Add error fetching for failed transactions
-- [ ] Parse and display human-readable error messages
-- [ ] Add keyboard shortcuts (q=quit, tab=switch focus, etc.)
+### Implementation Tasks (Complete)
+- [x] Separated UI layer from bot logic using TuiUpdate messages
+- [x] Bot task runs in tokio::spawn, sends updates via mpsc channel
+- [x] TUI loop polls updates non-blocking and renders
+- [x] Header section with live slot/phase/blockhash
+- [x] Bot blocks with strategy, status, rewards, P&L stats
+- [x] 5x5 board grid with round deployment data
+- [x] Transaction log with timestamps and error messages
+- [x] Keyboard shortcuts (q=quit, Esc=quit)
 
 ## Phase 11: Multi-Bot Architecture
 > Priority: **HIGH** - Parallel bots with optimized RPC
@@ -656,7 +657,7 @@ async fn tx_confirmer_task(
 | Phase 7: Strategies | ✅ Complete | 100% (7/7) |
 | Phase 8: Mainnet Deployment | ✅ Complete | 100% (3/3) |
 | Phase 9: Evore Bot v1 | ✅ Complete | 100% (11/11) |
-| Phase 10: Dashboard TUI | 🟡 In Progress | 0% (0/6) |
+| Phase 10: Dashboard TUI | ✅ Complete | 100% (8/8) |
 | Phase 11: Multi-Bot Architecture | 🔴 Not Started | 0% (0/9) |
 | Phase 12: Frontend UI | 🔴 Not Started | 0% |
 
@@ -694,8 +695,9 @@ State 4: current_slot >= end_slot + 35
 
 ## Notes
 
-- Phases 1-9 complete! Program deployed to mainnet, basic bot operational.
+- Phases 1-10 complete! Program deployed to mainnet, bot + dashboard operational.
 - Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
 - 27+ unit tests with comprehensive coverage
 - Workspace structure: `program/` (Solana program), `bot/` (deployment bot)
-- Next: Dashboard TUI, then multi-bot architecture refactor
+- Dashboard TUI with separate bot_task architecture ready for multi-bot expansion
+- Next: Phase 11 multi-bot architecture refactor
