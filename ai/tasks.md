@@ -28,15 +28,22 @@ Get the ratatui dashboard working with proper layout.
 - [ ] Blockhash (truncated), RPC name
 
 *Phase 3: Bot Blocks*
-- [ ] Unique emoji per bot (🤖 🎯 🎲 💎 🚀)
+- [ ] Strategy-based icons:
+  - EV: 📊 📈 💹 🎰 🎲
+  - Percentage: 📐 🔢 🎯 ％
+  - Manual: ✋ 🎮 🕹️ 👆
+  - Multiple same strategy: add number (📊₁ 📊₂)
 - [ ] Auth ID, strategy, bankroll
 - [ ] Status with countdown
-- [ ] Last deployed round, claimable rewards
+- [ ] **This round: total_deployed amount**
+- [ ] **Claimable: SOL + ORE rewards**
+- [ ] **Session stats section** (see Phase 7)
 
 *Phase 4: Board Grid*
 - [ ] 5x5 grid layout
-- [ ] Total deployed per square
-- [ ] Bot icons showing who deployed where
+- [ ] Total deployed per square (from Round account)
+- [ ] Each bot shown separately: icon + their amount
+- [ ] Multiple bots on same square = each on own line
 - [ ] Color coding by amount
 
 *Phase 5: Transaction Log*
@@ -48,6 +55,34 @@ Get the ratatui dashboard working with proper layout.
 - [ ] Fetch transaction error from RPC when status is failed
 - [ ] Parse error into human-readable message
 - [ ] Display: "EndSlotExceeded", "TooManySlotsLeft", "NoDeployments", etc.
+
+*Phase 7: Session Statistics (In-Memory)*
+
+Track stats in RAM, no extra RPC calls, resets on restart.
+
+```rust
+struct SessionStats {
+    started_at: Instant,
+}
+
+struct BotSessionStats {
+    started_at: Instant,
+    rounds_participated: u64,
+    rounds_won: u64,
+    sol_earned: u64,
+    ore_earned: u64,
+    last_rewards_sol: u64,  // Before checkpoint
+    last_rewards_ore: u64,  // Before checkpoint
+}
+```
+
+- [ ] Create `SessionStats` struct (global session duration)
+- [ ] Create `BotSessionStats` struct (per-bot stats)
+- [ ] Increment `rounds_participated` on successful deploy
+- [ ] Before checkpoint: store `last_rewards_sol` and `last_rewards_ore`
+- [ ] After checkpoint: calculate delta and add to `sol_earned` / `ore_earned`
+- [ ] Increment `rounds_won` when either reward increased
+- [ ] Display in bot block: time running, rounds, wins (%), earned SOL + ORE
 
 **Key ratatui concepts to learn:**
 - `Frame`, `Rect` for layout

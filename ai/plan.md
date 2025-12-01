@@ -101,26 +101,32 @@ Ratatui-based terminal UI for real-time monitoring of rounds, deployments, and b
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                              HEADER                                      │
 │  Round: 1234  │  Slot: 345678901 / 345679000  │  Slots Left: 99         │
-│  Phase: Active  │  Blockhash: 7xK3...  │  RPC: helius                    │
+│  Phase: Active  │  Session: 2h 34m  │  RPC: helius                       │
 └─────────────────────────────────────────────────────────────────────────┘
 
-┌─────────────────────────────┐  ┌─────────────────────────────┐
-│  🤖 Bot 1 (auth_id=1)       │  │  🎯 Bot 2 (auth_id=2)       │
-│  Strategy: EV               │  │  Strategy: Percentage       │
-│  Bankroll: 0.5 SOL          │  │  Bankroll: 1.0 SOL          │
-│  Status: ⏳ Waiting (87)    │  │  Status: ✅ Deployed        │
-│  Last Deploy: Round 1233    │  │  Last Deploy: Round 1234    │
-│  Rewards: 0.023 SOL         │  │  Rewards: 0.041 SOL         │
-└─────────────────────────────┘  └─────────────────────────────┘
+┌───────────────────────────────────┐  ┌───────────────────────────────────┐
+│  📊 Bot 1 (auth_id=1)             │  │  📐 Bot 2 (auth_id=2)             │
+│  Strategy: EV                     │  │  Strategy: Percentage             │
+│  Bankroll: 0.5 SOL                │  │  Bankroll: 1.0 SOL                │
+│  Status: ⏳ Waiting (87 slots)    │  │  Status: ✅ Deployed              │
+│  This Round: 0.15 SOL deployed    │  │  This Round: 0.22 SOL deployed    │
+│  Rewards: 0.023 SOL | 1.2 ORE     │  │  Rewards: 0.041 SOL | 2.5 ORE     │
+│  ─────── Session Stats ───────    │  │  ─────── Session Stats ───────    │
+│  Running: 1h 22m                  │  │  Running: 2h 34m                  │
+│  Rounds: 47  │  Wins: 23 (49%)    │  │  Rounds: 52  │  Wins: 31 (60%)    │
+│  Earned: +0.234 SOL | +1.5 ORE    │  │  Earned: +0.567 SOL | +3.2 ORE    │
+└───────────────────────────────────┘  └───────────────────────────────────┘
 
 ┌─────────────────────────────────────────────────────────────────────────┐
 │                            BOARD (5x5)                                   │
+│  Total = Round account. Each bot shows icon + their deployed amount.    │
 ├─────────────┬─────────────┬─────────────┬─────────────┬─────────────────┤
 │  0: 1.234   │  1: 0.567   │  2: 2.100   │  3: 0.890   │  4: 1.456       │
-│  🤖 0.05    │             │  🎯 0.10    │             │  🤖🎯 0.15      │
+│  📊 0.05    │             │  📐 0.10    │             │  📊 0.08        │
+│             │             │             │             │  📐 0.07        │
 ├─────────────┼─────────────┼─────────────┼─────────────┼─────────────────┤
 │  5: 0.321   │  6: 1.789   │  ...        │             │                 │
-│             │  🤖 0.08    │             │             │                 │
+│             │  📊 0.08    │             │             │                 │
 ├─────────────┼─────────────┼─────────────┼─────────────┼─────────────────┤
 │             │             │             │             │                 │
 └─────────────┴─────────────┴─────────────┴─────────────┴─────────────────┘
@@ -141,21 +147,31 @@ Ratatui-based terminal UI for real-time monitoring of rounds, deployments, and b
 **Header Section:**
 - [ ] Round ID, current slot, end slot, slots remaining
 - [ ] Round phase (Active, Intermission, Waiting Reset, Waiting Start)
-- [ ] Current blockhash (truncated)
+- [ ] Session duration (how long dashboard has been running)
 - [ ] RPC endpoint name
 
 **Bot Blocks:**
-- [ ] Unique emoji/icon per bot (🤖 🎯 🎲 💎 🚀 etc.)
+- [ ] Strategy-based icons with uniqueness:
+  - EV: 📊 📈 💹 🎰 🎲 (chart/gambling themed)
+  - Percentage: 📐 🔢 🎯 ％ (math themed)
+  - Manual: ✋ 🎮 🕹️ 👆 (hand/control themed)
+  - Multiple bots same strategy: add number suffix (📊₁ 📊₂)
 - [ ] Auth ID and strategy type
 - [ ] Bankroll amount
 - [ ] Current status with countdown (Waiting, Deploying, Deployed, Checkpointing)
-- [ ] Last deployed round
-- [ ] Claimable rewards (SOL, ORE)
+- [ ] **This round: total_deployed amount**
+- [ ] **Claimable rewards: SOL and ORE**
+- [ ] **Session stats** (in-memory, resets on restart):
+  - Time running
+  - Rounds participated
+  - Wins and win rate (%)
+  - SOL + ORE earned this session
 
 **Board Section:**
 - [ ] 5x5 grid showing all 25 squares
 - [ ] Total deployed per square (from Round account)
-- [ ] Bot icons + amounts showing which bots deployed where
+- [ ] Each bot's deployment shown separately: icon + amount
+- [ ] Multiple bots on same square: each on own line with their amount
 - [ ] Color coding (high deployment = brighter)
 
 **Transaction Log:**
@@ -163,6 +179,38 @@ Ratatui-based terminal UI for real-time monitoring of rounds, deployments, and b
 - [ ] Shows: timestamp, bot icon, action (SENT/CONFIRMED/FAILED)
 - [ ] Signature (truncated)
 - [ ] **Error details for failed txs** (fetched from RPC)
+
+### Session Statistics (In-Memory)
+
+Track per session without extra RPC calls. Stored in RAM, resets on restart.
+
+```rust
+struct SessionStats {
+    started_at: Instant,
+}
+
+struct BotSessionStats {
+    started_at: Instant,
+    rounds_participated: u64,
+    rounds_won: u64,           // Won = checkpoint showed rewards > 0
+    sol_earned: u64,           // Cumulative SOL earned this session
+    ore_earned: u64,           // Cumulative ORE earned this session
+    last_rewards_sol: u64,     // rewards_sol before last checkpoint
+    last_rewards_ore: u64,     // rewards_ore before last checkpoint
+    // Derived:
+    // - running_time = Instant::now() - started_at
+    // - win_rate = rounds_won / rounds_participated * 100
+}
+```
+
+**When to update:**
+- `rounds_participated += 1` when bot successfully deploys
+- Before checkpoint: store `last_rewards_sol` and `last_rewards_ore` from miner account
+- After checkpoint: 
+  - `new_rewards = miner.rewards_sol - last_rewards_sol` (delta)
+  - `sol_earned += new_rewards` if positive
+  - `ore_earned += (miner.rewards_ore - last_rewards_ore)` if positive
+  - `rounds_won += 1` if either increased
 
 ### Transaction Error Inspection
 
