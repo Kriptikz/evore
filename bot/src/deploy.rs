@@ -205,7 +205,7 @@ pub async fn single_deploy(
         let target_slots_left = board.end_slot.saturating_sub(deploy_start_slot);
         println!("--- Waiting for Deploy Window ---");
         println!("Target: slot {} ({} slots left)", deploy_start_slot, target_slots_left);
-        println!("Will start sending at slot {} + 100ms", wait_until_slot);
+        println!("Will start sending at slot {} + 50ms", wait_until_slot);
         
         // Show countdown while waiting for slot before target
         let mut last_slot = current_slot;
@@ -224,15 +224,15 @@ pub async fn single_deploy(
             sleep(Duration::from_millis(50)).await;
         }
         
-        // Wait additional 100ms (quarter through the slot before target)
-        println!("\n  Slot {} reached, waiting 100ms...", wait_until_slot);
-        sleep(Duration::from_millis(100)).await;
+        // Wait additional 50ms before target slot
+        println!("\n  Slot {} reached, waiting 50ms...", wait_until_slot);
+        sleep(Duration::from_millis(50)).await;
         println!("✓ Deploy window reached! Starting to send...");
     } else if current_slot < deploy_start_slot {
-        // We're already in the slot before target, just wait the 100ms
+        // We're already in the slot before target, just wait the 50ms
         println!("--- Deploy Window ---");
-        println!("Already at slot {}, waiting 100ms before sending...", current_slot);
-        sleep(Duration::from_millis(100)).await;
+        println!("Already at slot {}, waiting 50ms before sending...", current_slot);
+        sleep(Duration::from_millis(50)).await;
         println!("✓ Starting to send...");
     }
     
