@@ -1,30 +1,41 @@
-[package]
-name = "evore"
+[workspace]
+resolver = "2"
+members = [
+    "program",
+    "bot",
+]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
+repository = "https://github.com/kriptikz/evore"
 
-[lib]
-crate-type = ["cdylib", "lib"]
-name = "evore"
-
-[features]
-no-entrypoint = []
-default = []
-
-[dependencies]
-bytemuck = "1.14.3"
-bytemuck_derive = "1.7.0"
-num_enum = "0.7.2"
-serde = { version = "1.0", features = ["derive"] }
+[workspace.dependencies]
+# Solana
 solana-program = "^2.1"
+solana-sdk = "^2.1"
+solana-client = "^2.1"
+solana-program-test = "^2.1"
+
+# SPL
 spl-token = { version = "^4", features = ["no-entrypoint"] }
 spl-pod = "=0.5.1"
 spl-associated-token-account = { version = "^6", features = ["no-entrypoint"] }
+
+# Serialization
+bytemuck = "1.14.3"
+bytemuck_derive = "1.7.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utils
+num_enum = "0.7.2"
 thiserror = "1.0.57"
 steel = { version = "4.0.3", features = ["spl"] }
-
-
-[dev-dependencies]
-solana-program-test = "^2.1"
-solana-sdk = "^2.1"
 tokio = { version = "1.37.0", features = ["full"] }
+clap = { version = "4.5", features = ["derive"] }
+
+# Local
+evore = { path = "program" }
+

@@ -4,32 +4,39 @@
 
 ## Active
 
-### Task 21: Add tests for Percentage and Manual strategies
+### Task 22: Mainnet Deployment
 **Priority:** 🔴 High
 
-**Tests needed:**
-- Percentage strategy success with balance verification
-- Percentage strategy edge cases (0 percentage, 100% percentage, 0 squares_count)
-- Manual strategy success with balance verification
-- Manual strategy edge cases (all zeros, single square, all 25 squares)
+**Steps:**
+1. Build program for mainnet: `cargo build-sbf`
+2. Deploy to Solana mainnet
+3. Verify deployment
+4. Test basic functionality on mainnet
 
 ---
 
 ## Up Next
 
-_Continue with Phase 7 testing_
+- Task 23: Create deployment bot
+- Task 24: Create frontend UI
 
 ---
 
 ## Backlog
 
-- [ ] Task 22: Mainnet deployment
-- [ ] Task 23: Create deployment bot
-- [ ] Task 24: Create frontend UI
+_None_
 
 ---
 
 ## Completed
+
+### ✅ Task 21: Strategy Tests
+**Completed:** 2025-12-01
+
+- Added `percentage_deploy` test module (success + edge cases)
+- Added `manual_deploy` test module (success + edge cases)
+
+---
 
 ### ✅ Task 20: Implement Deployment Strategies
 **Completed:** 2025-12-01
