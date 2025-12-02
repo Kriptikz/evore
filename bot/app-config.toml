@@ -1,12 +1,14 @@
 # Evore Bot Configuration
+# priority_fee: micro-lamports per CU (5000 = ~0.000007 SOL @ 1.4M CU)
 
 [[bots]]
 name = "EV ORE"
 auth_id = 1
 strategy = "ev"
-slots_left = 3
+slots_left = 1
 bankroll = 220_000_000
-attempts = 2
+attempts = 3
+priority_fee = 5000
 signer_path = "/Users/kriptikz/Development/game-wallets/game-wallet-1.json"
 manager_path = "/Users/kriptikz/Development/game-wallets/manager-1.json"
 
@@ -21,28 +23,30 @@ name = "10%"
 auth_id = 1
 strategy = "percentage"
 slots_left = 15
-bankroll = 700_000_000
+bankroll = 4_000_000_000
 attempts = 1
+priority_fee = 5000
 signer_path = "/Users/kriptikz/Development/game-wallets/perc-bot.json"
 manager_path = "/Users/kriptikz/Development/game-wallets/perc-bot-manager.json"
 
 [bots.strategy_params]
 type = "percentage"
-percentage = 1000
+percentage = 1500
 squares_count = 25
 
 [[bots]]
 name = "EV Pure SOL"
 auth_id = 1
 strategy = "ev"
-slots_left = 1
+slots_left = 3
 bankroll = 220_000_000
-attempts = 3
+attempts = 2
+priority_fee = 5000
 signer_path = "/Users/kriptikz/Development/game-wallets/pure-sol-ev-bot.json"
 manager_path = "/Users/kriptikz/Development/game-wallets/pure-sol-ev-manager.json"
 
 [bots.strategy_params]
 type = "ev"
 max_per_square = 10_000_000
-min_bet = 100_000
+min_bet = 10_000
 ore_value = 0

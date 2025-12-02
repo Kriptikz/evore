@@ -24,6 +24,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use solana_sdk::{hash::Hash, pubkey::Pubkey, signature::Signature};
+use cli_clipboard;
 
 use evore::ore_api::{Board, Miner, Round, INTERMISSION_SLOTS};
 
@@ -424,6 +425,7 @@ pub struct BotState {
     pub session_stats: BotSessionStats,
     pub signer: Pubkey,
     pub manager: Pubkey,
+    pub managed_miner_auth: Pubkey,  // Auth PDA
     /// Signer (fee payer) SOL balance (lamports)
     pub signer_balance: u64,
     // EV strategy params
@@ -435,6 +437,22 @@ pub struct BotState {
     pub squares_count: u64,    // Number of squares
 }
 
+/// Helper to format pubkey as shortened version (7...7)
+pub fn shorten_pubkey(pubkey: &Pubkey) -> String {
+    let s = pubkey.to_string();
+    format!("{}...{}", &s[..7], &s[s.len()-7..])
+}
+
+/// Helper to format signature as shortened version (7...7)
+pub fn shorten_signature(sig: &Signature) -> String {
+    let s = sig.to_string();
+    if s.len() > 14 {
+        format!("{}...{}", &s[..7], &s[s.len()-7..])
+    } else {
+        s
+    }
+}
+
 impl BotState {
     pub fn new(
         name: String,
@@ -444,6 +462,7 @@ impl BotState {
         slots_left_threshold: u64,
         signer: Pubkey,
         manager: Pubkey,
+        managed_miner_auth: Pubkey,
         max_per_square: u64,
         min_bet: u64,
         ore_value: u64,
@@ -471,6 +490,7 @@ impl BotState {
             session_stats: BotSessionStats::default(),
             signer,
             manager,
+            managed_miner_auth,
             signer_balance: 0,
             max_per_square,
             min_bet,
@@ -487,6 +507,14 @@ impl BotState {
     pub fn rewards_ore(&self) -> u64 {
         self.miner.as_ref().map(|m| m.rewards_ore).unwrap_or(0)
     }
+}
+
+/// Selectable element type for cursor navigation
+#[derive(Clone, Debug, PartialEq)]
+pub enum SelectableElement {
+    BotSigner(usize),        // Bot index
+    BotAuthPda(usize),       // Bot index
+    TxLog(usize),            // Transaction log index (0 = most recent)
 }
 
 /// App state for the TUI
@@ -510,6 +538,10 @@ pub struct App {
     
     // Transaction log
     pub tx_log: Vec<TxLogEntry>,
+    
+    // Cursor/selection state
+    pub selected: Option<SelectableElement>,
+    pub clipboard_msg: Option<(String, Instant)>,  // Message and when it was set
 }
 
 impl App {
@@ -537,6 +569,125 @@ impl App {
             round: None,
             bots: Vec::new(),
             tx_log: Vec::new(),
+            selected: None,
+            clipboard_msg: None,
+        }
+    }
+    
+    /// Move selection up
+    pub fn select_prev(&mut self) {
+        self.selected = match &self.selected {
+            None => {
+                // Start at first bot signer if available
+                if !self.bots.is_empty() {
+                    Some(SelectableElement::BotSigner(0))
+                } else if !self.tx_log.is_empty() {
+                    Some(SelectableElement::TxLog(0))
+                } else {
+                    None
+                }
+            }
+            Some(SelectableElement::BotSigner(i)) => {
+                if *i > 0 {
+                    Some(SelectableElement::BotAuthPda(i - 1))
+                } else {
+                    // Wrap to tx log if available
+                    if !self.tx_log.is_empty() {
+                        Some(SelectableElement::TxLog(self.tx_log.len().min(30) - 1))
+                    } else {
+                        Some(SelectableElement::BotSigner(0))
+                    }
+                }
+            }
+            Some(SelectableElement::BotAuthPda(i)) => {
+                Some(SelectableElement::BotSigner(*i))
+            }
+            Some(SelectableElement::TxLog(i)) => {
+                if *i > 0 {
+                    Some(SelectableElement::TxLog(i - 1))
+                } else {
+                    // Wrap to last bot auth pda
+                    if !self.bots.is_empty() {
+                        Some(SelectableElement::BotAuthPda(self.bots.len() - 1))
+                    } else {
+                        Some(SelectableElement::TxLog(0))
+                    }
+                }
+            }
+        };
+    }
+    
+    /// Move selection down
+    pub fn select_next(&mut self) {
+        self.selected = match &self.selected {
+            None => {
+                // Start at first bot signer if available
+                if !self.bots.is_empty() {
+                    Some(SelectableElement::BotSigner(0))
+                } else if !self.tx_log.is_empty() {
+                    Some(SelectableElement::TxLog(0))
+                } else {
+                    None
+                }
+            }
+            Some(SelectableElement::BotSigner(i)) => {
+                Some(SelectableElement::BotAuthPda(*i))
+            }
+            Some(SelectableElement::BotAuthPda(i)) => {
+                if *i + 1 < self.bots.len() {
+                    Some(SelectableElement::BotSigner(i + 1))
+                } else {
+                    // Move to tx log
+                    if !self.tx_log.is_empty() {
+                        Some(SelectableElement::TxLog(0))
+                    } else {
+                        Some(SelectableElement::BotSigner(0))
+                    }
+                }
+            }
+            Some(SelectableElement::TxLog(i)) => {
+                let max_log = self.tx_log.len().min(30);
+                if *i + 1 < max_log {
+                    Some(SelectableElement::TxLog(i + 1))
+                } else {
+                    // Wrap to first bot
+                    if !self.bots.is_empty() {
+                        Some(SelectableElement::BotSigner(0))
+                    } else {
+                        Some(SelectableElement::TxLog(0))
+                    }
+                }
+            }
+        };
+    }
+    
+    /// Get the copyable value for current selection
+    pub fn get_selected_value(&self) -> Option<String> {
+        match &self.selected {
+            Some(SelectableElement::BotSigner(i)) => {
+                self.bots.get(*i).map(|b| b.signer.to_string())
+            }
+            Some(SelectableElement::BotAuthPda(i)) => {
+                self.bots.get(*i).map(|b| b.managed_miner_auth.to_string())
+            }
+            Some(SelectableElement::TxLog(i)) => {
+                self.tx_log.iter().rev().nth(*i).map(|e| e.signature.to_string())
+            }
+            None => None,
+        }
+    }
+    
+    /// Copy selected value to clipboard
+    pub fn copy_selected(&mut self) {
+        if let Some(value) = self.get_selected_value() {
+            match cli_clipboard::set_contents(value) {
+                Ok(_) => {
+                    self.clipboard_msg = Some(("Copied!".to_string(), Instant::now()));
+                }
+                Err(_) => {
+                    self.clipboard_msg = Some(("Copy failed".to_string(), Instant::now()));
+                }
+            }
         }
     }
     
@@ -799,6 +950,14 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("RPC: {} ", app.rpc_name), Style::default().fg(Color::Cyan)),
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("Hash: {}", blockhash_str), Style::default().fg(Color::DarkGray)),
+        // Clipboard status
+        if let Some((msg, _)) = &app.clipboard_msg {
+            Span::styled(format!("  [{}]", msg), Style::default().fg(Color::Green).bold())
+        } else {
+            Span::styled("", Style::default())
+        },
+        // Help text
+        Span::styled("  ↑↓:nav Enter:copy q:quit", Style::default().fg(Color::DarkGray)),
     ]);
     
     let block = Block::default()
@@ -837,11 +996,11 @@ fn draw_bot_blocks(frame: &mut Frame, area: Rect, app: &App) {
         .split(area);
     
     for (i, bot) in app.bots.iter().enumerate() {
-        draw_single_bot_block(frame, bot_areas[i], bot, app);
+        draw_single_bot_block(frame, bot_areas[i], bot, app, i);
     }
 }
 
-fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &App) {
+fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &App, bot_index: usize) {
     let phase = app.round_phase();
     let slots_left = app.slots_remaining();
     
@@ -892,21 +1051,40 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
     
     let title = format!(" {} {} ", bot.icon, bot.name);
     
+    // Check selection state for highlighting
+    let signer_selected = app.selected == Some(SelectableElement::BotSigner(bot_index));
+    let auth_selected = app.selected == Some(SelectableElement::BotAuthPda(bot_index));
+    
     // Build lines with visual sections
     let mut lines = vec![
         // ═══ STATUS BAR ═══
         Line::from(vec![
             Span::styled("▶ ", Style::default().fg(bot.status.color())),
             Span::styled(status_str, Style::default().fg(bot.status.color()).bold()),
-            Span::styled("                              ", Style::default()),
         ]),
-        // Empty spacer
-        Line::from(""),
-        // ═══ BALANCES ═══
+        // ═══ PUBKEYS (selectable) ═══
         Line::from(vec![
-            Span::styled("◈ Signer    ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.4} ◎", signer_sol), Style::default().fg(Color::Yellow).bold()),
+            if signer_selected { Span::styled("► ", Style::default().fg(Color::White).bold()) } 
+            else { Span::styled("  ", Style::default()) },
+            Span::styled("Signer ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                shorten_pubkey(&bot.signer), 
+                if signer_selected { Style::default().fg(Color::White).bold().on_blue() } 
+                else { Style::default().fg(Color::Gray) }
+            ),
+            Span::styled(format!("  {:.4} ◎", signer_sol), Style::default().fg(Color::Yellow)),
         ]),
+        Line::from(vec![
+            if auth_selected { Span::styled("► ", Style::default().fg(Color::White).bold()) } 
+            else { Span::styled("  ", Style::default()) },
+            Span::styled("Auth   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(
+                shorten_pubkey(&bot.managed_miner_auth), 
+                if auth_selected { Style::default().fg(Color::White).bold().on_blue() } 
+                else { Style::default().fg(Color::Gray) }
+            ),
+        ]),
+        // ═══ BALANCES ═══
         Line::from(vec![
             Span::styled("◈ Bankroll  ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{:.4} ◎", bankroll_sol), Style::default().fg(Color::Cyan)),
@@ -988,21 +1166,27 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
             lines.push(Line::from(vec![
                 Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:<4}", total), Style::default().fg(Color::Cyan)),
+                Span::styled(" Deployed ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<4}", stats.rounds_participated), Style::default().fg(Color::Yellow)),
                 Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
-                if stats.rounds_missed > 0 {
-                    Span::styled(format!("  Miss {}", stats.rounds_missed), Style::default().fg(Color::Red))
-                } else {
-                    Span::styled("", Style::default())
-                },
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Missed ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}", stats.rounds_missed), Style::default().fg(if stats.rounds_missed > 0 { Color::Red } else { Color::DarkGray })),
             ]));
         }
         _ => {
+            let total = stats.rounds_participated + stats.rounds_missed;
             lines.push(Line::from(vec![
                 Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<4}", stats.rounds_participated), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:<4}", total), Style::default().fg(Color::Cyan)),
                 Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Missed ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}", stats.rounds_missed), Style::default().fg(if stats.rounds_missed > 0 { Color::Red } else { Color::DarkGray })),
             ]));
         }
     };
@@ -1015,8 +1199,21 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
         Span::styled(format!("{} ORE", ore_pnl_str), Style::default().fg(ore_pnl_color)),
     ]));
     
-    // Cost per ORE (if applicable)
-    if cost_per_ore > 0.0 {
+    // SOL Spent (total cost, only if negative P&L)
+    let sol_spent = if sol_pnl < 0.0 { -sol_pnl } else { 0.0 };
+    if sol_spent > 0.0 {
+        lines.push(Line::from(vec![
+            Span::styled("Spent ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.4} ◎", sol_spent), Style::default().fg(Color::Yellow)),
+            // Cost per ORE (if earned ORE)
+            if cost_per_ore > 0.0 {
+                Span::styled(format!("  ({:.4} ◎/ORE)", cost_per_ore), Style::default().fg(Color::Cyan))
+            } else {
+                Span::styled("", Style::default())
+            },
+        ]));
+    } else if cost_per_ore > 0.0 {
+        // Show cost per ORE even if in profit
         lines.push(Line::from(vec![
             Span::styled("Cost ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{:.4} ◎/ORE", cost_per_ore), Style::default().fg(Color::Cyan)),
@@ -1135,7 +1332,10 @@ fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
         .iter()
         .rev()
         .take(30)  // Show more logs
-        .map(|entry| {
+        .enumerate()
+        .map(|(idx, entry)| {
+            let is_selected = app.selected == Some(SelectableElement::TxLog(idx));
+            
             let elapsed = entry.timestamp.elapsed().as_secs();
             let time_str = if elapsed < 60 {
                 format!("{:>3}s", elapsed)
@@ -1172,16 +1372,25 @@ fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
             let status_display = if is_skip_error { "N/A " } else { entry.status.as_str() };
             let status_color = if is_skip_error { Color::DarkGray } else { entry.status.color() };
             
+            // Selection indicator
+            let select_indicator = if is_selected { "► " } else { "  " };
+            
             let mut spans = vec![
+                Span::styled(select_indicator, Style::default().fg(Color::White).bold()),
                 Span::styled(format!("[{}] ", time_str), Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:<8} ", bot_name_display), Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{:<5} ", entry.tx_type.as_str()), Style::default().fg(tx_type_color)),
+                Span::styled(format!("{:<10} ", entry.tx_type.as_str()), Style::default().fg(tx_type_color)),
                 Span::styled(format!("{:<4} ", status_display), Style::default().fg(status_color)),
             ];
             
+            // Add slot info if available
+            if let Some(slot) = entry.slot {
+                spans.push(Span::styled(format!("s:{} ", slot), Style::default().fg(Color::DarkGray)));
+            }
+            
             // Add round info if available  
             if let Some(round_id) = entry.round_id {
-                spans.push(Span::styled(format!("r:{:<5} ", round_id), Style::default().fg(Color::Blue)));
+                spans.push(Span::styled(format!("r:{} ", round_id), Style::default().fg(Color::Blue)));
             }
             
             // Add amount info based on tx type
@@ -1205,8 +1414,13 @@ fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
                 spans.push(Span::styled(format!("#{} ", attempt + 1), Style::default().fg(Color::DarkGray)));
             }
             
-            // Add signature (shortened)
-            spans.push(Span::styled(format!("{}... ", sig_str), Style::default().fg(Color::White)));
+            // Add signature (shortened) - highlight if selected
+            let sig_style = if is_selected {
+                Style::default().fg(Color::White).bold().on_blue()
+            } else {
+                Style::default().fg(Color::White)
+            };
+            spans.push(Span::styled(format!("{}... ", sig_str), sig_style));
             
             // Add error if present
             if let Some(error) = &entry.error {
@@ -1243,11 +1457,33 @@ pub fn handle_input(app: &mut App) -> io::Result<bool> {
                         app.running = false;
                         return Ok(true);
                     }
-                    // No deploy trigger - TUI is monitoring only
+                    // Arrow key navigation
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        app.select_prev();
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        app.select_next();
+                    }
+                    // Enter to copy selected value
+                    KeyCode::Enter => {
+                        app.copy_selected();
+                    }
+                    // Clear selection
+                    KeyCode::Char('c') => {
+                        app.selected = None;
+                    }
                     _ => {}
                 }
             }
         }
     }
+    
+    // Clear clipboard message after 2 seconds
+    if let Some((_, instant)) = &app.clipboard_msg {
+        if instant.elapsed() > Duration::from_secs(2) {
+            app.clipboard_msg = None;
+        }
+    }
+    
     Ok(false)
 }

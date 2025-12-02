@@ -26,3 +26,4 @@ dirs = { workspace = true }
 futures = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+cli-clipboard = "0.4"

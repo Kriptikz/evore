@@ -98,6 +98,7 @@ pub struct BotRunConfig {
     pub strategy_params: StrategyParams,
     pub bankroll: u64,
     pub attempts: u64,  // Number of deploy txs to send (default 4)
+    pub priority_fee: u64,  // Priority fee in micro-lamports per CU
 }
 
 /// Run a single bot using shared services
@@ -366,6 +367,7 @@ pub async fn run_bot_with_services(
                                 board.round_id,
                                 &params,
                                 bh,
+                                config.priority_fee,
                             )
                         }
                         DeployStrategy::Percentage => {
@@ -377,6 +379,7 @@ pub async fn run_bot_with_services(
                                 board.round_id,
                                 &params,
                                 bh,
+                                config.priority_fee,
                             )
                         }
                         DeployStrategy::Manual => {
@@ -390,6 +393,7 @@ pub async fn run_bot_with_services(
                                 board.round_id,
                                 &params,
                                 bh,
+                                config.priority_fee,
                             )
                         }
                     };

@@ -55,12 +55,7 @@ impl Default for EvDeployParams {
     }
 }
 
-/// Priority fee in microlamports per compute unit (for future use)
-/// 100,000 microlamports/CU * 1,400,000 CU = 140,000 lamports = 0.00014 SOL
-#[allow(dead_code)]
-const PRIORITY_FEE_MICROLAMPORTS: u64 = 100_000;
-
-/// Build EV deploy transaction
+/// Build EV deploy transaction with priority fee
 pub fn build_ev_deploy_tx(
     signer: &Keypair,
     manager: &Pubkey,
@@ -68,10 +63,10 @@ pub fn build_ev_deploy_tx(
     round_id: u64,
     params: &EvDeployParams,
     recent_blockhash: Hash,
+    priority_fee: u64,  // micro-lamports per CU
 ) -> Transaction {
     let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
-    // Priority fee disabled for now
-    // let cu_price_ix = ComputeBudgetInstruction::set_compute_unit_price(PRIORITY_FEE_MICROLAMPORTS);
+    let cu_price_ix = ComputeBudgetInstruction::set_compute_unit_price(priority_fee);
     let deploy_ix = evore::instruction::ev_deploy(
         signer.pubkey(),
         *manager,
@@ -86,7 +81,7 @@ pub fn build_ev_deploy_tx(
         params.allow_multi_deploy,
     );
 
-    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, deploy_ix], Some(&signer.pubkey()));
+    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, cu_price_ix, deploy_ix], Some(&signer.pubkey()));
     tx.sign(&[signer], recent_blockhash);
     tx
 }
@@ -111,10 +106,12 @@ pub fn build_percentage_deploy_tx(
     round_id: u64,
     params: &PercentageDeployParams,
     recent_blockhash: Hash,
+    priority_fee: u64,  // micro-lamports per CU
 ) -> Transaction {
     // Max CU for Solana is 1.4M. Each square CPI costs ~50-60k CU.
     // Safe limit: ~20-22 squares max. Consider reducing squares_count if this fails.
     let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+    let cu_price_ix = ComputeBudgetInstruction::set_compute_unit_price(priority_fee);
     let deploy_ix = evore::instruction::percentage_deploy(
         signer.pubkey(),
         *manager,
@@ -125,7 +122,7 @@ pub fn build_percentage_deploy_tx(
         params.squares_count,
     );
 
-    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, deploy_ix], Some(&signer.pubkey()));
+    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, cu_price_ix, deploy_ix], Some(&signer.pubkey()));
     tx.sign(&[signer], recent_blockhash);
     tx
 }
@@ -346,6 +343,7 @@ pub async fn single_deploy(
             board.round_id,
             params,
             blockhash,
+            5000,  // default priority fee
         );
         
         tx_count += 1;
@@ -458,6 +456,7 @@ pub async fn deploy_quiet(
             board.round_id,
             params,
             blockhash,
+            5000,  // default priority fee
         );
         
         match client.send_transaction_no_wait(&tx) {

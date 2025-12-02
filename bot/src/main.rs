@@ -541,6 +541,7 @@ async fn run_dashboard(
     
     // Create bot state
     let bot_name = format!("bot-{}", auth_id);
+    let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager, auth_id);
     let bot = BotState::new(
         bot_name.clone(),
         auth_id,
@@ -549,6 +550,7 @@ async fn run_dashboard(
         params.slots_left,
         signer.pubkey(),
         manager,
+        managed_miner_auth,
         params.max_per_square,
         params.min_bet,
         params.ore_value,
@@ -748,6 +750,7 @@ async fn run_dashboard_with_config(
         let signer_keypair = solana_sdk::signature::read_keypair_file(&signer_path)
             .map_err(|e| format!("Failed to load signer from {:?}: {}", signer_path, e))?;
         
+        let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager_keypair.pubkey(), bot_config.auth_id);
         let bot_state = BotState::new(
             bot_config.name.clone(),
             bot_config.auth_id,
@@ -756,6 +759,7 @@ async fn run_dashboard_with_config(
             bot_config.slots_left,
             signer_keypair.pubkey(),
             manager_keypair.pubkey(),
+            managed_miner_auth,
             max_per_square,
             min_bet,
             ore_value,

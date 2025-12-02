@@ -84,6 +84,10 @@ pub struct BotConfig {
     #[serde(default = "default_attempts")]
     pub attempts: u64,
     
+    /// Priority fee in micro-lamports per CU (default 5000 = ~0.000007 SOL @ 1.4M CU)
+    #[serde(default = "default_priority_fee")]
+    pub priority_fee: u64,
+    
     /// Strategy-specific parameters
     #[serde(default)]
     pub strategy_params: StrategyParams,
@@ -103,6 +107,10 @@ fn default_attempts() -> u64 {
     4
 }
 
+fn default_priority_fee() -> u64 {
+    5000  // ~0.000007 SOL @ 1.4M CU (above Helius SWQOS minimum)
+}
+
 impl BotConfig {
     /// Create a new EV bot config with defaults
     pub fn new_ev(
@@ -119,7 +127,8 @@ impl BotConfig {
             strategy: DeployStrategy::EV,
             slots_left: 2,
             bankroll,
-            attempts: 4,  // default attempts
+            attempts: 4,
+            priority_fee: 5000,
             strategy_params: StrategyParams::EV {
                 max_per_square,
                 min_bet,

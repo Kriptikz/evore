@@ -63,6 +63,7 @@ impl RoundCoordinator {
             strategy_params: bot_config.strategy_params.clone(),
             bankroll: bot_config.bankroll,
             attempts: bot_config.attempts,
+            priority_fee: bot_config.priority_fee,
         };
 
         let services = Arc::clone(&self.services);
@@ -140,7 +141,8 @@ pub async fn run_single_bot(
         strategy: crate::config::DeployStrategy::EV,
         slots_left,
         bankroll: 0, // Will be determined from account
-        attempts: 4, // Default attempts
+        attempts: 4,
+        priority_fee: 5000,  // Default priority fee
         strategy_params,
         signer_path: None,
         manager_path: None,

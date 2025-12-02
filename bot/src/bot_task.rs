@@ -405,6 +405,7 @@ pub async fn run_bot_task(
                 board.round_id,
                 &config.params,
                 bh,
+                5000,  // default priority fee
             );
             
             match client.send_transaction_no_wait(&deploy_tx) {
