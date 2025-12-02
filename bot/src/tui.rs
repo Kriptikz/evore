@@ -512,9 +512,20 @@ impl BotState {
 /// Selectable element type for cursor navigation
 #[derive(Clone, Debug, PartialEq)]
 pub enum SelectableElement {
-    BotSigner(usize),        // Bot index
-    BotAuthPda(usize),       // Bot index
-    TxLog(usize),            // Transaction log index (0 = most recent)
+    BotSigner(usize),        // Bot index - copies pubkey
+    BotAuthPda(usize),       // Bot index - copies pubkey
+    BotConfigReload(usize),  // Bot index - reloads config from file
+    BotSessionRefresh(usize),// Bot index - resets session stats
+    TxLog(usize),            // Transaction log index (0 = most recent) - copies signature
+}
+
+/// Action result from Enter key
+#[derive(Clone, Debug)]
+pub enum SelectAction {
+    Copy(String),           // Copy value to clipboard
+    ReloadConfig(usize),    // Reload config for bot at index
+    RefreshSession(usize),  // Reset session stats for bot at index
+    None,
 }
 
 /// App state for the TUI
@@ -541,7 +552,10 @@ pub struct App {
     
     // Cursor/selection state
     pub selected: Option<SelectableElement>,
-    pub clipboard_msg: Option<(String, Instant)>,  // Message and when it was set
+    pub status_msg: Option<(String, Instant, bool)>,  // Message, when it was set, is_error
+    
+    // Config file path for hot reload
+    pub config_path: Option<String>,
 }
 
 impl App {
@@ -570,15 +584,17 @@ impl App {
             bots: Vec::new(),
             tx_log: Vec::new(),
             selected: None,
-            clipboard_msg: None,
+            status_msg: None,
+            config_path: None,
         }
     }
     
     /// Move selection up
     pub fn select_prev(&mut self) {
+        // Navigation order per bot: Signer -> AuthPda -> ConfigReload -> SessionRefresh
+        // Then tx logs, then wrap to last bot's SessionRefresh
         self.selected = match &self.selected {
             None => {
-                // Start at first bot signer if available
                 if !self.bots.is_empty() {
                     Some(SelectableElement::BotSigner(0))
                 } else if !self.tx_log.is_empty() {
@@ -589,26 +605,35 @@ impl App {
             }
             Some(SelectableElement::BotSigner(i)) => {
                 if *i > 0 {
-                    Some(SelectableElement::BotAuthPda(i - 1))
+                    // Go to previous bot's SessionRefresh
+                    Some(SelectableElement::BotSessionRefresh(i - 1))
                 } else {
                     // Wrap to tx log if available
                     if !self.tx_log.is_empty() {
                         Some(SelectableElement::TxLog(self.tx_log.len().min(30) - 1))
+                    } else if !self.bots.is_empty() {
+                        Some(SelectableElement::BotSessionRefresh(self.bots.len() - 1))
                     } else {
-                        Some(SelectableElement::BotSigner(0))
+                        None
                     }
                 }
             }
             Some(SelectableElement::BotAuthPda(i)) => {
                 Some(SelectableElement::BotSigner(*i))
             }
+            Some(SelectableElement::BotConfigReload(i)) => {
+                Some(SelectableElement::BotAuthPda(*i))
+            }
+            Some(SelectableElement::BotSessionRefresh(i)) => {
+                Some(SelectableElement::BotConfigReload(*i))
+            }
             Some(SelectableElement::TxLog(i)) => {
                 if *i > 0 {
                     Some(SelectableElement::TxLog(i - 1))
                 } else {
-                    // Wrap to last bot auth pda
+                    // Wrap to last bot's SessionRefresh
                     if !self.bots.is_empty() {
-                        Some(SelectableElement::BotAuthPda(self.bots.len() - 1))
+                        Some(SelectableElement::BotSessionRefresh(self.bots.len() - 1))
                     } else {
                         Some(SelectableElement::TxLog(0))
                     }
@@ -619,9 +644,10 @@ impl App {
     
     /// Move selection down
     pub fn select_next(&mut self) {
+        // Navigation order per bot: Signer -> AuthPda -> ConfigReload -> SessionRefresh
+        // Then next bot or tx logs
         self.selected = match &self.selected {
             None => {
-                // Start at first bot signer if available
                 if !self.bots.is_empty() {
                     Some(SelectableElement::BotSigner(0))
                 } else if !self.tx_log.is_empty() {
@@ -634,6 +660,12 @@ impl App {
                 Some(SelectableElement::BotAuthPda(*i))
             }
             Some(SelectableElement::BotAuthPda(i)) => {
+                Some(SelectableElement::BotConfigReload(*i))
+            }
+            Some(SelectableElement::BotConfigReload(i)) => {
+                Some(SelectableElement::BotSessionRefresh(*i))
+            }
+            Some(SelectableElement::BotSessionRefresh(i)) => {
                 if *i + 1 < self.bots.len() {
                     Some(SelectableElement::BotSigner(i + 1))
                 } else {
@@ -661,34 +693,73 @@ impl App {
         };
     }
     
-    /// Get the copyable value for current selection
-    pub fn get_selected_value(&self) -> Option<String> {
+    /// Get the action for current selection when Enter is pressed
+    pub fn get_select_action(&self) -> SelectAction {
         match &self.selected {
             Some(SelectableElement::BotSigner(i)) => {
-                self.bots.get(*i).map(|b| b.signer.to_string())
+                self.bots.get(*i).map(|b| SelectAction::Copy(b.signer.to_string()))
+                    .unwrap_or(SelectAction::None)
             }
             Some(SelectableElement::BotAuthPda(i)) => {
-                self.bots.get(*i).map(|b| b.managed_miner_auth.to_string())
+                self.bots.get(*i).map(|b| SelectAction::Copy(b.managed_miner_auth.to_string()))
+                    .unwrap_or(SelectAction::None)
+            }
+            Some(SelectableElement::BotConfigReload(i)) => {
+                SelectAction::ReloadConfig(*i)
+            }
+            Some(SelectableElement::BotSessionRefresh(i)) => {
+                SelectAction::RefreshSession(*i)
             }
             Some(SelectableElement::TxLog(i)) => {
-                self.tx_log.iter().rev().nth(*i).map(|e| e.signature.to_string())
+                self.tx_log.iter().rev().nth(*i)
+                    .map(|e| SelectAction::Copy(e.signature.to_string()))
+                    .unwrap_or(SelectAction::None)
             }
-            None => None,
+            None => SelectAction::None,
         }
     }
     
-    /// Copy selected value to clipboard
-    pub fn copy_selected(&mut self) {
-        if let Some(value) = self.get_selected_value() {
-            match cli_clipboard::set_contents(value) {
-                Ok(_) => {
-                    self.clipboard_msg = Some(("Copied!".to_string(), Instant::now()));
-                }
-                Err(_) => {
-                    self.clipboard_msg = Some(("Copy failed".to_string(), Instant::now()));
+    /// Execute action and show status message
+    pub fn execute_select_action(&mut self) {
+        match self.get_select_action() {
+            SelectAction::Copy(value) => {
+                match cli_clipboard::set_contents(value) {
+                    Ok(_) => {
+                        self.status_msg = Some(("Copied!".to_string(), Instant::now(), false));
+                    }
+                    Err(_) => {
+                        self.status_msg = Some(("Copy failed".to_string(), Instant::now(), true));
+                    }
                 }
             }
+            SelectAction::ReloadConfig(bot_idx) => {
+                // Config reload handled externally - just signal it
+                self.status_msg = Some((format!("Reloading config for bot {}...", bot_idx), Instant::now(), false));
+            }
+            SelectAction::RefreshSession(bot_idx) => {
+                // Reset session stats for this bot
+                if let Some(bot) = self.bots.get_mut(bot_idx) {
+                    bot.session_stats = BotSessionStats::with_starting_balances(
+                        bot.session_stats.current_claimable_sol,
+                        bot.session_stats.current_ore,
+                    );
+                    // Reset starting signer balance to current
+                    bot.session_stats.starting_signer_balance = bot.signer_balance;
+                    self.status_msg = Some((format!("Session reset: {}", bot.name), Instant::now(), false));
+                }
+            }
+            SelectAction::None => {}
         }
+    }
+    
+    /// Set config path for hot reload
+    pub fn set_config_path(&mut self, path: String) {
+        self.config_path = Some(path);
+    }
+    
+    /// Set status message
+    pub fn set_status(&mut self, msg: String, is_error: bool) {
+        self.status_msg = Some((msg, Instant::now(), is_error));
     }
     
     /// Add a bot to the dashboard
@@ -950,14 +1021,15 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         Span::styled(format!("RPC: {} ", app.rpc_name), Style::default().fg(Color::Cyan)),
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
         Span::styled(format!("Hash: {}", blockhash_str), Style::default().fg(Color::DarkGray)),
-        // Clipboard status
-        if let Some((msg, _)) = &app.clipboard_msg {
-            Span::styled(format!("  [{}]", msg), Style::default().fg(Color::Green).bold())
+        // Status message
+        if let Some((msg, _, is_error)) = &app.status_msg {
+            let color = if *is_error { Color::Red } else { Color::Green };
+            Span::styled(format!("  [{}]", msg), Style::default().fg(color).bold())
         } else {
             Span::styled("", Style::default())
         },
         // Help text
-        Span::styled("  ↑↓:nav Enter:copy q:quit", Style::default().fg(Color::DarkGray)),
+        Span::styled("  ↑↓:nav Enter:act q:quit", Style::default().fg(Color::DarkGray)),
     ]);
     
     let block = Block::default()
@@ -1054,6 +1126,8 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
     // Check selection state for highlighting
     let signer_selected = app.selected == Some(SelectableElement::BotSigner(bot_index));
     let auth_selected = app.selected == Some(SelectableElement::BotAuthPda(bot_index));
+    let config_selected = app.selected == Some(SelectableElement::BotConfigReload(bot_index));
+    let session_selected = app.selected == Some(SelectableElement::BotSessionRefresh(bot_index));
     
     // Build lines with visual sections
     let mut lines = vec![
@@ -1082,6 +1156,24 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
                 shorten_pubkey(&bot.managed_miner_auth), 
                 if auth_selected { Style::default().fg(Color::White).bold().on_blue() } 
                 else { Style::default().fg(Color::Gray) }
+            ),
+        ]),
+        // ═══ ACTIONS (selectable) ═══
+        Line::from(vec![
+            if config_selected { Span::styled("► ", Style::default().fg(Color::White).bold()) } 
+            else { Span::styled("  ", Style::default()) },
+            Span::styled(
+                "🔄 Reload Config", 
+                if config_selected { Style::default().fg(Color::White).bold().on_blue() } 
+                else { Style::default().fg(Color::DarkGray) }
+            ),
+            Span::styled("  ", Style::default()),
+            if session_selected { Span::styled("► ", Style::default().fg(Color::White).bold()) } 
+            else { Span::styled("", Style::default()) },
+            Span::styled(
+                "🔁 Reset Session", 
+                if session_selected { Style::default().fg(Color::White).bold().on_blue() } 
+                else { Style::default().fg(Color::DarkGray) }
             ),
         ]),
         // ═══ BALANCES ═══
@@ -1446,16 +1538,24 @@ fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
 // Input Handling
 // =============================================================================
 
+/// Input result from handle_input
+#[derive(Clone, Debug)]
+pub enum InputResult {
+    Continue,
+    Quit,
+    ReloadConfig(usize),  // Bot index to reload config for
+}
+
 /// Handle keyboard input
-/// Returns true if the app should quit
-pub fn handle_input(app: &mut App) -> io::Result<bool> {
+/// Returns InputResult indicating what action to take
+pub fn handle_input(app: &mut App) -> io::Result<InputResult> {
     if event::poll(Duration::from_millis(50))? {
         if let Event::Key(key) = event::read()? {
             if key.kind == KeyEventKind::Press {
                 match key.code {
                     KeyCode::Char('q') | KeyCode::Esc => {
                         app.running = false;
-                        return Ok(true);
+                        return Ok(InputResult::Quit);
                     }
                     // Arrow key navigation
                     KeyCode::Up | KeyCode::Char('k') => {
@@ -1464,9 +1564,16 @@ pub fn handle_input(app: &mut App) -> io::Result<bool> {
                     KeyCode::Down | KeyCode::Char('j') => {
                         app.select_next();
                     }
-                    // Enter to copy selected value
+                    // Enter to execute action
                     KeyCode::Enter => {
-                        app.copy_selected();
+                        // Check if it's a config reload action first
+                        if let Some(SelectableElement::BotConfigReload(bot_idx)) = &app.selected {
+                            let idx = *bot_idx;
+                            app.status_msg = Some((format!("Reloading config..."), Instant::now(), false));
+                            return Ok(InputResult::ReloadConfig(idx));
+                        }
+                        // Otherwise execute normally (copy or session refresh)
+                        app.execute_select_action();
                     }
                     // Clear selection
                     KeyCode::Char('c') => {
@@ -1477,13 +1584,13 @@ pub fn handle_input(app: &mut App) -> io::Result<bool> {
             }
         }
     }
-    
-    // Clear clipboard message after 2 seconds
-    if let Some((_, instant)) = &app.clipboard_msg {
+
+    // Clear status message after 2 seconds
+    if let Some((_, instant, _)) = &app.status_msg {
         if instant.elapsed() > Duration::from_secs(2) {
-            app.clipboard_msg = None;
+            app.status_msg = None;
         }
     }
-    
-    Ok(false)
+
+    Ok(InputResult::Continue)
 }

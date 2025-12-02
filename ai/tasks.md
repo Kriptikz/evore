@@ -1,33 +1,42 @@
 # Current Tasks
 
-> Last Updated: 2025-12-01 (Task 26 complete - Multi-Bot Architecture)
+> Last Updated: 2025-12-01 (Phase 11 complete, Dashboard enhancements in progress)
 
 ## Active
 
-No active tasks. Phase 11 complete.
+### Task 28: TUI Interactive Features ✅
+**Priority:** 🟢 High
+**Completed:** 2025-12-01
+
+Add interactive cursor navigation and actions to the TUI dashboard.
+
+**Subtasks:**
+- [x] Add cursor navigation with arrow keys (↑/↓/j/k)
+- [x] Add pubkey display (signer, auth PDA) with shortened format (7...7)
+- [x] Add clipboard copy on Enter (pubkeys, tx signatures)
+- [x] Show missed rounds for all strategies (not just EV)
+- [x] Per-bot SOL cost/spent tracking
+- [x] Add config reload icon (🔄) - reload bot config from file on Enter
+- [x] Add session refresh icon (🔁) - reset bot session stats on Enter
+- [x] Config validation on reload with error indication
 
 ---
 
 ## Up Next
 
-### Task 27: Wire Up Multi-Bot Dashboard
+### Task 29: Performance & Reliability Improvements
 **Priority:** 🟡 Medium
 
-Integrate the new multi-bot architecture with the dashboard command.
-
-**Subtasks:**
-- [ ] Add `--config` flag to dashboard command for TOML config file
-- [ ] Replace `run_bot_task` with `RoundCoordinator`
-- [ ] Update TUI to handle dynamic bot count
-- [ ] Test with multi-bot config file
+- [ ] Add retry logic for failed checkpoints
+- [ ] Add connection health monitoring in TUI
+- [ ] Add RPC latency display
 
 ## Backlog
 
-- Task 27: Frontend UI (web dashboard)
+- Task 30: Frontend UI (web dashboard)
 - Add `ClaimOre` CLI command (instruction exists in `mm_claim_ore`, command missing in bot)
 - Add inline documentation for all public functions
 - Create client SDK documentation
-- Enable priority fee when needed (add `--priority-fee` CLI flag)
 
 ---
 

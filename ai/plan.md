@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-12-01 (Phase 11 complete - Multi-Bot Architecture)
+> Last Updated: 2025-12-01 (Phase 11 complete, TUI Interactive Features in progress)
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
@@ -248,6 +248,13 @@ struct BotSessionStats {
 - [x] 5x5 board grid with round deployment data
 - [x] Transaction log with timestamps and error messages
 - [x] Keyboard shortcuts (q=quit, Esc=quit)
+- [x] Cursor navigation (↑/↓/j/k) for selectable elements
+- [x] Pubkey display (signer, auth PDA) with shortened format
+- [x] Clipboard copy on Enter (pubkeys, signatures)
+- [x] Missed rounds tracking for all strategies
+- [x] Per-bot SOL cost/spent tracking
+- [x] Config reload action (🔄) with validation
+- [x] Session refresh action (🔁) to reset stats
 
 ## Phase 11: Multi-Bot Architecture
 > Priority: **HIGH** - Parallel bots with optimized RPC

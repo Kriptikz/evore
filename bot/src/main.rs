@@ -632,8 +632,13 @@ async fn run_tui_loop(
         terminal.draw(|frame| tui::draw(frame, app))?;
         
         // Handle input (non-blocking check)
-        if tui::handle_input(app)? {
-            break;
+        match tui::handle_input(app)? {
+            tui::InputResult::Quit => break,
+            tui::InputResult::ReloadConfig(_) => {
+                // Config reload not supported in single-bot mode
+                app.set_status("Config reload not available".to_string(), true);
+            }
+            tui::InputResult::Continue => {}
         }
         
         // Small sleep to prevent busy loop
@@ -725,6 +730,7 @@ async fn run_dashboard_with_config(
     
     // Create app state
     let mut app = App::new(rpc_url);
+    app.set_config_path(config_path.to_string());
     
     // Add bot states to app
     for (_index, bot_config) in config.bots.iter().enumerate() {
@@ -817,8 +823,54 @@ async fn run_dashboard_with_config(
             terminal.draw(|frame| tui::draw(frame, &app))?;
             
             // Handle input
-            if tui::handle_input(&mut app)? {
-                break;
+            match tui::handle_input(&mut app)? {
+                tui::InputResult::Quit => break,
+                tui::InputResult::ReloadConfig(bot_idx) => {
+                    // Try to reload config from file
+                    let config_path_clone = app.config_path.clone();
+                    if let Some(config_path) = config_path_clone {
+                        match Config::load(Path::new(&config_path)) {
+                            Ok(new_config) => {
+                                // Find the bot config by index
+                                if let Some(new_bot_config) = new_config.bots.get(bot_idx) {
+                                    // Update the bot's display config
+                                    let bot_name = app.bots.get(bot_idx).map(|b| b.name.clone());
+                                    if let Some(bot) = app.bots.get_mut(bot_idx) {
+                                        // Update bankroll
+                                        bot.bankroll = new_bot_config.bankroll;
+                                        bot.slots_left_threshold = new_bot_config.slots_left;
+                                        
+                                        // Update strategy params
+                                        match &new_bot_config.strategy_params {
+                                            crate::config::StrategyParams::EV { max_per_square, min_bet, ore_value } => {
+                                                bot.max_per_square = *max_per_square;
+                                                bot.min_bet = *min_bet;
+                                                bot.ore_value = *ore_value;
+                                            }
+                                            crate::config::StrategyParams::Percentage { percentage, squares_count } => {
+                                                bot.percentage = *percentage;
+                                                bot.squares_count = *squares_count;
+                                            }
+                                            _ => {}
+                                        }
+                                    }
+                                    
+                                    if let Some(name) = bot_name {
+                                        app.set_status(format!("Config reloaded: {}", name), false);
+                                    }
+                                } else {
+                                    app.set_status(format!("Bot {} not found in config", bot_idx), true);
+                                }
+                            }
+                            Err(e) => {
+                                app.set_status(format!("Config error: {}", e), true);
+                            }
+                        }
+                    } else {
+                        app.set_status("No config path set".to_string(), true);
+                    }
+                }
+                tui::InputResult::Continue => {}
             }
             
             tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
