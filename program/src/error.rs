@@ -50,6 +50,14 @@ pub enum EvoreError {
     /// Arithmetic overflow during calculation
     #[error("Arithmetic overflow: calculation exceeded safe bounds")]
     ArithmeticOverflow = 8,
+    
+    // ========================
+    // Multi-Deploy Errors
+    // ========================
+    
+    /// Already deployed to this round and multi-deploy is not allowed
+    #[error("Already deployed: multi-deploy not allowed for this strategy")]
+    AlreadyDeployedThisRound = 9,
 }
 
 error!(EvoreError);

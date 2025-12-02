@@ -261,6 +261,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_bet: *min_bet,
                 ore_value: *ore_value,
                 slots_left: *slots_left,
+                attempts: 0,
+                allow_multi_deploy: false,
             };
             
             println!("Signer:  {}", signer.pubkey());
@@ -297,6 +299,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 min_bet: *min_bet,
                 ore_value: *ore_value,
                 slots_left: *slots_left,
+                attempts: 0,
+                allow_multi_deploy: false,
             };
             
             // Start slot tracker
@@ -491,6 +495,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     min_bet: *min_bet,
                     ore_value: *ore_value,
                     slots_left: *slots_left,
+                    attempts: 0,
+                    allow_multi_deploy: false,
                 };
                 
                 run_dashboard(
@@ -546,6 +552,8 @@ async fn run_dashboard(
         params.max_per_square,
         params.min_bet,
         params.ore_value,
+        0,  // percentage (unused for EV strategy)
+        0,  // squares_count (unused for EV strategy)
     );
     app.add_bot(bot);
     
@@ -659,6 +667,50 @@ async fn run_dashboard_with_config(
     }
     println!();
     
+    // Create RPC client for setup
+    let setup_client = client::EvoreClient::new(rpc_url);
+    
+    // Ensure all manager accounts exist
+    println!("Checking manager accounts...");
+    for bot_config in &config.bots {
+        let manager_path = config.get_manager_path(bot_config);
+        let manager_keypair = solana_sdk::signature::read_keypair_file(&manager_path)
+            .map_err(|e| format!("Failed to load manager from {:?}: {}", manager_path, e))?;
+        
+        let signer_path = config.get_signer_path(bot_config);
+        let signer_keypair = solana_sdk::signature::read_keypair_file(&signer_path)
+            .map_err(|e| format!("Failed to load signer from {:?}: {}", signer_path, e))?;
+        
+        let manager_pubkey = manager_keypair.pubkey();
+        
+        match setup_client.get_manager(&manager_pubkey)? {
+            Some(manager_data) => {
+                println!("  ✓ {} - Manager exists (authority: {})", 
+                    bot_config.name, 
+                    if manager_data.authority == signer_keypair.pubkey() { "valid" } else { "MISMATCH!" }
+                );
+            }
+            None => {
+                println!("  → {} - Creating manager account...", bot_config.name);
+                
+                let ix = evore::instruction::create_manager(signer_keypair.pubkey(), manager_pubkey);
+                let blockhash = setup_client.rpc.get_latest_blockhash()?;
+                let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
+                    &[ix],
+                    Some(&signer_keypair.pubkey()),
+                    &[&signer_keypair, &manager_keypair],
+                    blockhash,
+                );
+                
+                match setup_client.rpc.send_and_confirm_transaction(&tx) {
+                    Ok(sig) => println!("    ✓ Created: {}", sig),
+                    Err(e) => return Err(format!("Failed to create manager for {}: {}", bot_config.name, e).into()),
+                }
+            }
+        }
+    }
+    println!();
+    
     // Set panic hook to restore terminal on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -673,12 +725,18 @@ async fn run_dashboard_with_config(
     let mut app = App::new(rpc_url);
     
     // Add bot states to app
-    for (index, bot_config) in config.bots.iter().enumerate() {
-        let (max_per_square, min_bet, ore_value) = match &bot_config.strategy_params {
+    for (_index, bot_config) in config.bots.iter().enumerate() {
+        // Extract strategy params
+        let (max_per_square, min_bet, ore_value, percentage, squares_count) = match &bot_config.strategy_params {
             crate::config::StrategyParams::EV { max_per_square, min_bet, ore_value } => {
-                (*max_per_square, *min_bet, *ore_value)
+                (*max_per_square, *min_bet, *ore_value, 0, 0)
             }
-            _ => (10_000_000, 1_000_000, 500_000_000),
+            crate::config::StrategyParams::Percentage { percentage, squares_count } => {
+                (0, 0, 0, *percentage, *squares_count)
+            }
+            crate::config::StrategyParams::Manual { .. } => {
+                (0, 0, 0, 0, 0)
+            }
         };
         
         // Load manager to get pubkey
@@ -701,6 +759,8 @@ async fn run_dashboard_with_config(
             max_per_square,
             min_bet,
             ore_value,
+            percentage,
+            squares_count,
         );
         app.add_bot(bot_state);
     }

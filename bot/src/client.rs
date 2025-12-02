@@ -6,13 +6,20 @@ use solana_sdk::{
     commitment_config::CommitmentConfig,
     pubkey::Pubkey,
     signature::Signature,
-    transaction::Transaction,
+    transaction::{Transaction, TransactionError},
 };
 use std::time::Duration;
 
 use evore::ore_api::{board_pda, miner_pda, round_pda, Board, Miner, Round};
 use evore::state::{managed_miner_auth_pda, Manager};
 use steel::AccountDeserialize;
+
+/// Transaction status result
+#[derive(Debug, Clone)]
+pub struct TxStatusResult {
+    pub err: Option<TransactionError>,
+    pub slot: u64,
+}
 
 pub struct EvoreClient {
     pub rpc: RpcClient,
@@ -68,11 +75,27 @@ impl EvoreClient {
         Ok(signature)
     }
 
-    /// Confirm a transaction signature
+    /// Simple confirmation check (returns bool)
     pub fn confirm_transaction(&self, signature: &Signature) -> Result<bool, Box<dyn std::error::Error>> {
-        match self.rpc.confirm_transaction(signature) {
-            Ok(confirmed) => Ok(confirmed),
-            Err(_) => Ok(false),
+        match self.get_transaction_status(signature)? {
+            Some(status) => Ok(status.err.is_none()),
+            None => Ok(false),
+        }
+    }
+    
+    /// Get transaction status - returns confirmation and any error
+    /// Returns Ok(Some(status)) if tx found, Ok(None) if not found/expired
+    pub fn get_transaction_status(&self, signature: &Signature) -> Result<Option<TxStatusResult>, Box<dyn std::error::Error>> {
+        let statuses = self.rpc.get_signature_statuses_with_history(&[*signature])?;
+        
+        match statuses.value.get(0) {
+            Some(Some(status)) => {
+                Ok(Some(TxStatusResult {
+                    err: status.err.clone(),
+                    slot: status.slot,
+                }))
+            }
+            _ => Ok(None),
         }
     }
 

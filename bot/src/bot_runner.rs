@@ -24,10 +24,11 @@ use crate::board_tracker::BoardTracker;
 use crate::bot_state::{BotPhase, BotState};
 use crate::client::EvoreClient;
 use crate::config::StrategyParams;
-use crate::deploy::{build_checkpoint_tx, build_claim_sol_tx, build_ev_deploy_tx, EvDeployParams};
+use crate::config::DeployStrategy;
+use crate::deploy::{build_checkpoint_tx, build_claim_sol_tx, build_ev_deploy_tx, build_percentage_deploy_tx, EvDeployParams, PercentageDeployParams};
 use crate::round_tracker::RoundTracker;
 use crate::slot_tracker::SlotTracker;
-use crate::tui::{BotStatus, TuiUpdate, TxAction};
+use crate::tui::{BotStatus, TuiUpdate, TxAction, TxType, TxStatus};
 use crate::tx_pipeline::{create_tx_pipeline, TxRequest};
 
 /// Shared services for all bots
@@ -93,7 +94,10 @@ pub struct BotRunConfig {
     pub manager: Pubkey,
     pub signer: Arc<Keypair>,
     pub slots_left: u64,
+    pub strategy: DeployStrategy,
     pub strategy_params: StrategyParams,
+    pub bankroll: u64,
+    pub attempts: u64,  // Number of deploy txs to send (default 4)
 }
 
 /// Run a single bot using shared services
@@ -135,6 +139,8 @@ pub async fn run_bot_with_services(
             bot_index: config.bot_index,
             rounds_participated: 0,
             rounds_won: 0,
+            rounds_skipped: 0,
+            rounds_missed: 0,
             current_claimable_sol: miner.rewards_sol,
             current_ore: miner.rewards_ore,
         });
@@ -184,6 +190,21 @@ pub async fn run_bot_with_services(
         if let Some(new_round_id) = services.board_tracker.check_new_round() {
             services.round_tracker.switch_round(new_round_id);
             state.reset_for_round(new_round_id);
+            
+            // At start of new round, check if previous round needs checkpointing
+            // This handles cases where deploy failed but checkpoint is still needed
+            if let Ok(Some(miner)) = services.client.get_miner(&managed_miner_auth) {
+                if miner.round_id > miner.checkpoint_id {
+                    // Miner deployed to a round that wasn't checkpointed yet
+                    state.last_deployed_round = Some(miner.round_id);
+                    state.last_checkpointed_round = Some(miner.checkpoint_id);
+                    
+                    let _ = tui_tx.send(TuiUpdate::BotMinerUpdate {
+                        bot_index: config.bot_index,
+                        miner: miner.clone(),
+                    });
+                }
+            }
         }
 
         // Send round data if available
@@ -229,7 +250,8 @@ pub async fn run_bot_with_services(
                     
                     match services.client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
                         Ok(sig) => {
-                            send_tx_event(&tui_tx, &config.name, TxAction::Confirmed, sig, None);
+                            send_tx_event_typed(&tui_tx, &config.name, TxType::Checkpoint, TxStatus::Confirmed, sig, None, 
+                                Some(current_slot), Some(last_round), None, None);
                             
                             // Update state after checkpoint
                             sleep(Duration::from_millis(500)).await;
@@ -247,10 +269,12 @@ pub async fn run_bot_with_services(
                                     bot_index: config.bot_index,
                                     rounds_participated: state.rounds_participated,
                                     rounds_won: state.rounds_won,
+                                    rounds_skipped: state.rounds_skipped,
+                                    rounds_missed: state.rounds_missed,
                                     current_claimable_sol: state.current_claimable_sol,
                                     current_ore: state.current_ore,
                                 });
-                                
+
                                 let _ = tui_tx.send(TuiUpdate::BotMinerUpdate {
                                     bot_index: config.bot_index,
                                     miner: miner.clone(),
@@ -267,16 +291,28 @@ pub async fn run_bot_with_services(
                                         bh,
                                     );
                                     
-                                    if let Ok(sig) = services.client.rpc.send_and_confirm_transaction(&claim_tx) {
-                                        send_tx_event(&tui_tx, &config.name, TxAction::Confirmed, sig, None);
-                                        update_signer_balance(&services, &config, &tui_tx).await;
+                                    match services.client.rpc.send_and_confirm_transaction(&claim_tx) {
+                                        Ok(sig) => {
+                                            send_tx_event_typed(&tui_tx, &config.name, TxType::ClaimSol, TxStatus::Confirmed, sig, None,
+                                                Some(current_slot), None, Some(rewards_sol), None);
+                                            // Track claimed amount for accurate P&L
+                                            let _ = tui_tx.send(TuiUpdate::BotClaimedSol {
+                                                bot_index: config.bot_index,
+                                                amount: rewards_sol,
+                                            });
+                                            update_signer_balance(&services, &config, &tui_tx).await;
+                                        }
+                                        Err(e) => {
+                                            send_tx_event_typed(&tui_tx, &config.name, TxType::ClaimSol, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
+                                                Some(current_slot), None, Some(rewards_sol), None);
+                                        }
                                     }
                                 }
                             }
                         }
                         Err(e) => {
-                            let error_msg = format!("Checkpoint: {}", e);
-                            send_tx_event(&tui_tx, &config.name, TxAction::Failed, Signature::default(), Some(error_msg));
+                            send_tx_event_typed(&tui_tx, &config.name, TxType::Checkpoint, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
+                                Some(current_slot), Some(last_round), None, None);
                             sleep(Duration::from_millis(500)).await;
                         }
                     }
@@ -293,48 +329,87 @@ pub async fn run_bot_with_services(
                 state.set_phase(BotPhase::Deploying);
                 send_status(&tui_tx, config.bot_index, BotStatus::Deploying);
                 
-                // Build deploy params based on strategy
-                let params = build_ev_params(&config);
-                
-                // Spam deploy transactions
+                // Send config.attempts deploy transactions at 100ms intervals
+                // Each tx has a unique attempts value to generate different signatures
                 let mut signatures = Vec::new();
-                let send_interval_ms = if config.slots_left > 10 { 0 } else if config.slots_left >= 5 { 400 } else { 100 };
                 
-                loop {
+                // Get blockhash once and reuse for all attempts
+                let bh = services.blockhash_cache.get_blockhash();
+                if bh == Hash::default() {
+                    // No blockhash available, skip this round
+                    state.reset_for_round(board.round_id);
+                    continue;
+                }
+                
+                // Only EV strategy supports multiple attempts (via attempts field in instruction)
+                // Percentage and Manual would create identical txs with same signature
+                let num_attempts = match config.strategy {
+                    DeployStrategy::EV => config.attempts,
+                    DeployStrategy::Percentage | DeployStrategy::Manual => 1,
+                };
+                
+                for attempt in 0..num_attempts {
                     let current = services.slot_tracker.get_slot();
                     if current >= board.end_slot {
                         break;
                     }
                     
-                    let bh = services.blockhash_cache.get_blockhash();
-                    if bh == Hash::default() {
-                        sleep(Duration::from_millis(10)).await;
-                        continue;
-                    }
-                    
-                    let deploy_tx = build_ev_deploy_tx(
-                        &config.signer,
-                        &config.manager,
-                        config.auth_id,
-                        board.round_id,
-                        &params,
-                        bh,
-                    );
+                    // Build deploy transaction based on strategy
+                    let deploy_tx = match config.strategy {
+                        DeployStrategy::EV => {
+                            let mut params = build_ev_params(&config);
+                            params.attempts = attempt;  // Each tx has unique attempts value
+                            build_ev_deploy_tx(
+                                &config.signer,
+                                &config.manager,
+                                config.auth_id,
+                                board.round_id,
+                                &params,
+                                bh,
+                            )
+                        }
+                        DeployStrategy::Percentage => {
+                            let params = build_percentage_params(&config);
+                            build_percentage_deploy_tx(
+                                &config.signer,
+                                &config.manager,
+                                config.auth_id,
+                                board.round_id,
+                                &params,
+                                bh,
+                            )
+                        }
+                        DeployStrategy::Manual => {
+                            // TODO: Implement manual strategy - falls back to EV for now
+                            let mut params = build_ev_params(&config);
+                            params.attempts = attempt;
+                            build_ev_deploy_tx(
+                                &config.signer,
+                                &config.manager,
+                                config.auth_id,
+                                board.round_id,
+                                &params,
+                                bh,
+                            )
+                        }
+                    };
                     
                     match services.client.send_transaction_no_wait(&deploy_tx) {
                         Ok(sig) => {
                             signatures.push(sig);
-                            send_tx_event(&tui_tx, &config.name, TxAction::Sent, sig, None);
+                            send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Sent, sig, None,
+                                Some(current), Some(board.round_id), Some(config.bankroll), Some(attempt));
                         }
                         Err(e) => {
-                            send_tx_event(&tui_tx, &config.name, TxAction::Failed, Signature::default(), Some(e.to_string()));
+                            send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, Signature::default(), Some(e.to_string()),
+                                Some(current), Some(board.round_id), Some(config.bankroll), Some(attempt));
                         }
                     }
                     
-                    if send_interval_ms == 0 {
-                        break;
+                    // Sleep between attempts (except after last one)
+                    if attempt < num_attempts - 1 {
+                        sleep(Duration::from_millis(100)).await;
                     }
-                    sleep(Duration::from_millis(send_interval_ms)).await;
                 }
                 
                 // Check confirmations
@@ -342,11 +417,88 @@ pub async fn run_bot_with_services(
                     sleep(Duration::from_secs(3)).await;
                     
                     let mut any_confirmed = false;
+                    let mut ev_skip = false;
+                    let mut had_other_error = false;
+                    
                     for sig in &signatures {
-                        if services.client.confirm_transaction(sig).unwrap_or(false) {
-                            any_confirmed = true;
-                            send_tx_event(&tui_tx, &config.name, TxAction::Confirmed, *sig, None);
+                        match services.client.get_transaction_status(sig) {
+                            Ok(Some(status)) => {
+                                if status.err.is_none() {
+                                    any_confirmed = true;
+                                    send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Confirmed, *sig, None,
+                                        Some(status.slot), Some(board.round_id), Some(config.bankroll), None);
+                                } else {
+                                    // Transaction landed but failed on-chain
+                                    let err = status.err.unwrap();
+                                    let err_msg = format!("{:?}", err);
+                                    
+                                    // Map Evore program error codes to human-readable names
+                                    let friendly_err = parse_evore_error(&err_msg);
+                                    
+                                    // Check error type:
+                                    // - Custom(7): NoDeployments (EV skip) - count as skip
+                                    // - Custom(9): AlreadyDeployed - means one of our txs landed, treat as success
+                                    if err_msg.contains("Custom(7)") {
+                                        ev_skip = true;
+                                    } else if err_msg.contains("Custom(9)") {
+                                        // Already deployed this round - one of our earlier txs landed
+                                        // This is expected when sending multiple attempts
+                                        any_confirmed = true;
+                                    } else {
+                                        had_other_error = true;
+                                    }
+                                    
+                                    send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, *sig, Some(friendly_err),
+                                        Some(status.slot), Some(board.round_id), Some(config.bankroll), None);
+                                }
+                            }
+                            Ok(None) => {
+                                // Transaction not found - expired or dropped
+                                had_other_error = true;
+                                send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, *sig, Some("Tx expired/dropped".to_string()),
+                                    None, Some(board.round_id), Some(config.bankroll), None);
+                            }
+                            Err(e) => {
+                                had_other_error = true;
+                                send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, *sig, Some(format!("RPC: {}", e)),
+                                    None, Some(board.round_id), Some(config.bankroll), None);
+                            }
                         }
+                    }
+                    
+                    // Count EV skips (only once per round even if multiple txs failed with Custom(7))
+                    if ev_skip && !any_confirmed {
+                        state.rounds_skipped += 1;
+                        let _ = tui_tx.send(TuiUpdate::BotStatsUpdate {
+                            bot_index: config.bot_index,
+                            rounds_participated: state.rounds_participated,
+                            rounds_won: state.rounds_won,
+                            rounds_skipped: state.rounds_skipped,
+                            rounds_missed: state.rounds_missed,
+                            current_claimable_sol: state.current_claimable_sol,
+                            current_ore: state.current_ore,
+                        });
+                        // Mark round as handled (both deployed and checkpointed) so we don't retry
+                        // and don't try to checkpoint a round we skipped
+                        state.last_deployed_round = Some(board.round_id);
+                        state.last_checkpointed_round = Some(board.round_id);
+                    }
+                    
+                    // Count missed rounds (tx failed for reasons other than EV skip)
+                    if had_other_error && !any_confirmed && !ev_skip {
+                        state.rounds_missed += 1;
+                        let _ = tui_tx.send(TuiUpdate::BotStatsUpdate {
+                            bot_index: config.bot_index,
+                            rounds_participated: state.rounds_participated,
+                            rounds_won: state.rounds_won,
+                            rounds_skipped: state.rounds_skipped,
+                            rounds_missed: state.rounds_missed,
+                            current_claimable_sol: state.current_claimable_sol,
+                            current_ore: state.current_ore,
+                        });
+                        // Mark round as handled so we don't retry
+                        state.last_deployed_round = Some(board.round_id);
+                        state.last_checkpointed_round = Some(board.round_id);
                     }
                     
                     if any_confirmed {
@@ -365,6 +517,8 @@ pub async fn run_bot_with_services(
                                 bot_index: config.bot_index,
                                 rounds_participated: state.rounds_participated,
                                 rounds_won: state.rounds_won,
+                                rounds_skipped: state.rounds_skipped,
+                                rounds_missed: state.rounds_missed,
                                 current_claimable_sol: state.current_claimable_sol,
                                 current_ore: state.current_ore,
                             });
@@ -449,7 +603,7 @@ fn send_status(tx: &mpsc::UnboundedSender<TuiUpdate>, bot_index: usize, status: 
     let _ = tx.send(TuiUpdate::BotStatusUpdate { bot_index, status });
 }
 
-/// Send transaction event
+/// Send transaction event (legacy)
 fn send_tx_event(
     tx: &mpsc::UnboundedSender<TuiUpdate>,
     bot_name: &str,
@@ -462,6 +616,32 @@ fn send_tx_event(
         action,
         signature,
         error,
+    });
+}
+
+/// Send transaction event with type info and details
+fn send_tx_event_typed(
+    tx: &mpsc::UnboundedSender<TuiUpdate>,
+    bot_name: &str,
+    tx_type: TxType,
+    status: TxStatus,
+    signature: Signature,
+    error: Option<String>,
+    slot: Option<u64>,
+    round_id: Option<u64>,
+    amount: Option<u64>,
+    attempt: Option<u64>,
+) {
+    let _ = tx.send(TuiUpdate::TxEventTyped {
+        bot_name: bot_name.to_string(),
+        tx_type,
+        status,
+        signature,
+        error,
+        slot,
+        round_id,
+        amount,
+        attempt,
     });
 }
 
@@ -484,20 +664,84 @@ fn build_ev_params(config: &BotRunConfig) -> EvDeployParams {
     match &config.strategy_params {
         StrategyParams::EV { max_per_square, min_bet, ore_value } => {
             EvDeployParams {
-                bankroll: 0, // Will be calculated from miner balance
+                bankroll: config.bankroll,
                 max_per_square: *max_per_square,
                 min_bet: *min_bet,
                 ore_value: *ore_value,
                 slots_left: config.slots_left,
+                attempts: 0,  // Will be set per-tx in deploy loop
+                allow_multi_deploy: false,  // Don't allow multiple deploys per round
             }
         }
-        // TODO: Handle other strategies
         _ => EvDeployParams {
-            bankroll: 0,
+            bankroll: config.bankroll,
             max_per_square: 100_000_000,
             min_bet: 10_000,
             ore_value: 800_000_000,
             slots_left: config.slots_left,
+            attempts: 0,
+            allow_multi_deploy: false,
         }
     }
+}
+
+/// Build Percentage deploy params from config
+fn build_percentage_params(config: &BotRunConfig) -> PercentageDeployParams {
+    match &config.strategy_params {
+        StrategyParams::Percentage { percentage, squares_count } => {
+            PercentageDeployParams {
+                bankroll: config.bankroll,
+                percentage: *percentage,
+                squares_count: *squares_count,
+                slots_left: config.slots_left,
+            }
+        }
+        _ => PercentageDeployParams {
+            bankroll: config.bankroll,
+            percentage: 100,  // 1%
+            squares_count: 20,
+            slots_left: config.slots_left,
+        }
+    }
+}
+
+/// Parse Evore program error codes into human-readable messages
+/// Error codes from program/src/error.rs
+fn parse_evore_error(err_str: &str) -> String {
+    // Extract custom error code if present
+    if let Some(code) = extract_custom_error(err_str) {
+        match code {
+            1 => "NotAuthorized".to_string(),
+            2 => "TooManySlotsLeft".to_string(),
+            3 => "EndSlotExceeded".to_string(),
+            4 => "InvalidPDA".to_string(),
+            5 => "ManagerNotInitialized".to_string(),
+            6 => "InvalidFeeCollector".to_string(),
+            7 => "NoDeployments (EV skip)".to_string(),
+            8 => "ArithmeticOverflow".to_string(),
+            9 => "AlreadyDeployed".to_string(),
+            _ => format!("Custom({})", code),
+        }
+    } else {
+        // Return truncated original error if not a custom error
+        if err_str.len() > 50 {
+            format!("{}...", &err_str[..50])
+        } else {
+            err_str.to_string()
+        }
+    }
+}
+
+/// Extract custom error code from error string like "InstructionError(0, Custom(7))"
+fn extract_custom_error(err_str: &str) -> Option<u32> {
+    // Look for "Custom(N)" pattern
+    if let Some(start) = err_str.find("Custom(") {
+        let after_custom = &err_str[start + 7..];
+        if let Some(end) = after_custom.find(')') {
+            if let Ok(code) = after_custom[..end].parse::<u32>() {
+                return Some(code);
+            }
+        }
+    }
+    None
 }

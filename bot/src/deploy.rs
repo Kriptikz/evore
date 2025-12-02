@@ -37,6 +37,8 @@ pub struct EvDeployParams {
     pub min_bet: u64,
     pub ore_value: u64,
     pub slots_left: u64,
+    pub attempts: u64,  // Attempt counter - makes each tx unique for same blockhash
+    pub allow_multi_deploy: bool,  // If false, fail if already deployed this round
 }
 
 impl Default for EvDeployParams {
@@ -47,6 +49,8 @@ impl Default for EvDeployParams {
             min_bet: 10_000,             // 0.00001 SOL
             ore_value: 800_000_000,      // 0.8 SOL
             slots_left: 2,
+            attempts: 0,
+            allow_multi_deploy: false,  // Default: don't allow multi-deploy
         }
     }
 }
@@ -78,6 +82,47 @@ pub fn build_ev_deploy_tx(
         params.min_bet,
         params.ore_value,
         params.slots_left,
+        params.attempts,
+        params.allow_multi_deploy,
+    );
+
+    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, deploy_ix], Some(&signer.pubkey()));
+    tx.sign(&[signer], recent_blockhash);
+    tx
+}
+
+/// Parameters for Percentage deployment
+#[derive(Debug, Clone)]
+pub struct PercentageDeployParams {
+    pub bankroll: u64,
+    pub percentage: u64,      // In basis points (100 = 1%)
+    pub squares_count: u64,   // Number of squares (1-25)
+    pub slots_left: u64,
+}
+
+/// Build Percentage deploy transaction
+/// Note: Each square deployment is a separate CPI call (~50-60k CU each).
+/// With 25 squares this can exceed the 1.4M CU transaction limit.
+/// If deploys fail with "program failed to complete", reduce squares_count.
+pub fn build_percentage_deploy_tx(
+    signer: &Keypair,
+    manager: &Pubkey,
+    auth_id: u64,
+    round_id: u64,
+    params: &PercentageDeployParams,
+    recent_blockhash: Hash,
+) -> Transaction {
+    // Max CU for Solana is 1.4M. Each square CPI costs ~50-60k CU.
+    // Safe limit: ~20-22 squares max. Consider reducing squares_count if this fails.
+    let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
+    let deploy_ix = evore::instruction::percentage_deploy(
+        signer.pubkey(),
+        *manager,
+        auth_id,
+        round_id,
+        params.bankroll,
+        params.percentage,
+        params.squares_count,
     );
 
     let mut tx = Transaction::new_with_payer(&[cu_limit_ix, deploy_ix], Some(&signer.pubkey()));
@@ -254,17 +299,18 @@ pub async fn single_deploy(
     }
     
     // Determine send strategy based on slots_left
-    let send_interval_ms = if params.slots_left > 10 {
-        0 // Single send, no spam
-    } else if params.slots_left >= 5 {
-        400 // Medium urgency: every 400ms
+    // slots_left <= 2 → 100ms, slots_left <= 4 → 400ms, else single send
+    let send_interval_ms = if params.slots_left <= 2 {
+        100 // Fast spam: every 100ms
+    } else if params.slots_left <= 4 {
+        400 // Medium spam: every 400ms
     } else {
-        100 // High urgency: every 100ms
+        0 // Single send, no spam
     };
     
     println!();
     if send_interval_ms == 0 {
-        println!("📤 Single send mode (slots_left > 10)");
+        println!("📤 Single send mode (slots_left > 4)");
     } else {
         println!("🚀 Spam mode: sending every {}ms until slot {} (end)", send_interval_ms, board.end_slot);
     }

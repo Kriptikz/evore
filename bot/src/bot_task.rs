@@ -20,7 +20,7 @@ use tokio::time::sleep;
 use crate::client::EvoreClient;
 use crate::deploy::{build_checkpoint_tx, build_claim_sol_tx, build_ev_deploy_tx, EvDeployParams};
 use crate::slot_tracker::SlotTracker;
-use crate::tui::{BotStatus, TuiUpdate, TxAction};
+use crate::tui::{BotStatus, TuiUpdate, TxAction, TxType, TxStatus};
 
 /// Bot task configuration
 #[derive(Clone)]
@@ -50,6 +50,7 @@ pub async fn run_bot_task(
     // Session stats tracking (for P&L) - starting values set in TUI on first update
     let mut rounds_participated: u64 = 0;
     let mut rounds_won: u64 = 0;
+    let mut rounds_skipped: u64 = 0;
     let mut current_claimable_sol: u64 = 0;
     let mut current_ore: u64 = 0;
     let mut last_rewards_sol_before_checkpoint: u64 = 0;
@@ -78,14 +79,16 @@ pub async fn run_bot_task(
             current_claimable_sol = miner.rewards_sol;
             current_ore = miner.rewards_ore;
             
-            // Send initial stats (TUI will set starting values on first update)
-            let _ = tx.send(TuiUpdate::BotStatsUpdate {
-                bot_index: config.bot_index,
-                rounds_participated: 0,
-                rounds_won: 0,
-                current_claimable_sol,
-                current_ore,
-            });
+                // Send initial stats (TUI will set starting values on first update)
+                let _ = tx.send(TuiUpdate::BotStatsUpdate {
+                    bot_index: config.bot_index,
+                    rounds_participated: 0,
+                    rounds_won: 0,
+                    rounds_skipped: 0,
+                    rounds_missed: 0,
+                    current_claimable_sol,
+                    current_ore,
+                });
             
             let _ = tx.send(TuiUpdate::BotMinerUpdate {
                 bot_index: config.bot_index,
@@ -216,19 +219,29 @@ pub async fn run_bot_task(
                 match client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
                     Ok(sig) => {
                         last_round_checkpointed = Some(last_round);
-                        let _ = tx.send(TuiUpdate::TxEvent {
+                        let _ = tx.send(TuiUpdate::TxEventTyped {
                             bot_name: config.name.clone(),
-                            action: TxAction::Confirmed,
+                            tx_type: TxType::Checkpoint,
+                            status: TxStatus::Confirmed,
                             signature: sig,
                             error: None,
+                            slot: None,
+                            round_id: Some(last_round),
+                            amount: None,
+                            attempt: None,
                         });
                     }
                     Err(e) => {
-                        let _ = tx.send(TuiUpdate::TxEvent {
+                        let _ = tx.send(TuiUpdate::TxEventTyped {
                             bot_name: config.name.clone(),
-                            action: TxAction::Failed,
+                            tx_type: TxType::Checkpoint,
+                            status: TxStatus::Failed,
                             signature: Signature::default(),
-                            error: Some(format!("Checkpoint: {}", e)),
+                            error: Some(format!("{}", e)),
+                            slot: None,
+                            round_id: Some(last_round),
+                            amount: None,
+                            attempt: None,
                         });
                         // Failed - retry next loop
                         sleep(Duration::from_millis(500)).await;
@@ -260,6 +273,8 @@ pub async fn run_bot_task(
                         bot_index: config.bot_index,
                         rounds_participated,
                         rounds_won,
+                        rounds_skipped,
+                        rounds_missed: 0,  // TODO: track missed rounds in legacy bot_task
                         current_claimable_sol,
                         current_ore,
                     });
@@ -272,15 +287,21 @@ pub async fn run_bot_task(
                     let should_claim = miner.rewards_sol > 0;
                     
                     if should_claim {
+                        let rewards = miner.rewards_sol;
                         let bh = wait_for_blockhash(&slot_tracker).await;
                         let claim_tx = build_claim_sol_tx(&signer, &config.manager, config.auth_id, bh);
                         match client.rpc.send_and_confirm_transaction(&claim_tx) {
                             Ok(sig) => {
-                                let _ = tx.send(TuiUpdate::TxEvent {
+                                let _ = tx.send(TuiUpdate::TxEventTyped {
                                     bot_name: config.name.clone(),
-                                    action: TxAction::Confirmed,
+                                    tx_type: TxType::ClaimSol,
+                                    status: TxStatus::Confirmed,
                                     signature: sig,
                                     error: None,
+                                    slot: None,
+                                    round_id: None,
+                                    amount: Some(rewards),
+                                    attempt: None,
                                 });
                                 
                                 // Update signer balance after claim (spent fees)
@@ -292,11 +313,16 @@ pub async fn run_bot_task(
                                 }
                             }
                             Err(e) => {
-                                let _ = tx.send(TuiUpdate::TxEvent {
+                                let _ = tx.send(TuiUpdate::TxEventTyped {
                                     bot_name: config.name.clone(),
-                                    action: TxAction::Failed,
+                                    tx_type: TxType::ClaimSol,
+                                    status: TxStatus::Failed,
                                     signature: Signature::default(),
-                                    error: Some(format!("Claim SOL: {}", e)),
+                                    error: Some(format!("{}", e)),
+                                    slot: None,
+                                    round_id: None,
+                                    amount: Some(rewards),
+                                    attempt: None,
                                 });
                             }
                         }
@@ -346,12 +372,13 @@ pub async fn run_bot_task(
         });
         
         // Determine send strategy based on slots_left
-        let send_interval_ms: u64 = if config.params.slots_left > 10 {
-            0 // Single send, no spam
-        } else if config.params.slots_left >= 5 {
-            400 // Medium urgency: every 400ms
+        // slots_left <= 2 → 100ms, slots_left <= 4 → 400ms, else single send
+        let send_interval_ms: u64 = if config.params.slots_left <= 2 {
+            100 // Fast spam: every 100ms
+        } else if config.params.slots_left <= 4 {
+            400 // Medium spam: every 400ms
         } else {
-            100 // High urgency: every 100ms
+            0 // Single send, no spam
         };
         
         let mut signatures: Vec<Signature> = Vec::new();
@@ -383,19 +410,29 @@ pub async fn run_bot_task(
             match client.send_transaction_no_wait(&deploy_tx) {
                 Ok(sig) => {
                     signatures.push(sig);
-                    let _ = tx.send(TuiUpdate::TxEvent {
+                    let _ = tx.send(TuiUpdate::TxEventTyped {
                         bot_name: config.name.clone(),
-                        action: TxAction::Sent,
+                        tx_type: TxType::Deploy,
+                        status: TxStatus::Sent,
                         signature: sig,
                         error: None,
+                        slot: Some(current_slot),
+                        round_id: Some(board.round_id),
+                        amount: Some(config.params.bankroll),
+                        attempt: None,
                     });
                 }
                 Err(e) => {
-                    let _ = tx.send(TuiUpdate::TxEvent {
+                    let _ = tx.send(TuiUpdate::TxEventTyped {
                         bot_name: config.name.clone(),
-                        action: TxAction::Failed,
+                        tx_type: TxType::Deploy,
+                        status: TxStatus::Failed,
                         signature: Signature::default(),
                         error: Some(e.to_string()),
+                        slot: Some(current_slot),
+                        round_id: Some(board.round_id),
+                        amount: Some(config.params.bankroll),
+                        attempt: None,
                     });
                 }
             }
@@ -415,14 +452,65 @@ pub async fn run_bot_task(
             
             let mut any_confirmed = false;
             for sig in &signatures {
-                if client.confirm_transaction(sig).unwrap_or(false) {
-                    any_confirmed = true;
-                    let _ = tx.send(TuiUpdate::TxEvent {
-                        bot_name: config.name.clone(),
-                        action: TxAction::Confirmed,
-                        signature: *sig,
-                        error: None,
-                    });
+                match client.get_transaction_status(sig) {
+                    Ok(Some(status)) => {
+                        if status.err.is_none() {
+                            any_confirmed = true;
+                            let _ = tx.send(TuiUpdate::TxEventTyped {
+                                bot_name: config.name.clone(),
+                                tx_type: TxType::Deploy,
+                                status: TxStatus::Confirmed,
+                                signature: *sig,
+                                error: None,
+                                slot: Some(status.slot),
+                                round_id: Some(board.round_id),
+                                amount: Some(config.params.bankroll),
+                                attempt: None,
+                            });
+                        } else {
+                            // Transaction landed but failed on-chain
+                            let err_msg = format!("{:?}", status.err.unwrap());
+                            let _ = tx.send(TuiUpdate::TxEventTyped {
+                                bot_name: config.name.clone(),
+                                tx_type: TxType::Deploy,
+                                status: TxStatus::Failed,
+                                signature: *sig,
+                                error: Some(err_msg),
+                                slot: Some(status.slot),
+                                round_id: Some(board.round_id),
+                                amount: Some(config.params.bankroll),
+                                attempt: None,
+                            });
+                        }
+                    }
+                    Ok(None) => {
+                        // Transaction not found - expired or dropped
+                        let _ = tx.send(TuiUpdate::TxEventTyped {
+                            bot_name: config.name.clone(),
+                            tx_type: TxType::Deploy,
+                            status: TxStatus::Failed,
+                            signature: *sig,
+                            error: Some("Tx expired/dropped".to_string()),
+                            slot: None,
+                            round_id: Some(board.round_id),
+                            amount: Some(config.params.bankroll),
+                            attempt: None,
+                        });
+                    }
+                    Err(e) => {
+                        // RPC error checking status
+                        let _ = tx.send(TuiUpdate::TxEventTyped {
+                            bot_name: config.name.clone(),
+                            tx_type: TxType::Deploy,
+                            status: TxStatus::Failed,
+                            signature: *sig,
+                            error: Some(format!("RPC: {}", e)),
+                            slot: None,
+                            round_id: Some(board.round_id),
+                            amount: Some(config.params.bankroll),
+                            attempt: None,
+                        });
+                    }
                 }
             }
             
@@ -434,6 +522,8 @@ pub async fn run_bot_task(
                     bot_index: config.bot_index,
                     rounds_participated,
                     rounds_won,
+                    rounds_skipped,
+                    rounds_missed: 0,  // TODO: track missed rounds in legacy bot_task
                     current_claimable_sol,
                     current_ore,
                 });

@@ -59,7 +59,10 @@ impl RoundCoordinator {
             manager: manager_pubkey,
             signer,
             slots_left: bot_config.slots_left,
+            strategy: bot_config.strategy,
             strategy_params: bot_config.strategy_params.clone(),
+            bankroll: bot_config.bankroll,
+            attempts: bot_config.attempts,
         };
 
         let services = Arc::clone(&self.services);
@@ -137,6 +140,7 @@ pub async fn run_single_bot(
         strategy: crate::config::DeployStrategy::EV,
         slots_left,
         bankroll: 0, // Will be determined from account
+        attempts: 4, // Default attempts
         strategy_params,
         signer_path: None,
         manager_path: None,

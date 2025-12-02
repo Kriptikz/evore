@@ -57,6 +57,8 @@ pub enum TuiUpdate {
         bot_index: usize, 
         rounds_participated: u64,
         rounds_won: u64,
+        rounds_skipped: u64,
+        rounds_missed: u64,
         current_claimable_sol: u64,
         current_ore: u64,
     },
@@ -64,12 +66,35 @@ pub enum TuiUpdate {
     /// Bot signer (fee payer) balance updated
     BotSignerBalanceUpdate { bot_index: usize, balance: u64 },
     
-    /// Transaction event (for tx log)
+    /// Bot successfully claimed SOL (for P&L tracking)
+    BotClaimedSol { bot_index: usize, amount: u64 },
+    
+    /// Bot successfully claimed ORE (for P&L tracking)
+    BotClaimedOre { bot_index: usize, amount: u64 },
+    
+    /// Transaction event (for tx log) - legacy format
     TxEvent {
         bot_name: String,
         action: TxAction,
         signature: Signature,
         error: Option<String>,
+    },
+    
+    /// Transaction event with type info (new format)
+    TxEventTyped {
+        bot_name: String,
+        tx_type: TxType,
+        status: TxStatus,
+        signature: Signature,
+        error: Option<String>,
+        /// Slot when tx was sent/confirmed
+        slot: Option<u64>,
+        /// Round ID the tx relates to
+        round_id: Option<u64>,
+        /// Amount involved (deployed lamports, claimed lamports, etc.)
+        amount: Option<u64>,
+        /// Attempt number (for deploy retries)
+        attempt: Option<u64>,
     },
     
     /// Error message
@@ -199,16 +224,26 @@ pub struct BotSessionStats {
     pub started_at: Instant,
     pub rounds_participated: u64,
     pub rounds_won: u64,
+    /// Rounds skipped (EV was negative, didn't deploy) - EV strategy only
+    pub rounds_skipped: u64,
+    /// Rounds missed (tx failed for reason other than EV skip)
+    pub rounds_missed: u64,
     /// Starting claimable SOL (rewards_sol at session start)
     pub starting_claimable_sol: u64,
     /// Current claimable SOL (updated after each checkpoint)
     pub current_claimable_sol: u64,
-    /// Total ORE earned this session
-    pub ore_earned: u64,
     /// Starting ORE balance for delta tracking
     pub starting_ore: u64,
     /// Current ORE balance
     pub current_ore: u64,
+    /// Starting signer balance (for fee tracking)
+    pub starting_signer_balance: u64,
+    /// Total SOL claimed this session (to accurately track P&L after claims)
+    pub total_claimed_sol: u64,
+    /// Total ORE claimed this session
+    pub total_claimed_ore: u64,
+    /// Flag to track if starting balances have been set
+    pub initialized: bool,
 }
 
 impl Default for BotSessionStats {
@@ -217,11 +252,16 @@ impl Default for BotSessionStats {
             started_at: Instant::now(),
             rounds_participated: 0,
             rounds_won: 0,
+            rounds_skipped: 0,
+            rounds_missed: 0,
             starting_claimable_sol: 0,
             current_claimable_sol: 0,
-            ore_earned: 0,
             starting_ore: 0,
             current_ore: 0,
+            starting_signer_balance: 0,
+            total_claimed_sol: 0,
+            total_claimed_ore: 0,
+            initialized: false,
         }
     }
 }
@@ -233,26 +273,31 @@ impl BotSessionStats {
             started_at: Instant::now(),
             rounds_participated: 0,
             rounds_won: 0,
+            rounds_skipped: 0,
+            rounds_missed: 0,
             starting_claimable_sol: claimable_sol,
             current_claimable_sol: claimable_sol,
-            ore_earned: 0,
             starting_ore: ore,
             current_ore: ore,
+            starting_signer_balance: 0, // Set on first signer balance update
+            total_claimed_sol: 0,
+            total_claimed_ore: 0,
+            initialized: true,
         }
     }
     
     /// Calculate SOL P&L (can be negative)
+    /// P&L = (total_claimed + current_claimable) - starting_claimable
     pub fn sol_pnl(&self) -> i64 {
-        self.current_claimable_sol as i64 - self.starting_claimable_sol as i64
+        (self.total_claimed_sol + self.current_claimable_sol) as i64 - self.starting_claimable_sol as i64
     }
     
     /// Calculate ORE earned
+    /// P&L = (total_claimed + current) - starting
     pub fn ore_pnl(&self) -> i64 {
-        self.current_ore as i64 - self.starting_ore as i64
+        (self.total_claimed_ore + self.current_ore) as i64 - self.starting_ore as i64
     }
-}
-
-impl BotSessionStats {
+    
     pub fn running_time(&self) -> Duration {
         self.started_at.elapsed()
     }
@@ -281,16 +326,72 @@ impl BotSessionStats {
     }
 }
 
-/// Transaction log entry
+/// Transaction log entry with detailed info
 #[derive(Clone, Debug)]
 pub struct TxLogEntry {
     pub timestamp: Instant,
     pub bot_name: String,
-    pub action: TxAction,
+    pub tx_type: TxType,
+    pub status: TxStatus,
     pub signature: Signature,
     pub error: Option<String>,
+    /// Slot when tx was sent/confirmed
+    pub slot: Option<u64>,
+    /// Round ID the tx relates to
+    pub round_id: Option<u64>,
+    /// Amount involved (deployed lamports, claimed lamports, etc.)
+    pub amount: Option<u64>,
+    /// Attempt number (for deploy retries)
+    pub attempt: Option<u64>,
 }
 
+/// Type of transaction
+#[derive(Clone, Debug)]
+pub enum TxType {
+    Deploy,
+    Checkpoint,
+    ClaimSol,
+    ClaimOre,
+}
+
+impl TxType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TxType::Deploy => "DEPLOY",
+            TxType::Checkpoint => "CHECKPOINT",
+            TxType::ClaimSol => "CLAIM_SOL",
+            TxType::ClaimOre => "CLAIM_ORE",
+        }
+    }
+}
+
+/// Status of transaction
+#[derive(Clone, Debug)]
+pub enum TxStatus {
+    Sent,
+    Confirmed,
+    Failed,
+}
+
+impl TxStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            TxStatus::Sent => "SENT",
+            TxStatus::Confirmed => "OK",
+            TxStatus::Failed => "FAIL",
+        }
+    }
+    
+    pub fn color(&self) -> Color {
+        match self {
+            TxStatus::Sent => Color::Cyan,
+            TxStatus::Confirmed => Color::Green,
+            TxStatus::Failed => Color::Red,
+        }
+    }
+}
+
+// Legacy TxAction for backwards compatibility
 #[derive(Clone, Debug)]
 pub enum TxAction {
     Sent,
@@ -299,19 +400,11 @@ pub enum TxAction {
 }
 
 impl TxAction {
-    pub fn as_str(&self) -> &'static str {
+    pub fn to_status(&self) -> TxStatus {
         match self {
-            TxAction::Sent => "SENT",
-            TxAction::Confirmed => "OK",
-            TxAction::Failed => "FAIL",
-        }
-    }
-    
-    pub fn color(&self) -> Color {
-        match self {
-            TxAction::Sent => Color::Cyan,
-            TxAction::Confirmed => Color::Green,
-            TxAction::Failed => Color::Red,
+            TxAction::Sent => TxStatus::Sent,
+            TxAction::Confirmed => TxStatus::Confirmed,
+            TxAction::Failed => TxStatus::Failed,
         }
     }
 }
@@ -337,6 +430,9 @@ pub struct BotState {
     pub max_per_square: u64,
     pub min_bet: u64,
     pub ore_value: u64,
+    // Percentage strategy params
+    pub percentage: u64,       // In basis points (100 = 1%)
+    pub squares_count: u64,    // Number of squares
 }
 
 impl BotState {
@@ -351,6 +447,8 @@ impl BotState {
         max_per_square: u64,
         min_bet: u64,
         ore_value: u64,
+        percentage: u64,
+        squares_count: u64,
     ) -> Self {
         // Pick icon based on strategy
         let icon = match strategy.as_str() {
@@ -377,6 +475,8 @@ impl BotState {
             max_per_square,
             min_bet,
             ore_value,
+            percentage,
+            squares_count,
         }
     }
     
@@ -477,20 +577,41 @@ impl App {
         self.board.as_ref().map(|b| b.end_slot).unwrap_or(0)
     }
     
-    /// Log a transaction
-    pub fn log_tx(&mut self, bot_name: String, action: TxAction, signature: Signature, error: Option<String>) {
+    /// Log a transaction (new format with type and details)
+    pub fn log_tx_typed(
+        &mut self,
+        bot_name: String,
+        tx_type: TxType,
+        status: TxStatus,
+        signature: Signature,
+        error: Option<String>,
+        slot: Option<u64>,
+        round_id: Option<u64>,
+        amount: Option<u64>,
+        attempt: Option<u64>,
+    ) {
         self.tx_log.push(TxLogEntry {
             timestamp: Instant::now(),
             bot_name,
-            action,
+            tx_type,
+            status,
             signature,
             error,
+            slot,
+            round_id,
+            amount,
+            attempt,
         });
         
         // Keep last 100 entries
         if self.tx_log.len() > 100 {
             self.tx_log.remove(0);
         }
+    }
+    
+    /// Log a transaction (legacy format - converts to Deploy type)
+    pub fn log_tx(&mut self, bot_name: String, action: TxAction, signature: Signature, error: Option<String>) {
+        self.log_tx_typed(bot_name, TxType::Deploy, action.to_status(), signature, error, None, None, None, None);
     }
     
     /// Update slot
@@ -535,32 +656,54 @@ impl App {
                 bot_index, 
                 rounds_participated,
                 rounds_won,
+                rounds_skipped,
+                rounds_missed,
                 current_claimable_sol,
                 current_ore,
             } => {
                 if let Some(bot) = self.bots.get_mut(bot_index) {
-                    // If this is the first update (starting values are 0), initialize starting values
-                    if bot.session_stats.starting_claimable_sol == 0 && bot.session_stats.starting_ore == 0 {
+                    // Only set starting values once (on first update when not initialized)
+                    if !bot.session_stats.initialized {
                         bot.session_stats.starting_claimable_sol = current_claimable_sol;
                         bot.session_stats.starting_ore = current_ore;
+                        bot.session_stats.initialized = true;
                     }
                     bot.session_stats.rounds_participated = rounds_participated;
                     bot.session_stats.rounds_won = rounds_won;
+                    bot.session_stats.rounds_skipped = rounds_skipped;
+                    bot.session_stats.rounds_missed = rounds_missed;
                     bot.session_stats.current_claimable_sol = current_claimable_sol;
                     bot.session_stats.current_ore = current_ore;
                 }
             }
             TuiUpdate::BotSignerBalanceUpdate { bot_index, balance } => {
                 if let Some(bot) = self.bots.get_mut(bot_index) {
+                    // Set starting balance on first update
+                    if bot.session_stats.starting_signer_balance == 0 {
+                        bot.session_stats.starting_signer_balance = balance;
+                    }
                     bot.signer_balance = balance;
+                }
+            }
+            TuiUpdate::BotClaimedSol { bot_index, amount } => {
+                if let Some(bot) = self.bots.get_mut(bot_index) {
+                    bot.session_stats.total_claimed_sol += amount;
+                }
+            }
+            TuiUpdate::BotClaimedOre { bot_index, amount } => {
+                if let Some(bot) = self.bots.get_mut(bot_index) {
+                    bot.session_stats.total_claimed_ore += amount;
                 }
             }
             TuiUpdate::TxEvent { bot_name, action, signature, error } => {
                 self.log_tx(bot_name, action, signature, error);
             }
+            TuiUpdate::TxEventTyped { bot_name, tx_type, status, signature, error, slot, round_id, amount, attempt } => {
+                self.log_tx_typed(bot_name, tx_type, status, signature, error, slot, round_id, amount, attempt);
+            }
             TuiUpdate::Error(msg) => {
                 // Log error as a failed tx entry for now
-                self.log_tx("system".to_string(), TxAction::Failed, Signature::default(), Some(msg));
+                self.log_tx_typed("system".to_string(), TxType::Deploy, TxStatus::Failed, Signature::default(), Some(msg), None, None, None, None);
             }
         }
     }
@@ -589,21 +732,22 @@ pub fn restore() -> io::Result<()> {
 // =============================================================================
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    // Main layout: Header, Bot Blocks, Board, Transaction Log
+    // Main layout: Header, Bot Blocks, Transaction Log, Board
+    // Prioritize bot stats and logs over board display
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),   // Header
-            Constraint::Length(10),  // Bot block(s)
-            Constraint::Min(12),     // Board grid
-            Constraint::Length(8),   // Transaction log
+            Constraint::Length(17),  // Bot block(s) - with config info
+            Constraint::Min(10),     // Transaction log - flexible
+            Constraint::Length(3),   // Board grid - minimal
         ])
         .split(frame.area());
     
     draw_header(frame, chunks[0], app);
     draw_bot_blocks(frame, chunks[1], app);
-    draw_board_grid(frame, chunks[2], app);
-    draw_tx_log(frame, chunks[3], app);
+    draw_tx_log(frame, chunks[2], app);
+    draw_board_grid(frame, chunks[3], app);
 }
 
 // =============================================================================
@@ -712,13 +856,17 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
     // Format amounts
     let bankroll_sol = bot.bankroll as f64 / 1e9;
     let deployed_sol = bot.deployed_this_round as f64 / 1e9;
-    let rewards_sol = bot.rewards_sol() as f64 / 1e9;
-    let rewards_ore = bot.rewards_ore() as f64 / 1e11; // ORE has 11 decimals
     let signer_sol = bot.signer_balance as f64 / 1e9;
     
-    // Session stats with P&L
+    // Session stats
     let stats = &bot.session_stats;
-    let sol_pnl = stats.sol_pnl() as f64 / 1e9;
+    
+    // Simple P&L: current signer balance - starting signer balance
+    let sol_pnl = if stats.starting_signer_balance > 0 {
+        (bot.signer_balance as i64 - stats.starting_signer_balance as i64) as f64 / 1e9
+    } else {
+        0.0
+    };
     let ore_pnl = stats.ore_pnl() as f64 / 1e11;
     
     // Format P&L with sign
@@ -733,47 +881,153 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
         (format!("{:.2}", ore_pnl), Color::Red)
     };
     
-    let title = format!(" {} {} (auth_id={}) ", bot.icon, bot.name, bot.auth_id);
+    // Cost per ORE calculation
+    let ore_earned = stats.ore_pnl() as f64 / 1e11;
+    let cost_per_ore = if ore_earned > 0.001 {
+        let sol_cost = -sol_pnl;
+        if sol_cost > 0.0 { sol_cost / ore_earned } else { 0.0 }
+    } else {
+        0.0
+    };
     
-    let lines = vec![
+    let title = format!(" {} {} ", bot.icon, bot.name);
+    
+    // Build lines with visual sections
+    let mut lines = vec![
+        // ═══ STATUS BAR ═══
         Line::from(vec![
-            Span::styled("Strategy: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(&bot.strategy, Style::default().fg(Color::White)),
-            Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Bankroll: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.4} SOL", bankroll_sol), Style::default().fg(Color::Cyan)),
-            Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Signer: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.4} SOL", signer_sol), Style::default().fg(Color::Yellow)),
-        ]),
-        Line::from(vec![
-            Span::styled("Status: ", Style::default().fg(Color::DarkGray)),
+            Span::styled("▶ ", Style::default().fg(bot.status.color())),
             Span::styled(status_str, Style::default().fg(bot.status.color()).bold()),
+            Span::styled("                              ", Style::default()),
+        ]),
+        // Empty spacer
+        Line::from(""),
+        // ═══ BALANCES ═══
+        Line::from(vec![
+            Span::styled("◈ Signer    ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.4} ◎", signer_sol), Style::default().fg(Color::Yellow).bold()),
         ]),
         Line::from(vec![
-            Span::styled("This Round: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.4} SOL", deployed_sol), Style::default().fg(Color::Yellow)),
-            Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
-            Span::styled("Claimable: ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.4} SOL", rewards_sol), Style::default().fg(Color::Green)),
-            Span::styled(" | ", Style::default().fg(Color::DarkGray)),
-            Span::styled(format!("{:.2} ORE", rewards_ore), Style::default().fg(Color::Rgb(255, 165, 0))),
+            Span::styled("◈ Bankroll  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.4} ◎", bankroll_sol), Style::default().fg(Color::Cyan)),
+            Span::styled("   Deployed  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.4} ◎", deployed_sol), Style::default().fg(Color::Yellow)),
         ]),
         Line::from(vec![
-            Span::styled("───── Session Stats ─────", Style::default().fg(Color::DarkGray)),
-        ]),
-        Line::from(vec![
-            Span::styled(format!("{}  ", stats.running_time_str()), Style::default().fg(Color::White)),
-            Span::styled(format!("Rounds: {}  ", stats.rounds_participated), Style::default().fg(Color::Cyan)),
-            Span::styled(format!("Wins: {} ({:.0}%)  ", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
-            Span::styled(format!("{} SOL  ", sol_pnl_str), Style::default().fg(sol_pnl_color)),
-            Span::styled(format!("{} ORE", ore_pnl_str), Style::default().fg(ore_pnl_color)),
+            Span::styled("◈ Claimable ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.2} ORE", bot.rewards_ore() as f64 / 1e11), Style::default().fg(Color::Rgb(255, 165, 0))),
         ]),
     ];
     
+    // Strategy-specific config
+    match bot.strategy.as_str() {
+        "EV" => {
+            let max_sq = bot.max_per_square as f64 / 1e9;
+            let min_b = bot.min_bet as f64 / 1e9;
+            let ore_val = bot.ore_value as f64 / 1e9;
+            lines.push(Line::from(vec![
+                Span::styled("◈ Config   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("max=", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:.2}", max_sq), Style::default().fg(Color::White)),
+                Span::styled(" min=", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:.4}", min_b), Style::default().fg(Color::White)),
+                Span::styled(" ore=", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:.2}", ore_val), Style::default().fg(Color::Rgb(255, 165, 0))),
+                Span::styled(" @", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}slots", bot.slots_left_threshold), Style::default().fg(Color::Yellow)),
+            ]));
+        }
+        "Percentage" => {
+            let pct = bot.percentage as f64 / 100.0;
+            lines.push(Line::from(vec![
+                Span::styled("◈ Config   ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}%", pct), Style::default().fg(Color::Magenta)),
+                Span::styled(" × ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} sq", bot.squares_count), Style::default().fg(Color::Cyan)),
+                Span::styled(" @", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}slots", bot.slots_left_threshold), Style::default().fg(Color::Yellow)),
+            ]));
+        }
+        _ => {
+            lines.push(Line::from(vec![
+                Span::styled("◈ Config   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("@", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}slots", bot.slots_left_threshold), Style::default().fg(Color::Yellow)),
+            ]));
+        }
+    };
+    
+    // Session section
+    lines.push(Line::from(vec![
+        Span::styled("━━━ Session ", Style::default().fg(Color::Blue)),
+        Span::styled(stats.running_time_str(), Style::default().fg(Color::White).bold()),
+        Span::styled(" ━━━━━━━━━━━━━━━", Style::default().fg(Color::Blue)),
+    ]));
+
+    // Strategy-specific round stats
+    match bot.strategy.as_str() {
+        "EV" => {
+            let total_rounds = stats.rounds_participated + stats.rounds_skipped + stats.rounds_missed;
+            lines.push(Line::from(vec![
+                Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<4}", total_rounds), Style::default().fg(Color::Cyan)),
+                Span::styled(" Deployed ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<4}", stats.rounds_participated), Style::default().fg(Color::Yellow)),
+                Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("Skip ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<6}", stats.rounds_skipped), Style::default().fg(Color::DarkGray)),
+                Span::styled(" Missed ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{}", stats.rounds_missed), Style::default().fg(if stats.rounds_missed > 0 { Color::Red } else { Color::DarkGray })),
+            ]));
+        }
+        "Percentage" => {
+            let total = stats.rounds_participated + stats.rounds_missed;
+            lines.push(Line::from(vec![
+                Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<4}", total), Style::default().fg(Color::Cyan)),
+                Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
+                if stats.rounds_missed > 0 {
+                    Span::styled(format!("  Miss {}", stats.rounds_missed), Style::default().fg(Color::Red))
+                } else {
+                    Span::styled("", Style::default())
+                },
+            ]));
+        }
+        _ => {
+            lines.push(Line::from(vec![
+                Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<4}", stats.rounds_participated), Style::default().fg(Color::Cyan)),
+                Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
+            ]));
+        }
+    };
+
+    // P&L section
+    lines.push(Line::from(vec![
+        Span::styled("P&L  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{} ◎", sol_pnl_str), Style::default().fg(sol_pnl_color).bold()),
+        Span::styled("   ", Style::default()),
+        Span::styled(format!("{} ORE", ore_pnl_str), Style::default().fg(ore_pnl_color)),
+    ]));
+    
+    // Cost per ORE (if applicable)
+    if cost_per_ore > 0.0 {
+        lines.push(Line::from(vec![
+            Span::styled("Cost ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.4} ◎/ORE", cost_per_ore), Style::default().fg(Color::Cyan)),
+        ]));
+    }
+    
     let block = Block::default()
         .title(title)
+        .title_style(Style::default().fg(Color::White).bold())
         .borders(Borders::ALL)
+        .border_type(ratatui::widgets::BorderType::Rounded)
         .border_style(Style::default().fg(Color::Blue));
     
     let paragraph = Paragraph::new(lines).block(block);
@@ -841,7 +1095,7 @@ fn draw_board_grid(frame: &mut Frame, area: Rect, app: &App) {
             cells.push(Span::styled(text, Style::default().fg(fg_color)));
         }
         
-        rows.push(Row::new(cells).height(2));
+        rows.push(Row::new(cells).height(1));
     }
     
     let widths = [
@@ -880,7 +1134,7 @@ fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
     let items: Vec<ListItem> = app.tx_log
         .iter()
         .rev()
-        .take(6)
+        .take(30)  // Show more logs
         .map(|entry| {
             let elapsed = entry.timestamp.elapsed().as_secs();
             let time_str = if elapsed < 60 {
@@ -889,17 +1143,81 @@ fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
                 format!("{:>3}m", elapsed / 60)
             };
             
-            let sig_str = &entry.signature.to_string()[..8];
+            let sig_str = if entry.signature == Signature::default() {
+                "--------".to_string()
+            } else {
+                entry.signature.to_string()[..8].to_string()
+            };
+            
+            // Color for tx_type
+            let tx_type_color = match entry.tx_type {
+                TxType::Deploy => Color::Yellow,
+                TxType::Checkpoint => Color::Magenta,
+                TxType::ClaimSol => Color::Green,
+                TxType::ClaimOre => Color::Rgb(255, 165, 0),
+            };
+            
+            // Truncate bot name to 8 chars for consistent column alignment
+            let bot_name_display = if entry.bot_name.len() > 8 {
+                format!("{:.8}", entry.bot_name)
+            } else {
+                entry.bot_name.clone()
+            };
+            
+            // Check if this is an expected "skip" error (gray out entire entry)
+            let is_skip_error = entry.error.as_ref().map_or(false, |e| 
+                e.contains("AlreadyDeployed") || e.contains("NoDeployments"));
+            
+            // For skip errors, show "N/A" status in gray; otherwise normal status
+            let status_display = if is_skip_error { "N/A " } else { entry.status.as_str() };
+            let status_color = if is_skip_error { Color::DarkGray } else { entry.status.color() };
             
             let mut spans = vec![
                 Span::styled(format!("[{}] ", time_str), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} ", entry.bot_name), Style::default().fg(Color::Cyan)),
-                Span::styled(format!("{:<4} ", entry.action.as_str()), Style::default().fg(entry.action.color())),
-                Span::styled(format!("{}...", sig_str), Style::default().fg(Color::White)),
+                Span::styled(format!("{:<8} ", bot_name_display), Style::default().fg(Color::Cyan)),
+                Span::styled(format!("{:<5} ", entry.tx_type.as_str()), Style::default().fg(tx_type_color)),
+                Span::styled(format!("{:<4} ", status_display), Style::default().fg(status_color)),
             ];
             
+            // Add round info if available  
+            if let Some(round_id) = entry.round_id {
+                spans.push(Span::styled(format!("r:{:<5} ", round_id), Style::default().fg(Color::Blue)));
+            }
+            
+            // Add amount info based on tx type
+            if let Some(amount) = entry.amount {
+                let amount_str = match entry.tx_type {
+                    TxType::Deploy => format!("{:.4}◎ ", amount as f64 / 1e9),
+                    TxType::ClaimSol => format!("+{:.4}◎ ", amount as f64 / 1e9),
+                    TxType::ClaimOre => format!("+{:.4}ORE ", amount as f64 / 1e11),
+                    TxType::Checkpoint => format!("r:{} ", amount),
+                };
+                let amount_color = match entry.tx_type {
+                    TxType::Deploy => Color::Yellow,
+                    TxType::ClaimSol | TxType::ClaimOre => Color::Green,
+                    TxType::Checkpoint => Color::Magenta,
+                };
+                spans.push(Span::styled(amount_str, Style::default().fg(amount_color)));
+            }
+            
+            // Add attempt number for deploys (1-indexed for display)
+            if let Some(attempt) = entry.attempt {
+                spans.push(Span::styled(format!("#{} ", attempt + 1), Style::default().fg(Color::DarkGray)));
+            }
+            
+            // Add signature (shortened)
+            spans.push(Span::styled(format!("{}... ", sig_str), Style::default().fg(Color::White)));
+            
+            // Add error if present
             if let Some(error) = &entry.error {
-                spans.push(Span::styled(format!(" {}", error), Style::default().fg(Color::Red)));
+                let err_display = if error.len() > 25 {
+                    format!("{:.25}...", error)
+                } else {
+                    error.clone()
+                };
+                // Gray for expected skip errors, red for actual errors
+                let err_color = if is_skip_error { Color::DarkGray } else { Color::Red };
+                spans.push(Span::styled(err_display, Style::default().fg(err_color)));
             }
             
             ListItem::new(Line::from(spans))

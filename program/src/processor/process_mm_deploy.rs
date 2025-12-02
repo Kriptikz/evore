@@ -104,6 +104,17 @@ pub fn process_mm_deploy(
         return Err(EvoreError::InvalidPDA.into());
     }
 
+    // For EV strategy: check if already deployed this round (unless allow_multi_deploy is true)
+    if let DeployStrategy::EV { allow_multi_deploy, .. } = strategy {
+        if !allow_multi_deploy && !ore_miner_account_info.data_is_empty() {
+            // Load miner to check if already deployed this round
+            let miner = ore_miner_account_info.as_account::<ore_api::Miner>(&ore_api::id())?;
+            if miner.round_id == round.id {
+                return Err(EvoreError::AlreadyDeployedThisRound.into());
+            }
+        }
+    }
+
     // Calculate deployments based on strategy
     let (squares, total_deployed) = match strategy {
         DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, .. } => {
@@ -231,7 +242,15 @@ pub fn process_mm_deploy(
 }
 
 /// Calculate deployments using percentage strategy
-/// Deploys to own `percentage` (in basis points) of each square, up to `squares_count` squares
+/// Deploys to own `percentage` (in basis points) of each square across `squares_count` squares.
+/// 
+/// Key behavior: If bankroll is insufficient to achieve the requested percentage across all
+/// squares, the percentage is automatically reduced so that ALL specified squares receive
+/// an equal (lower) percentage of deployment. This ensures even coverage rather than
+/// partial coverage at the full percentage.
+/// 
+/// Formula to own P% of square: amount = P * T / (10000 - P)
+/// Max affordable percentage: P_max = 10000 * B / (Total + B)
 fn calculate_percentage_deployments(
     round: &Round,
     bankroll: u64,
@@ -239,31 +258,69 @@ fn calculate_percentage_deployments(
     squares_count: u64,   // Number of squares to deploy to (1-25)
 ) -> ([u128; 25], u64) {
     let mut out = [0u128; 25];
-    let mut total_spent: u64 = 0;
-    let mut remaining = bankroll;
     
     // Validate inputs
-    if percentage == 0 || percentage >= 10000 || squares_count == 0 || squares_count > 25 {
+    if percentage == 0 || percentage >= 10000 || squares_count == 0 || squares_count > 25 || bankroll == 0 {
         return (out, 0);
     }
     
-    // For batching: collect amounts per square, then we can batch later
-    // Formula: amount = P * T / (10000 - P)
-    // where P = percentage in basis points, T = current square total
+    let count = (squares_count as usize).min(25);
     
-    for i in 0..(squares_count as usize).min(25) {
+    // Step 1: Calculate total deployed across the squares we want to deploy to
+    // and count how many have non-zero amounts (can't deploy to empty squares)
+    let mut total_on_target_squares: u128 = 0;
+    let mut deployable_squares = 0usize;
+    
+    for i in 0..count {
+        if round.deployed[i] > 0 {
+            total_on_target_squares += round.deployed[i] as u128;
+            deployable_squares += 1;
+        }
+    }
+    
+    // If no squares have existing deployments, we can't deploy
+    if deployable_squares == 0 || total_on_target_squares == 0 {
+        return (out, 0);
+    }
+    
+    // Step 2: Calculate the cost to deploy at requested percentage across all target squares
+    // amount_for_p% = P * T / (10000 - P)
+    let p = percentage as u128;
+    let b = bankroll as u128;
+    let total_cost_at_requested = (p * total_on_target_squares) / (10000 - p);
+    
+    // Step 3: Determine actual percentage to use
+    // If requested percentage costs more than bankroll, calculate max affordable percentage
+    // P_max = 10000 * B / (Total + B)
+    let actual_percentage = if total_cost_at_requested > b {
+        // Scale down to what we can afford
+        // P = 10000 * B / (T + B)
+        let p_max = (10000u128 * b) / (total_on_target_squares + b);
+        p_max.min(percentage as u128) as u64
+    } else {
+        percentage
+    };
+    
+    // If percentage rounds to 0, no deployment possible
+    if actual_percentage == 0 {
+        return (out, 0);
+    }
+    
+    // Step 4: Deploy to each square at the (possibly reduced) percentage
+    let mut total_spent: u64 = 0;
+    let p_actual = actual_percentage as u128;
+    
+    for i in 0..count {
         let current_total = round.deployed[i];
         
-        // Skip empty squares (can't calculate percentage of 0)
+        // Skip empty squares
         if current_total == 0 {
             continue;
         }
         
-        // amount = (percentage * current_total) / (10000 - percentage)
-        // Using u128 to avoid overflow
-        let p = percentage as u128;
+        // amount = P * T / (10000 - P)
         let t = current_total as u128;
-        let amount_u128 = (p * t) / (10000 - p);
+        let amount_u128 = (p_actual * t) / (10000 - p_actual);
         
         // Clamp to u64
         let amount = amount_u128.min(u64::MAX as u128) as u64;
@@ -272,14 +329,8 @@ fn calculate_percentage_deployments(
             continue;
         }
         
-        if amount > remaining {
-            // Can't afford this square, stop here
-            break;
-        }
-        
         out[i] = amount as u128;
         total_spent = total_spent.saturating_add(amount);
-        remaining = remaining.saturating_sub(amount);
     }
     
     (out, total_spent)

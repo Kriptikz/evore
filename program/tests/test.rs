@@ -496,7 +496,7 @@ mod ev_deploy {
         let ix1 = evore::instruction::create_manager(miner.pubkey(), manager_address);
         let ix2 = evore::instruction::ev_deploy(
             miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
-            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2, 0, true,
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -539,7 +539,7 @@ mod ev_deploy {
         // Build ev_deploy with wrong fee collector by modifying the accounts
         let mut ix2 = evore::instruction::ev_deploy(
             miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
-            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2, 0, true,
         );
         // Account index 2 is fee_collector
         ix2.accounts[2].pubkey = wrong_fee_collector.pubkey();
@@ -593,7 +593,7 @@ mod ev_deploy {
         let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
         let ix = evore::instruction::ev_deploy(
             miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
-            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2, 0, true,
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -640,7 +640,7 @@ mod ev_deploy {
         let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
         let mut ix = evore::instruction::ev_deploy(
             miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
-            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2, 0, true,
         );
         // Replace managed_miner_auth at index 2 with wrong one
         ix.accounts[2].pubkey = wrong_managed_miner_auth.0;
@@ -710,6 +710,8 @@ mod ev_deploy {
             10_000,       // min_bet
             800_000_000,  // ore_value (0.8 SOL)
             2,            // slots_left threshold
+            0,            // attempts
+            true,         // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -782,6 +784,8 @@ mod ev_deploy {
             miner.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
             300_000_000, 100_000_000, 10_000, 800_000_000,
             2,  // slots_left threshold - but there are 90 slots left!
+            0,  // attempts
+            true,  // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -820,7 +824,7 @@ mod ev_deploy {
         // Try to deploy with wrong signer (not the manager authority)
         let ix = evore::instruction::ev_deploy(
             wrong_signer.pubkey(), manager_address, auth_id, TEST_ROUND_ID,
-            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2, 0, true,
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -866,6 +870,8 @@ mod ev_deploy {
             10_000,       // min_bet
             800_000_000,  // ore_value
             2,            // slots_left
+            0,            // attempts
+            true,         // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -922,6 +928,8 @@ mod ev_deploy {
             10_000,       // min_bet
             1_000_000,    // low ore_value
             2,            // slots_left
+            0,            // attempts
+            true,         // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -965,7 +973,7 @@ mod ev_deploy {
         let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
         let ix = evore::instruction::ev_deploy(
             miner.pubkey(), manager_address, auth_id, wrong_round_id,
-            300_000_000, 100_000_000, 10_000, 800_000_000, 2,
+            300_000_000, 100_000_000, 10_000, 800_000_000, 2, 0, true,
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();

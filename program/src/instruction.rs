@@ -23,6 +23,8 @@ pub enum DeployStrategy {
         min_bet: u64,
         ore_value: u64,
         slots_left: u64,
+        attempts: u64,  // Attempt counter - makes each tx unique for same blockhash
+        allow_multi_deploy: bool,  // If false, fail if already deployed this round
     },
     /// Percentage-based: deploy to own X% of each square across Y squares
     Percentage {
@@ -80,6 +82,8 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
 ///     - data[17..25]: min_bet
 ///     - data[25..33]: ore_value
 ///     - data[33..41]: slots_left
+///     - data[41..49]: attempts (makes each tx unique for same blockhash)
+///     - data[49]: allow_multi_deploy (0 = false, 1 = true)
 ///   
 ///   Percentage (strategy = 1):
 ///     - data[1..9]: bankroll
@@ -105,13 +109,15 @@ impl MMDeploy {
         let mut data = [0u8; 256];
         
         match strategy {
-            DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left } => {
+            DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left, attempts, allow_multi_deploy } => {
                 data[0] = 0; // EV strategy
                 data[1..9].copy_from_slice(&bankroll.to_le_bytes());
                 data[9..17].copy_from_slice(&max_per_square.to_le_bytes());
                 data[17..25].copy_from_slice(&min_bet.to_le_bytes());
                 data[25..33].copy_from_slice(&ore_value.to_le_bytes());
                 data[33..41].copy_from_slice(&slots_left.to_le_bytes());
+                data[41..49].copy_from_slice(&attempts.to_le_bytes());
+                data[49] = if allow_multi_deploy { 1 } else { 0 };
             },
             DeployStrategy::Percentage { bankroll, percentage, squares_count } => {
                 data[0] = 1; // Percentage strategy
@@ -148,7 +154,9 @@ impl MMDeploy {
                 let min_bet = u64::from_le_bytes(self.data[17..25].try_into().unwrap());
                 let ore_value = u64::from_le_bytes(self.data[25..33].try_into().unwrap());
                 let slots_left = u64::from_le_bytes(self.data[33..41].try_into().unwrap());
-                Ok(DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left })
+                let attempts = u64::from_le_bytes(self.data[41..49].try_into().unwrap());
+                let allow_multi_deploy = self.data[49] != 0;
+                Ok(DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left, attempts, allow_multi_deploy })
             },
             1 => { // Percentage
                 let bankroll = u64::from_le_bytes(self.data[1..9].try_into().unwrap());
@@ -215,6 +223,8 @@ pub fn ev_deploy(
     min_bet: u64,
     ore_value: u64,
     slots_left: u64,
+    attempts: u64,
+    allow_multi_deploy: bool,
 ) -> Instruction {
     let (accounts, bump) = build_deploy_accounts(signer, manager, auth_id, round_id);
     
@@ -224,6 +234,8 @@ pub fn ev_deploy(
         min_bet,
         ore_value,
         slots_left,
+        attempts,
+        allow_multi_deploy,
     };
 
     Instruction {

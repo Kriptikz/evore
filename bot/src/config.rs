@@ -80,6 +80,10 @@ pub struct BotConfig {
     /// Bankroll for this bot (lamports)
     pub bankroll: u64,
     
+    /// Number of deploy transactions to send (default 4)
+    #[serde(default = "default_attempts")]
+    pub attempts: u64,
+    
     /// Strategy-specific parameters
     #[serde(default)]
     pub strategy_params: StrategyParams,
@@ -93,6 +97,10 @@ pub struct BotConfig {
 
 fn default_slots_left() -> u64 {
     2
+}
+
+fn default_attempts() -> u64 {
+    4
 }
 
 impl BotConfig {
@@ -111,6 +119,7 @@ impl BotConfig {
             strategy: DeployStrategy::EV,
             slots_left: 2,
             bankroll,
+            attempts: 4,  // default attempts
             strategy_params: StrategyParams::EV {
                 max_per_square,
                 min_bet,

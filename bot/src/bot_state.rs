@@ -70,6 +70,8 @@ pub struct BotState {
     /// Session statistics
     pub rounds_participated: u64,
     pub rounds_won: u64,
+    pub rounds_skipped: u64,
+    pub rounds_missed: u64,
     
     /// P&L tracking
     pub starting_claimable_sol: u64,
@@ -93,6 +95,8 @@ impl Default for BotState {
             deployed_amount: 0,
             rounds_participated: 0,
             rounds_won: 0,
+            rounds_skipped: 0,
+            rounds_missed: 0,
             starting_claimable_sol: 0,
             current_claimable_sol: 0,
             starting_ore: 0,

@@ -1,16 +1,48 @@
 # Evore Bot Configuration
 
 [[bots]]
-name = "EV-Bot-1"
+name = "EV ORE"
 auth_id = 1
 strategy = "ev"
-slots_left = 1
+slots_left = 3
 bankroll = 220_000_000
+attempts = 2
 signer_path = "/Users/kriptikz/Development/game-wallets/game-wallet-1.json"
 manager_path = "/Users/kriptikz/Development/game-wallets/manager-1.json"
 
 [bots.strategy_params]
 type = "ev"
 max_per_square = 10_000_000
-min_bet = 1_000_000
-ore_value = 500_000_000
+min_bet = 100_000
+ore_value = 700_000_000
+
+[[bots]]
+name = "10%"
+auth_id = 1
+strategy = "percentage"
+slots_left = 15
+bankroll = 700_000_000
+attempts = 1
+signer_path = "/Users/kriptikz/Development/game-wallets/perc-bot.json"
+manager_path = "/Users/kriptikz/Development/game-wallets/perc-bot-manager.json"
+
+[bots.strategy_params]
+type = "percentage"
+percentage = 1000
+squares_count = 25
+
+[[bots]]
+name = "EV Pure SOL"
+auth_id = 1
+strategy = "ev"
+slots_left = 1
+bankroll = 220_000_000
+attempts = 3
+signer_path = "/Users/kriptikz/Development/game-wallets/pure-sol-ev-bot.json"
+manager_path = "/Users/kriptikz/Development/game-wallets/pure-sol-ev-manager.json"
+
+[bots.strategy_params]
+type = "ev"
+max_per_square = 10_000_000
+min_bet = 100_000
+ore_value = 0
