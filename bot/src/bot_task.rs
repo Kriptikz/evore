@@ -341,11 +341,13 @@ pub async fn run_bot_task(
         // === WAIT FOR DEPLOY WINDOW ===
         // Calculate deploy window (same logic as single_deploy)
         // For single send (slots_left > 10), wait 1 extra slot to ensure on-chain check passes
-        let deploy_start_slot = if config.params.slots_left > 10 {
-            board.end_slot.saturating_sub(config.params.slots_left - 1)
-        } else {
-            board.end_slot.saturating_sub(config.params.slots_left)
-        };
+        // let deploy_start_slot = config.params.slots_left > 10 {
+        //     board.end_slot.saturating_sub(config.params.slots_left - 1)
+        // } else {
+        //     board.end_slot.saturating_sub(config.params.slots_left)
+        // };
+
+        let deploy_start_slot = config.params.slots_left;
         
         // Wait until one slot BEFORE deploy_start_slot
         let wait_until_slot = deploy_start_slot.saturating_sub(1);
@@ -405,7 +407,8 @@ pub async fn run_bot_task(
                 board.round_id,
                 &config.params,
                 bh,
-                5000,  // default priority fee
+                5000,    // default priority fee
+                200_000, // default jito tip (0.0002 SOL)
             );
             
             match client.send_transaction_no_wait(&deploy_tx) {

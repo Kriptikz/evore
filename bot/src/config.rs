@@ -88,6 +88,10 @@ pub struct BotConfig {
     #[serde(default = "default_priority_fee")]
     pub priority_fee: u64,
     
+    /// Jito tip in lamports (default 200_000 = 0.0002 SOL, 0 to disable)
+    #[serde(default = "default_jito_tip")]
+    pub jito_tip: u64,
+    
     /// Strategy-specific parameters
     #[serde(default)]
     pub strategy_params: StrategyParams,
@@ -111,6 +115,10 @@ fn default_priority_fee() -> u64 {
     5000  // ~0.000007 SOL @ 1.4M CU (above Helius SWQOS minimum)
 }
 
+fn default_jito_tip() -> u64 {
+    200_000  // 0.0002 SOL - minimum for Helius Sender
+}
+
 impl BotConfig {
     /// Create a new EV bot config with defaults
     pub fn new_ev(
@@ -129,6 +137,7 @@ impl BotConfig {
             bankroll,
             attempts: 4,
             priority_fee: 5000,
+            jito_tip: 200_000,
             strategy_params: StrategyParams::EV {
                 max_per_square,
                 min_bet,

@@ -100,6 +100,138 @@ pub enum TuiUpdate {
     
     /// Error message
     Error(String),
+    
+    /// Network stats update
+    NetworkStatsUpdate {
+        slot_ws: Option<ConnectionStatus>,
+        board_ws: Option<ConnectionStatus>,
+        round_ws: Option<ConnectionStatus>,
+        rpc: Option<ConnectionStatus>,
+        sender_east_latency_ms: Option<u32>,
+        sender_west_latency_ms: Option<u32>,
+        rpc_rps: Option<u32>,
+        sender_rps: Option<u32>,
+    },
+    
+    /// Increment tx counters
+    TxCounterUpdate {
+        sent: Option<u64>,
+        confirmed: Option<u64>,
+        failed: Option<u64>,
+    },
+}
+
+/// View mode for bottom section (toggled with Tab)
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum ViewMode {
+    #[default]
+    TxLog,
+    Board,
+}
+
+impl ViewMode {
+    pub fn toggle(&mut self) {
+        *self = match self {
+            ViewMode::TxLog => ViewMode::Board,
+            ViewMode::Board => ViewMode::TxLog,
+        };
+    }
+    
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ViewMode::TxLog => "Tx Log",
+            ViewMode::Board => "Board",
+        }
+    }
+}
+
+/// Network connection status
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
+pub enum ConnectionStatus {
+    #[default]
+    Unknown,
+    Connected,
+    Reconnecting,
+    Disconnected,
+}
+
+impl ConnectionStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ConnectionStatus::Unknown => "?",
+            ConnectionStatus::Connected => "✓",
+            ConnectionStatus::Reconnecting => "↻",
+            ConnectionStatus::Disconnected => "✗",
+        }
+    }
+    
+    pub fn color(&self) -> Color {
+        match self {
+            ConnectionStatus::Unknown => Color::DarkGray,
+            ConnectionStatus::Connected => Color::Green,
+            ConnectionStatus::Reconnecting => Color::Yellow,
+            ConnectionStatus::Disconnected => Color::Red,
+        }
+    }
+}
+
+/// Network statistics for footer display
+#[derive(Clone, Debug, Default)]
+pub struct NetworkStats {
+    /// WebSocket connection statuses
+    pub slot_ws: ConnectionStatus,
+    pub board_ws: ConnectionStatus,
+    pub round_ws: ConnectionStatus,
+    
+    /// RPC connection status
+    pub rpc: ConnectionStatus,
+    
+    /// Helius sender latencies (ms)
+    pub sender_east_latency_ms: Option<u32>,
+    pub sender_west_latency_ms: Option<u32>,
+    
+    /// RPC requests per second (10s average)
+    pub rpc_rps: u32,
+    /// Sender HTTP sends per second (10s average)
+    pub sender_rps: u32,
+    /// Total RPC requests made
+    pub rpc_total: u64,
+    /// Total sender HTTP sends made
+    pub sender_total: u64,
+    
+    /// Transaction stats
+    /// - sent: all transactions submitted
+    /// - confirmed: transactions that landed successfully (OK)
+    /// - failed: transactions that got an actual error (NoDeployment, AlreadyDeployed, on-chain error)
+    /// - missed: transactions that expired/dropped or had RPC errors
+    pub txs_sent: u64,
+    pub txs_confirmed: u64,
+    pub txs_failed: u64,
+    pub txs_missed: u64,
+}
+
+impl NetworkStats {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Calculate miss rate (missed / sent)
+    pub fn miss_rate(&self) -> f64 {
+        if self.txs_sent == 0 {
+            0.0
+        } else {
+            (self.txs_missed as f64 / self.txs_sent as f64) * 100.0
+        }
+    }
+    
+    /// Calculate fail rate (failed / sent)
+    pub fn fail_rate(&self) -> f64 {
+        if self.txs_sent == 0 {
+            0.0
+        } else {
+            (self.txs_failed as f64 / self.txs_sent as f64) * 100.0
+        }
+    }
 }
 
 /// Round lifecycle phase
@@ -159,6 +291,8 @@ pub enum BotStatus {
     Waiting,
     Deploying,
     Deployed,
+    Skipped,
+    Missed,
     Checkpointing,
 }
 
@@ -169,6 +303,8 @@ impl BotStatus {
             BotStatus::Waiting => "Waiting",
             BotStatus::Deploying => "Deploying",
             BotStatus::Deployed => "Deployed",
+            BotStatus::Skipped => "Skipped",
+            BotStatus::Missed => "Missed",
             BotStatus::Checkpointing => "Checkpointing",
         }
     }
@@ -179,6 +315,8 @@ impl BotStatus {
             BotStatus::Waiting => Color::Yellow,
             BotStatus::Deploying => Color::Cyan,
             BotStatus::Deployed => Color::Green,
+            BotStatus::Skipped => Color::DarkGray,
+            BotStatus::Missed => Color::Red,
             BotStatus::Checkpointing => Color::Magenta,
         }
     }
@@ -245,6 +383,12 @@ pub struct BotSessionStats {
     pub total_claimed_ore: u64,
     /// Flag to track if starting balances have been set
     pub initialized: bool,
+    
+    // Offset values for session reset - subtract from incoming values
+    pub rounds_participated_offset: u64,
+    pub rounds_won_offset: u64,
+    pub rounds_skipped_offset: u64,
+    pub rounds_missed_offset: u64,
 }
 
 impl Default for BotSessionStats {
@@ -263,6 +407,10 @@ impl Default for BotSessionStats {
             total_claimed_sol: 0,
             total_claimed_ore: 0,
             initialized: false,
+            rounds_participated_offset: 0,
+            rounds_won_offset: 0,
+            rounds_skipped_offset: 0,
+            rounds_missed_offset: 0,
         }
     }
 }
@@ -284,7 +432,31 @@ impl BotSessionStats {
             total_claimed_sol: 0,
             total_claimed_ore: 0,
             initialized: true,
+            rounds_participated_offset: 0,
+            rounds_won_offset: 0,
+            rounds_skipped_offset: 0,
+            rounds_missed_offset: 0,
         }
+    }
+    
+    /// Get effective rounds participated (after offset)
+    pub fn effective_rounds_participated(&self) -> u64 {
+        self.rounds_participated.saturating_sub(self.rounds_participated_offset)
+    }
+    
+    /// Get effective rounds won (after offset)
+    pub fn effective_rounds_won(&self) -> u64 {
+        self.rounds_won.saturating_sub(self.rounds_won_offset)
+    }
+    
+    /// Get effective rounds skipped (after offset)
+    pub fn effective_rounds_skipped(&self) -> u64 {
+        self.rounds_skipped.saturating_sub(self.rounds_skipped_offset)
+    }
+    
+    /// Get effective rounds missed (after offset)
+    pub fn effective_rounds_missed(&self) -> u64 {
+        self.rounds_missed.saturating_sub(self.rounds_missed_offset)
     }
     
     /// Calculate SOL P&L (can be negative)
@@ -319,10 +491,12 @@ impl BotSessionStats {
     }
     
     pub fn win_rate(&self) -> f64 {
-        if self.rounds_participated == 0 {
+        let participated = self.effective_rounds_participated();
+        let won = self.effective_rounds_won();
+        if participated == 0 {
             0.0
         } else {
-            (self.rounds_won as f64 / self.rounds_participated as f64) * 100.0
+            (won as f64 / participated as f64) * 100.0
         }
     }
 }
@@ -428,6 +602,9 @@ pub struct BotState {
     pub managed_miner_auth: Pubkey,  // Auth PDA
     /// Signer (fee payer) SOL balance (lamports)
     pub signer_balance: u64,
+    // Fee params
+    pub priority_fee: u64,     // Compute unit price (micro-lamports)
+    pub jito_tip: u64,         // Jito tip amount (lamports)
     // EV strategy params
     pub max_per_square: u64,
     pub min_bet: u64,
@@ -463,6 +640,8 @@ impl BotState {
         signer: Pubkey,
         manager: Pubkey,
         managed_miner_auth: Pubkey,
+        priority_fee: u64,
+        jito_tip: u64,
         max_per_square: u64,
         min_bet: u64,
         ore_value: u64,
@@ -492,6 +671,8 @@ impl BotState {
             manager,
             managed_miner_auth,
             signer_balance: 0,
+            priority_fee,
+            jito_tip,
             max_per_square,
             min_bet,
             ore_value,
@@ -556,6 +737,12 @@ pub struct App {
     
     // Config file path for hot reload
     pub config_path: Option<String>,
+    
+    // View mode toggle (Tab key)
+    pub view_mode: ViewMode,
+    
+    // Network stats for footer
+    pub network_stats: NetworkStats,
 }
 
 impl App {
@@ -586,7 +773,14 @@ impl App {
             selected: None,
             status_msg: None,
             config_path: None,
+            view_mode: ViewMode::default(),
+            network_stats: NetworkStats::new(),
         }
+    }
+    
+    /// Toggle view mode (Board <-> TxLog)
+    pub fn toggle_view(&mut self) {
+        self.view_mode.toggle();
     }
     
     /// Move selection up
@@ -737,14 +931,23 @@ impl App {
                 self.status_msg = Some((format!("Reloading config for bot {}...", bot_idx), Instant::now(), false));
             }
             SelectAction::RefreshSession(bot_idx) => {
-                // Reset session stats for this bot
+                // Reset session stats for this bot by setting offsets
+                // This way, incoming BotStatsUpdate won't overwrite the reset
                 if let Some(bot) = self.bots.get_mut(bot_idx) {
-                    bot.session_stats = BotSessionStats::with_starting_balances(
-                        bot.session_stats.current_claimable_sol,
-                        bot.session_stats.current_ore,
-                    );
-                    // Reset starting signer balance to current
+                    // Set offsets to current values - effective values will become 0
+                    bot.session_stats.rounds_participated_offset = bot.session_stats.rounds_participated;
+                    bot.session_stats.rounds_won_offset = bot.session_stats.rounds_won;
+                    bot.session_stats.rounds_skipped_offset = bot.session_stats.rounds_skipped;
+                    bot.session_stats.rounds_missed_offset = bot.session_stats.rounds_missed;
+                    
+                    // Reset P&L tracking
+                    bot.session_stats.started_at = Instant::now();
+                    bot.session_stats.starting_claimable_sol = bot.session_stats.current_claimable_sol;
+                    bot.session_stats.starting_ore = bot.session_stats.current_ore;
                     bot.session_stats.starting_signer_balance = bot.signer_balance;
+                    bot.session_stats.total_claimed_sol = 0;
+                    bot.session_stats.total_claimed_ore = 0;
+                    
                     self.status_msg = Some((format!("Session reset: {}", bot.name), Instant::now(), false));
                 }
             }
@@ -800,6 +1003,13 @@ impl App {
     }
     
     /// Log a transaction (new format with type and details)
+    /// Also updates tx counters for network stats
+    /// 
+    /// Counter logic:
+    /// - Sent: all transactions submitted (counted on Sent, or on Confirmed/Failed for checkpoint/claim)
+    /// - Confirmed (OK): successful transactions
+    /// - Failed (FAIL): actual errors like NoDeployment, AlreadyDeployed, on-chain errors
+    /// - Missed: expired/dropped transactions OR RPC errors
     pub fn log_tx_typed(
         &mut self,
         bot_name: String,
@@ -812,11 +1022,48 @@ impl App {
         amount: Option<u64>,
         attempt: Option<u64>,
     ) {
+        // Update tx counters based on status and error type
+        match &status {
+            TxStatus::Sent => {
+                self.network_stats.txs_sent += 1;
+            }
+            TxStatus::Confirmed => {
+                self.network_stats.txs_confirmed += 1;
+                // For checkpoint/claim, we don't log Sent first, so count here
+                if matches!(tx_type, TxType::Checkpoint | TxType::ClaimSol | TxType::ClaimOre) {
+                    self.network_stats.txs_sent += 1;
+                }
+            }
+            TxStatus::Failed => {
+                // For checkpoint/claim, we don't log Sent first, so count here
+                if matches!(tx_type, TxType::Checkpoint | TxType::ClaimSol | TxType::ClaimOre) {
+                    self.network_stats.txs_sent += 1;
+                }
+                
+                // Distinguish between actual errors (failed) and network issues (missed)
+                // Missed = expired/dropped OR RPC errors
+                // Failed = actual on-chain errors or expected skip errors
+                let is_missed = error.as_ref().map_or(false, |e| {
+                    e.contains("expired") || 
+                    e.contains("dropped") || 
+                    e.contains("RPC") ||
+                    e.contains("timeout") ||
+                    e.contains("connection")
+                });
+                
+                if is_missed {
+                    self.network_stats.txs_missed += 1;
+                } else {
+                    self.network_stats.txs_failed += 1;
+                }
+            }
+        }
+        
         self.tx_log.push(TxLogEntry {
             timestamp: Instant::now(),
             bot_name,
             tx_type,
-            status,
+            status: status.clone(),
             signature,
             error,
             slot,
@@ -927,6 +1174,52 @@ impl App {
                 // Log error as a failed tx entry for now
                 self.log_tx_typed("system".to_string(), TxType::Deploy, TxStatus::Failed, Signature::default(), Some(msg), None, None, None, None);
             }
+            TuiUpdate::NetworkStatsUpdate {
+                slot_ws,
+                board_ws,
+                round_ws,
+                rpc,
+                sender_east_latency_ms,
+                sender_west_latency_ms,
+                rpc_rps,
+                sender_rps,
+            } => {
+                if let Some(s) = slot_ws {
+                    self.network_stats.slot_ws = s;
+                }
+                if let Some(s) = board_ws {
+                    self.network_stats.board_ws = s;
+                }
+                if let Some(s) = round_ws {
+                    self.network_stats.round_ws = s;
+                }
+                if let Some(s) = rpc {
+                    self.network_stats.rpc = s;
+                }
+                if let Some(ms) = sender_east_latency_ms {
+                    self.network_stats.sender_east_latency_ms = Some(ms);
+                }
+                if let Some(ms) = sender_west_latency_ms {
+                    self.network_stats.sender_west_latency_ms = Some(ms);
+                }
+                if let Some(r) = rpc_rps {
+                    self.network_stats.rpc_rps = r;
+                }
+                if let Some(r) = sender_rps {
+                    self.network_stats.sender_rps = r;
+                }
+            }
+            TuiUpdate::TxCounterUpdate { sent, confirmed, failed } => {
+                if let Some(n) = sent {
+                    self.network_stats.txs_sent = n;
+                }
+                if let Some(n) = confirmed {
+                    self.network_stats.txs_confirmed = n;
+                }
+                if let Some(n) = failed {
+                    self.network_stats.txs_failed = n;
+                }
+            }
         }
     }
 }
@@ -954,22 +1247,28 @@ pub fn restore() -> io::Result<()> {
 // =============================================================================
 
 pub fn draw(frame: &mut Frame, app: &App) {
-    // Main layout: Header, Bot Blocks, Transaction Log, Board
-    // Prioritize bot stats and logs over board display
+    // Main layout: Header, Bot Blocks, Content (TxLog OR Board), Footer
+    // Tab key toggles between TxLog and Board views
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(4),   // Header
             Constraint::Length(17),  // Bot block(s) - with config info
-            Constraint::Min(10),     // Transaction log - flexible
-            Constraint::Length(3),   // Board grid - minimal
+            Constraint::Min(8),      // Content area (TxLog or Board) - flexible
+            Constraint::Length(3),   // Footer with network stats
         ])
         .split(frame.area());
     
     draw_header(frame, chunks[0], app);
     draw_bot_blocks(frame, chunks[1], app);
-    draw_tx_log(frame, chunks[2], app);
-    draw_board_grid(frame, chunks[3], app);
+    
+    // Draw either TxLog or Board based on view mode
+    match app.view_mode {
+        ViewMode::TxLog => draw_tx_log(frame, chunks[2], app),
+        ViewMode::Board => draw_board_grid_expanded(frame, chunks[2], app),
+    }
+    
+    draw_footer(frame, chunks[3], app);
 }
 
 // =============================================================================
@@ -1029,7 +1328,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("", Style::default())
         },
         // Help text
-        Span::styled("  ↑↓:nav Enter:act q:quit", Style::default().fg(Color::DarkGray)),
+        Span::styled("  ↑↓:nav Tab:view Enter:act q:quit", Style::default().fg(Color::DarkGray)),
     ]);
     
     let block = Block::default()
@@ -1121,7 +1420,7 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
         0.0
     };
     
-    let title = format!(" {} {} ", bot.icon, bot.name);
+    let title = format!(" {} {} ({}) ", bot.icon, bot.name, bot.auth_id);
     
     // Check selection state for highlighting
     let signer_selected = app.selected == Some(SelectableElement::BotSigner(bot_index));
@@ -1187,6 +1486,14 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
             Span::styled("◈ Claimable ", Style::default().fg(Color::DarkGray)),
             Span::styled(format!("{:.2} ORE", bot.rewards_ore() as f64 / 1e11), Style::default().fg(Color::Rgb(255, 165, 0))),
         ]),
+        // Fees line
+        Line::from(vec![
+            Span::styled("◈ Fees      ", Style::default().fg(Color::DarkGray)),
+            Span::styled("prio=", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{}", bot.priority_fee), Style::default().fg(Color::White)),
+            Span::styled(" tip=", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:.4}◎", bot.jito_tip as f64 / 1e9), Style::default().fg(Color::Cyan)),
+        ]),
     ];
     
     // Strategy-specific config
@@ -1234,51 +1541,56 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
         Span::styled(" ━━━━━━━━━━━━━━━", Style::default().fg(Color::Blue)),
     ]));
 
-    // Strategy-specific round stats
+    // Strategy-specific round stats (using effective values to handle session reset)
+    let participated = stats.effective_rounds_participated();
+    let won = stats.effective_rounds_won();
+    let skipped = stats.effective_rounds_skipped();
+    let missed = stats.effective_rounds_missed();
+    
     match bot.strategy.as_str() {
         "EV" => {
-            let total_rounds = stats.rounds_participated + stats.rounds_skipped + stats.rounds_missed;
+            let total_rounds = participated + skipped + missed;
             lines.push(Line::from(vec![
                 Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:<4}", total_rounds), Style::default().fg(Color::Cyan)),
                 Span::styled(" Deployed ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<4}", stats.rounds_participated), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{:<4}", participated), Style::default().fg(Color::Yellow)),
                 Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
+                Span::styled(format!("{} ({:.0}%)", won, stats.win_rate()), Style::default().fg(Color::Green)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("Skip ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<6}", stats.rounds_skipped), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{:<6}", skipped), Style::default().fg(Color::DarkGray)),
                 Span::styled(" Missed ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}", stats.rounds_missed), Style::default().fg(if stats.rounds_missed > 0 { Color::Red } else { Color::DarkGray })),
+                Span::styled(format!("{}", missed), Style::default().fg(if missed > 0 { Color::Red } else { Color::DarkGray })),
             ]));
         }
         "Percentage" => {
-            let total = stats.rounds_participated + stats.rounds_missed;
+            let total = participated + missed;
             lines.push(Line::from(vec![
                 Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:<4}", total), Style::default().fg(Color::Cyan)),
                 Span::styled(" Deployed ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{:<4}", stats.rounds_participated), Style::default().fg(Color::Yellow)),
+                Span::styled(format!("{:<4}", participated), Style::default().fg(Color::Yellow)),
                 Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
+                Span::styled(format!("{} ({:.0}%)", won, stats.win_rate()), Style::default().fg(Color::Green)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("Missed ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}", stats.rounds_missed), Style::default().fg(if stats.rounds_missed > 0 { Color::Red } else { Color::DarkGray })),
+                Span::styled(format!("{}", missed), Style::default().fg(if missed > 0 { Color::Red } else { Color::DarkGray })),
             ]));
         }
         _ => {
-            let total = stats.rounds_participated + stats.rounds_missed;
+            let total = participated + missed;
             lines.push(Line::from(vec![
                 Span::styled("Rounds ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:<4}", total), Style::default().fg(Color::Cyan)),
                 Span::styled(" Wins ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{} ({:.0}%)", stats.rounds_won, stats.win_rate()), Style::default().fg(Color::Green)),
+                Span::styled(format!("{} ({:.0}%)", won, stats.win_rate()), Style::default().fg(Color::Green)),
             ]));
             lines.push(Line::from(vec![
                 Span::styled("Missed ", Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{}", stats.rounds_missed), Style::default().fg(if stats.rounds_missed > 0 { Color::Red } else { Color::DarkGray })),
+                Span::styled(format!("{}", missed), Style::default().fg(if missed > 0 { Color::Red } else { Color::DarkGray })),
             ]));
         }
     };
@@ -1327,9 +1639,11 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
 // Board Grid Section
 // =============================================================================
 
-fn draw_board_grid(frame: &mut Frame, area: Rect, app: &App) {
+/// Draw expanded board grid (when in Board view mode)
+fn draw_board_grid_expanded(frame: &mut Frame, area: Rect, app: &App) {
+    let view_indicator = format!(" Board (5×5) [Tab: {}] ", app.view_mode.as_str());
     let block = Block::default()
-        .title(" Board (5×5) ")
+        .title(view_indicator)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::Blue));
     
@@ -1350,8 +1664,9 @@ fn draw_board_grid(frame: &mut Frame, area: Rect, app: &App) {
     
     // Calculate max deployment for color scaling
     let max_deploy = round.deployed.iter().max().copied().unwrap_or(1).max(1);
+    let total_deployed: u64 = round.deployed.iter().sum();
     
-    // Build table rows for 5x5 grid
+    // Build table rows for 5x5 grid with more detail
     let mut rows = Vec::new();
     
     for row_idx in 0..5 {
@@ -1362,15 +1677,15 @@ fn draw_board_grid(frame: &mut Frame, area: Rect, app: &App) {
             let deployed = round.deployed[idx];
             let sol = deployed as f64 / 1e9;
             
-            // Format cell content
+            // Format cell content with more detail in expanded view
             let text = if sol >= 1.0 {
-                format!("{}: {:.2}", idx, sol)
-            } else if sol >= 0.01 {
-                format!("{}: {:.3}", idx, sol)
+                format!(" {:>2}: {:>6.3}◎ ", idx, sol)
+            } else if sol >= 0.001 {
+                format!(" {:>2}: {:>6.4}◎ ", idx, sol)
             } else if deployed > 0 {
-                format!("{}: ◆", idx)
+                format!(" {:>2}: {:>7} ", idx, deployed)
             } else {
-                format!("{}: ·", idx)
+                format!(" {:>2}:    ·    ", idx)
             };
             
             // Color intensity based on deployment
@@ -1387,6 +1702,19 @@ fn draw_board_grid(frame: &mut Frame, area: Rect, app: &App) {
         rows.push(Row::new(cells).height(1));
     }
     
+    // Add summary row
+    let summary = Row::new(vec![
+        Span::styled(
+            format!(" Total: {:.4}◎ ({} lamports) | Motherlode: {} ORE", 
+                total_deployed as f64 / 1e9, 
+                total_deployed,
+                round.motherlode
+            ),
+            Style::default().fg(Color::Cyan)
+        ),
+    ]).height(1);
+    rows.push(summary);
+    
     let widths = [
         Constraint::Ratio(1, 5),
         Constraint::Ratio(1, 5),
@@ -1396,9 +1724,80 @@ fn draw_board_grid(frame: &mut Frame, area: Rect, app: &App) {
     ];
     
     let table = Table::new(rows, widths)
-        .column_spacing(1);
+        .column_spacing(0);
     
     frame.render_widget(table, inner);
+}
+
+// =============================================================================
+// Footer Section (Network Stats)
+// =============================================================================
+
+fn draw_footer(frame: &mut Frame, area: Rect, app: &App) {
+    let stats = &app.network_stats;
+
+    // Build connection status indicators
+    let ws_status = Line::from(vec![
+        Span::styled(" WS:", Style::default().fg(Color::DarkGray)),
+        Span::styled("s", Style::default().fg(Color::DarkGray)),
+        Span::styled(stats.slot_ws.as_str(), Style::default().fg(stats.slot_ws.color())),
+        Span::styled("b", Style::default().fg(Color::DarkGray)),
+        Span::styled(stats.board_ws.as_str(), Style::default().fg(stats.board_ws.color())),
+        Span::styled("r", Style::default().fg(Color::DarkGray)),
+        Span::styled(stats.round_ws.as_str(), Style::default().fg(stats.round_ws.color())),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled("RPC:", Style::default().fg(Color::DarkGray)),
+        Span::styled(stats.rpc.as_str(), Style::default().fg(stats.rpc.color())),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        // Sender latencies
+        Span::styled("E:", Style::default().fg(Color::Cyan)),
+        Span::styled(
+            stats.sender_east_latency_ms.map_or("--".to_string(), |ms| format!("{}ms", ms)),
+            Style::default().fg(if stats.sender_east_latency_ms.map_or(false, |ms| ms < 200) { Color::Green } else { Color::Yellow })
+        ),
+        Span::styled(" W:", Style::default().fg(Color::Magenta)),
+        Span::styled(
+            stats.sender_west_latency_ms.map_or("--".to_string(), |ms| format!("{}ms", ms)),
+            Style::default().fg(if stats.sender_west_latency_ms.map_or(false, |ms| ms < 200) { Color::Green } else { Color::Yellow })
+        ),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        // RPC: rps (total)
+        Span::styled("RPC:", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}/s", stats.rpc_rps), Style::default().fg(Color::White)),
+        Span::styled(format!("({})", stats.rpc_total), Style::default().fg(Color::DarkGray)),
+        Span::styled(" ", Style::default().fg(Color::DarkGray)),
+        // Send: rps (total)
+        Span::styled("Send:", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}/s", stats.sender_rps), Style::default().fg(Color::Cyan)),
+        Span::styled(format!("({})", stats.sender_total), Style::default().fg(Color::DarkGray)),
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        // Tx stats: OK/FAIL/MISS out of SENT (green/orange/red)
+        Span::styled("Tx:", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", stats.txs_confirmed), Style::default().fg(Color::Green)),
+        Span::styled("/", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", stats.txs_failed), Style::default().fg(Color::Rgb(255, 165, 0))), // Orange
+        Span::styled("/", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", stats.txs_missed), Style::default().fg(Color::Red)),
+        Span::styled("/", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("{}", stats.txs_sent), Style::default().fg(Color::White)),
+        Span::styled(" (", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("{:.0}%", stats.miss_rate()),
+            Style::default().fg(if stats.miss_rate() < 20.0 { Color::Green } else { Color::Red })
+        ),
+        Span::styled(")", Style::default().fg(Color::DarkGray)),
+        // View mode indicator
+        Span::styled(" │ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("[Tab:{}]", app.view_mode.as_str()), Style::default().fg(Color::Cyan)),
+    ]);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .style(Style::default().bg(Color::Rgb(10, 10, 15)));
+
+    let paragraph = Paragraph::new(ws_status).block(block);
+    frame.render_widget(paragraph, area);
 }
 
 // =============================================================================
@@ -1406,8 +1805,9 @@ fn draw_board_grid(frame: &mut Frame, area: Rect, app: &App) {
 // =============================================================================
 
 fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
+    let view_indicator = format!(" Transaction Log [Tab: {}] ", app.view_mode.as_str());
     let block = Block::default()
-        .title(" Transaction Log ")
+        .title(view_indicator)
         .borders(Borders::ALL)
         .border_style(Style::default().fg(Color::DarkGray));
     
@@ -1574,6 +1974,10 @@ pub fn handle_input(app: &mut App) -> io::Result<InputResult> {
                         }
                         // Otherwise execute normally (copy or session refresh)
                         app.execute_select_action();
+                    }
+                    // Tab to toggle view mode
+                    KeyCode::Tab => {
+                        app.toggle_view();
                     }
                     // Clear selection
                     KeyCode::Char('c') => {

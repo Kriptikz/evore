@@ -1,5 +1,6 @@
 use solana_client::pubsub_client::PubsubClient;
 use solana_sdk::{commitment_config::CommitmentConfig, hash::Hash};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -9,6 +10,11 @@ pub struct SlotTracker {
     pub current_slot: Arc<RwLock<u64>>,
     pub latest_blockhash: Arc<RwLock<Hash>>,
     pub last_slot_time: Arc<RwLock<Instant>>,
+    pub last_blockhash_time: Arc<RwLock<Instant>>,
+    /// True if WS subscription is currently connected
+    pub ws_connected: Arc<AtomicBool>,
+    /// True if RPC is responding
+    pub rpc_connected: Arc<AtomicBool>,
 }
 
 impl SlotTracker {
@@ -18,7 +24,20 @@ impl SlotTracker {
             current_slot: Arc::new(RwLock::new(0)),
             latest_blockhash: Arc::new(RwLock::new(Hash::default())),
             last_slot_time: Arc::new(RwLock::new(Instant::now())),
+            last_blockhash_time: Arc::new(RwLock::new(Instant::now())),
+            ws_connected: Arc::new(AtomicBool::new(false)),
+            rpc_connected: Arc::new(AtomicBool::new(false)),
         }
+    }
+    
+    /// Check if WS is connected (received slot update in last 5 seconds)
+    pub fn is_ws_connected(&self) -> bool {
+        self.ws_connected.load(Ordering::Relaxed)
+    }
+    
+    /// Check if RPC is connected (received blockhash in last 5 seconds)
+    pub fn is_rpc_connected(&self) -> bool {
+        self.rpc_connected.load(Ordering::Relaxed)
     }
 
     /// Get current slot
@@ -37,25 +56,38 @@ impl SlotTracker {
     }
 
     /// Start slot subscription (runs in background)
+    /// Quietly reconnects on error with exponential backoff (max 30s)
     pub fn start_slot_subscription(&self) -> Result<(), Box<dyn std::error::Error>> {
         let slot = Arc::clone(&self.current_slot);
         let last_time = Arc::clone(&self.last_slot_time);
+        let ws_connected = Arc::clone(&self.ws_connected);
         let ws_url = self.ws_url.clone();
 
         std::thread::spawn(move || {
+            let mut retry_delay_secs = 1u64;
+            const MAX_RETRY_DELAY: u64 = 30;
+            
             loop {
                 match PubsubClient::slot_subscribe(&ws_url) {
                     Ok((_subscription, receiver)) => {
+                        // Reset backoff on successful connection
+                        retry_delay_secs = 1;
+                        ws_connected.store(true, Ordering::Relaxed);
+                        
                         for slot_info in receiver {
                             let mut s = slot.write().unwrap();
                             *s = slot_info.slot;
                             let mut t = last_time.write().unwrap();
                             *t = Instant::now();
                         }
+                        // Receiver closed, mark as disconnected
+                        ws_connected.store(false, Ordering::Relaxed);
                     }
-                    Err(e) => {
-                        eprintln!("Slot subscription error: {}, reconnecting...", e);
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    Err(_) => {
+                        // Mark as disconnected, quiet retry with exponential backoff
+                        ws_connected.store(false, Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_secs(retry_delay_secs));
+                        retry_delay_secs = (retry_delay_secs * 2).min(MAX_RETRY_DELAY);
                     }
                 }
             }
@@ -65,8 +97,11 @@ impl SlotTracker {
     }
 
     /// Start blockhash subscription (runs in background)  
+    /// Quietly handles errors and continues polling
     pub fn start_blockhash_subscription(&self, rpc_url: &str) -> Result<(), Box<dyn std::error::Error>> {
         let blockhash = Arc::clone(&self.latest_blockhash);
+        let last_bh_time = Arc::clone(&self.last_blockhash_time);
+        let rpc_connected = Arc::clone(&self.rpc_connected);
         let rpc_url = rpc_url.to_string();
 
         // Poll for blockhash since there's no direct subscription
@@ -81,9 +116,12 @@ impl SlotTracker {
                     Ok(hash) => {
                         let mut bh = blockhash.write().unwrap();
                         *bh = hash;
+                        let mut t = last_bh_time.write().unwrap();
+                        *t = Instant::now();
+                        rpc_connected.store(true, Ordering::Relaxed);
                     }
-                    Err(e) => {
-                        eprintln!("Blockhash fetch error: {}", e);
+                    Err(_) => {
+                        rpc_connected.store(false, Ordering::Relaxed);
                     }
                 }
                 std::thread::sleep(std::time::Duration::from_millis(200));

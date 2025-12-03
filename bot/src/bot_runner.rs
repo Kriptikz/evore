@@ -16,7 +16,7 @@ use solana_sdk::{
     signature::{Keypair, Signature},
     signer::Signer,
 };
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, RwLock};
 use tokio::time::sleep;
 
 use crate::blockhash_cache::BlockhashCache;
@@ -27,6 +27,7 @@ use crate::config::StrategyParams;
 use crate::config::DeployStrategy;
 use crate::deploy::{build_checkpoint_tx, build_claim_sol_tx, build_ev_deploy_tx, build_percentage_deploy_tx, EvDeployParams, PercentageDeployParams};
 use crate::round_tracker::RoundTracker;
+use crate::sender::PingStats;
 use crate::slot_tracker::SlotTracker;
 use crate::tui::{BotStatus, TuiUpdate, TxAction, TxType, TxStatus};
 use crate::tx_pipeline::{create_tx_pipeline, TxRequest};
@@ -38,6 +39,8 @@ pub struct SharedServices {
     pub round_tracker: Arc<RoundTracker>,
     pub blockhash_cache: Arc<BlockhashCache>,
     pub tx_channel: mpsc::UnboundedSender<TxRequest>,
+    pub fast_sender: Arc<crate::sender::FastSender>,
+    pub ping_stats: Arc<PingStats>,
     pub client: Arc<EvoreClient>,
     rpc_url: String,
 }
@@ -58,7 +61,7 @@ impl SharedServices {
             rpc_url.to_string(),
             solana_sdk::commitment_config::CommitmentConfig::confirmed(),
         ));
-        let tx_channel = create_tx_pipeline(tx_rpc);
+        let (tx_channel, fast_sender, ping_stats) = create_tx_pipeline(tx_rpc);
         
         Ok(Self {
             slot_tracker,
@@ -66,6 +69,8 @@ impl SharedServices {
             round_tracker,
             blockhash_cache,
             tx_channel,
+            fast_sender,
+            ping_stats,
             client,
             rpc_url: rpc_url.to_string(),
         })
@@ -97,23 +102,37 @@ pub struct BotRunConfig {
     pub strategy: DeployStrategy,
     pub strategy_params: StrategyParams,
     pub bankroll: u64,
-    pub attempts: u64,  // Number of deploy txs to send (default 4)
+    pub attempts: u64,   // Number of deploy txs to send (default 4)
     pub priority_fee: u64,  // Priority fee in micro-lamports per CU
+    pub jito_tip: u64,   // Jito tip in lamports (default 200_000 = 0.0002 SOL)
 }
 
 /// Run a single bot using shared services
 pub async fn run_bot_with_services(
-    config: BotRunConfig,
+    config: Arc<RwLock<BotRunConfig>>,
     services: Arc<SharedServices>,
     tui_tx: mpsc::UnboundedSender<TuiUpdate>,
 ) {
     let mut state = BotState::new();
-    let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(config.manager, config.auth_id);
+    
+    // Extract static values that don't change at runtime
+    let (signer, manager, auth_id, bot_index, bot_name) = {
+        let cfg = config.read().await;
+        (
+            Arc::clone(&cfg.signer),
+            cfg.manager,
+            cfg.auth_id,
+            cfg.bot_index,
+            cfg.name.clone(),
+        )
+    };
+    
+    let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager, auth_id);
     
     // Get initial signer balance
-    if let Ok(balance) = services.client.rpc.get_balance(&config.signer.pubkey()) {
+    if let Ok(balance) = services.client.rpc.get_balance(&signer.pubkey()) {
         let _ = tui_tx.send(TuiUpdate::BotSignerBalanceUpdate {
-            bot_index: config.bot_index,
+            bot_index,
             balance,
         });
     }
@@ -137,7 +156,7 @@ pub async fn run_bot_with_services(
         state.init_starting_values(miner.rewards_sol, miner.rewards_ore);
         
         let _ = tui_tx.send(TuiUpdate::BotStatsUpdate {
-            bot_index: config.bot_index,
+            bot_index,
             rounds_participated: 0,
             rounds_won: 0,
             rounds_skipped: 0,
@@ -147,7 +166,7 @@ pub async fn run_bot_with_services(
         });
         
         let _ = tui_tx.send(TuiUpdate::BotMinerUpdate {
-            bot_index: config.bot_index,
+            bot_index,
             miner: miner.clone(),
         });
 
@@ -160,7 +179,7 @@ pub async fn run_bot_with_services(
                 state.set_phase(BotPhase::Deployed);
                 
                 let _ = tui_tx.send(TuiUpdate::BotDeployedUpdate {
-                    bot_index: config.bot_index,
+                    bot_index,
                     amount: deployed,
                     round_id: board.round_id,
                 });
@@ -201,7 +220,7 @@ pub async fn run_bot_with_services(
                     state.last_checkpointed_round = Some(miner.checkpoint_id);
                     
                     let _ = tui_tx.send(TuiUpdate::BotMinerUpdate {
-                        bot_index: config.bot_index,
+                        bot_index,
                         miner: miner.clone(),
                     });
                 }
@@ -221,17 +240,23 @@ pub async fn run_bot_with_services(
         
         let _ = tui_tx.send(TuiUpdate::SlotUpdate { slot: current_slot, blockhash });
 
+        // Read dynamic config values (can be updated via config reload)
+        let (slots_left, strategy, strategy_params, bankroll, attempts, priority_fee, jito_tip) = {
+            let cfg = config.read().await;
+            (cfg.slots_left, cfg.strategy.clone(), cfg.strategy_params.clone(), cfg.bankroll, cfg.attempts, cfg.priority_fee, cfg.jito_tip)
+        };
+
         // State machine logic
-        match determine_phase(&board, current_slot, &state, config.slots_left) {
+        match determine_phase(&board, current_slot, &state, slots_left) {
             BotPhase::Idle => {
                 state.set_phase(BotPhase::Idle);
-                send_status(&tui_tx, config.bot_index, BotStatus::Idle);
+                send_status(&tui_tx, bot_index, BotStatus::Idle);
                 sleep(Duration::from_millis(500)).await;
             }
             
             BotPhase::Checkpointing => {
                 state.set_phase(BotPhase::Checkpointing);
-                send_status(&tui_tx, config.bot_index, BotStatus::Checkpointing);
+                send_status(&tui_tx, bot_index, BotStatus::Checkpointing);
                 
                 if let Some(last_round) = state.last_deployed_round {
                     // Store pre-checkpoint values
@@ -242,16 +267,16 @@ pub async fn run_bot_with_services(
                     // Send checkpoint
                     let bh = wait_for_blockhash(&services.blockhash_cache).await;
                     let checkpoint_tx = build_checkpoint_tx(
-                        &config.signer,
-                        &config.manager,
-                        config.auth_id,
+                        &signer,
+                        &manager,
+                        auth_id,
                         last_round,
                         bh,
                     );
                     
                     match services.client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
                         Ok(sig) => {
-                            send_tx_event_typed(&tui_tx, &config.name, TxType::Checkpoint, TxStatus::Confirmed, sig, None, 
+                            send_tx_event_typed(&tui_tx, &bot_name, TxType::Checkpoint, TxStatus::Confirmed, sig, None, 
                                 Some(current_slot), Some(last_round), None, None);
                             
                             // Update state after checkpoint
@@ -267,7 +292,7 @@ pub async fn run_bot_with_services(
                                 state.process_checkpoint(last_round, rewards_sol, rewards_ore);
                                 
                                 let _ = tui_tx.send(TuiUpdate::BotStatsUpdate {
-                                    bot_index: config.bot_index,
+                                    bot_index,
                                     rounds_participated: state.rounds_participated,
                                     rounds_won: state.rounds_won,
                                     rounds_skipped: state.rounds_skipped,
@@ -277,7 +302,7 @@ pub async fn run_bot_with_services(
                                 });
 
                                 let _ = tui_tx.send(TuiUpdate::BotMinerUpdate {
-                                    bot_index: config.bot_index,
+                                    bot_index,
                                     miner: miner.clone(),
                                 });
                                 
@@ -286,25 +311,25 @@ pub async fn run_bot_with_services(
                                     state.set_phase(BotPhase::Claiming);
                                     let bh = wait_for_blockhash(&services.blockhash_cache).await;
                                     let claim_tx = build_claim_sol_tx(
-                                        &config.signer,
-                                        &config.manager,
-                                        config.auth_id,
+                                        &signer,
+                                        &manager,
+                                        auth_id,
                                         bh,
                                     );
                                     
                                     match services.client.rpc.send_and_confirm_transaction(&claim_tx) {
                                         Ok(sig) => {
-                                            send_tx_event_typed(&tui_tx, &config.name, TxType::ClaimSol, TxStatus::Confirmed, sig, None,
+                                            send_tx_event_typed(&tui_tx, &bot_name, TxType::ClaimSol, TxStatus::Confirmed, sig, None,
                                                 Some(current_slot), None, Some(rewards_sol), None);
                                             // Track claimed amount for accurate P&L
                                             let _ = tui_tx.send(TuiUpdate::BotClaimedSol {
-                                                bot_index: config.bot_index,
+                                                bot_index,
                                                 amount: rewards_sol,
                                             });
-                                            update_signer_balance(&services, &config, &tui_tx).await;
+                                            update_signer_balance(&services, bot_index, &signer, &tui_tx).await;
                                         }
                                         Err(e) => {
-                                            send_tx_event_typed(&tui_tx, &config.name, TxType::ClaimSol, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
+                                            send_tx_event_typed(&tui_tx, &bot_name, TxType::ClaimSol, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
                                                 Some(current_slot), None, Some(rewards_sol), None);
                                         }
                                     }
@@ -312,7 +337,7 @@ pub async fn run_bot_with_services(
                             }
                         }
                         Err(e) => {
-                            send_tx_event_typed(&tui_tx, &config.name, TxType::Checkpoint, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
+                            send_tx_event_typed(&tui_tx, &bot_name, TxType::Checkpoint, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
                                 Some(current_slot), Some(last_round), None, None);
                             sleep(Duration::from_millis(500)).await;
                         }
@@ -322,15 +347,15 @@ pub async fn run_bot_with_services(
             
             BotPhase::Waiting => {
                 state.set_phase(BotPhase::Waiting);
-                send_status(&tui_tx, config.bot_index, BotStatus::Waiting);
+                send_status(&tui_tx, bot_index, BotStatus::Waiting);
                 sleep(Duration::from_millis(50)).await;
             }
             
             BotPhase::Deploying => {
                 state.set_phase(BotPhase::Deploying);
-                send_status(&tui_tx, config.bot_index, BotStatus::Deploying);
+                send_status(&tui_tx, bot_index, BotStatus::Deploying);
                 
-                // Send config.attempts deploy transactions at 100ms intervals
+                // Send deploy transactions at 100ms intervals
                 // Each tx has a unique attempts value to generate different signatures
                 let mut signatures = Vec::new();
                 
@@ -344,8 +369,8 @@ pub async fn run_bot_with_services(
                 
                 // Only EV strategy supports multiple attempts (via attempts field in instruction)
                 // Percentage and Manual would create identical txs with same signature
-                let num_attempts = match config.strategy {
-                    DeployStrategy::EV => config.attempts,
+                let num_attempts = match strategy {
+                    DeployStrategy::EV => attempts,
                     DeployStrategy::Percentage | DeployStrategy::Manual => 1,
                 };
                 
@@ -356,57 +381,61 @@ pub async fn run_bot_with_services(
                     }
                     
                     // Build deploy transaction based on strategy
-                    let deploy_tx = match config.strategy {
+                    let deploy_tx = match strategy {
                         DeployStrategy::EV => {
-                            let mut params = build_ev_params(&config);
+                            let mut params = build_ev_params_from_values(&strategy_params, bankroll, slots_left);
                             params.attempts = attempt;  // Each tx has unique attempts value
                             build_ev_deploy_tx(
-                                &config.signer,
-                                &config.manager,
-                                config.auth_id,
+                                &signer,
+                                &manager,
+                                auth_id,
                                 board.round_id,
                                 &params,
                                 bh,
-                                config.priority_fee,
+                                priority_fee,
+                                jito_tip,
                             )
                         }
                         DeployStrategy::Percentage => {
-                            let params = build_percentage_params(&config);
+                            let params = build_percentage_params_from_values(&strategy_params, bankroll);
                             build_percentage_deploy_tx(
-                                &config.signer,
-                                &config.manager,
-                                config.auth_id,
+                                &signer,
+                                &manager,
+                                auth_id,
                                 board.round_id,
                                 &params,
                                 bh,
-                                config.priority_fee,
+                                priority_fee,
+                                jito_tip,
                             )
                         }
                         DeployStrategy::Manual => {
                             // TODO: Implement manual strategy - falls back to EV for now
-                            let mut params = build_ev_params(&config);
+                            let mut params = build_ev_params_from_values(&strategy_params, bankroll, slots_left);
                             params.attempts = attempt;
                             build_ev_deploy_tx(
-                                &config.signer,
-                                &config.manager,
-                                config.auth_id,
+                                &signer,
+                                &manager,
+                                auth_id,
                                 board.round_id,
                                 &params,
                                 bh,
-                                config.priority_fee,
+                                priority_fee,
+                                jito_tip,
                             )
                         }
                     };
                     
-                    match services.client.send_transaction_no_wait(&deploy_tx) {
+                    // Use FastSender for deploy transactions (automatic 4x retry via Helius)
+                    match services.fast_sender.send_transaction(&deploy_tx) {
                         Ok(sig) => {
                             signatures.push(sig);
-                            send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Sent, sig, None,
-                                Some(current), Some(board.round_id), Some(config.bankroll), Some(attempt));
+                            send_tx_event_typed(&tui_tx, &bot_name, TxType::Deploy, TxStatus::Sent, sig, None,
+                                Some(current), Some(board.round_id), Some(bankroll), Some(attempt));
                         }
                         Err(e) => {
-                            send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, Signature::default(), Some(e.to_string()),
-                                Some(current), Some(board.round_id), Some(config.bankroll), Some(attempt));
+                            send_tx_event_typed(&tui_tx, &bot_name, TxType::Deploy, TxStatus::Failed, Signature::default(), Some(e.to_string()),
+                                Some(current), Some(board.round_id), Some(bankroll), Some(attempt));
                         }
                     }
                     
@@ -429,8 +458,8 @@ pub async fn run_bot_with_services(
                             Ok(Some(status)) => {
                                 if status.err.is_none() {
                                     any_confirmed = true;
-                                    send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Confirmed, *sig, None,
-                                        Some(status.slot), Some(board.round_id), Some(config.bankroll), None);
+                                    send_tx_event_typed(&tui_tx, &bot_name, TxType::Deploy, TxStatus::Confirmed, *sig, None,
+                                        Some(status.slot), Some(board.round_id), Some(bankroll), None);
                                 } else {
                                     // Transaction landed but failed on-chain
                                     let err = status.err.unwrap();
@@ -452,20 +481,20 @@ pub async fn run_bot_with_services(
                                         had_other_error = true;
                                     }
                                     
-                                    send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, *sig, Some(friendly_err),
-                                        Some(status.slot), Some(board.round_id), Some(config.bankroll), None);
+                                    send_tx_event_typed(&tui_tx, &bot_name, TxType::Deploy, TxStatus::Failed, *sig, Some(friendly_err),
+                                        Some(status.slot), Some(board.round_id), Some(bankroll), None);
                                 }
                             }
                             Ok(None) => {
                                 // Transaction not found - expired or dropped
                                 had_other_error = true;
-                                send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, *sig, Some("Tx expired/dropped".to_string()),
-                                    None, Some(board.round_id), Some(config.bankroll), None);
+                                send_tx_event_typed(&tui_tx, &bot_name, TxType::Deploy, TxStatus::Failed, *sig, Some("Tx expired/dropped".to_string()),
+                                    None, Some(board.round_id), Some(bankroll), None);
                             }
                             Err(e) => {
                                 had_other_error = true;
-                                send_tx_event_typed(&tui_tx, &config.name, TxType::Deploy, TxStatus::Failed, *sig, Some(format!("RPC: {}", e)),
-                                    None, Some(board.round_id), Some(config.bankroll), None);
+                                send_tx_event_typed(&tui_tx, &bot_name, TxType::Deploy, TxStatus::Failed, *sig, Some(format!("RPC: {}", e)),
+                                    None, Some(board.round_id), Some(bankroll), None);
                             }
                         }
                     }
@@ -473,8 +502,9 @@ pub async fn run_bot_with_services(
                     // Count EV skips (only once per round even if multiple txs failed with Custom(7))
                     if ev_skip && !any_confirmed {
                         state.rounds_skipped += 1;
+                        send_status(&tui_tx, bot_index, BotStatus::Skipped);
                         let _ = tui_tx.send(TuiUpdate::BotStatsUpdate {
-                            bot_index: config.bot_index,
+                            bot_index,
                             rounds_participated: state.rounds_participated,
                             rounds_won: state.rounds_won,
                             rounds_skipped: state.rounds_skipped,
@@ -491,8 +521,9 @@ pub async fn run_bot_with_services(
                     // Count missed rounds (tx failed for reasons other than EV skip)
                     if had_other_error && !any_confirmed && !ev_skip {
                         state.rounds_missed += 1;
+                        send_status(&tui_tx, bot_index, BotStatus::Missed);
                         let _ = tui_tx.send(TuiUpdate::BotStatsUpdate {
-                            bot_index: config.bot_index,
+                            bot_index,
                             rounds_participated: state.rounds_participated,
                             rounds_won: state.rounds_won,
                             rounds_skipped: state.rounds_skipped,
@@ -506,19 +537,22 @@ pub async fn run_bot_with_services(
                     }
                     
                     if any_confirmed {
+                        // Deployment succeeded - set status to Deployed
+                        send_status(&tui_tx, bot_index, BotStatus::Deployed);
+                        
                         // Get deployed amount from miner
                         if let Ok(Some(miner)) = services.client.get_miner(&managed_miner_auth) {
                             let deployed: u64 = miner.deployed.iter().sum();
                             state.record_deployment(board.round_id, deployed);
                             
                             let _ = tui_tx.send(TuiUpdate::BotDeployedUpdate {
-                                bot_index: config.bot_index,
+                                bot_index,
                                 amount: deployed,
                                 round_id: board.round_id,
                             });
                             
                             let _ = tui_tx.send(TuiUpdate::BotStatsUpdate {
-                                bot_index: config.bot_index,
+                                bot_index,
                                 rounds_participated: state.rounds_participated,
                                 rounds_won: state.rounds_won,
                                 rounds_skipped: state.rounds_skipped,
@@ -528,14 +562,15 @@ pub async fn run_bot_with_services(
                             });
                         }
                         
-                        update_signer_balance(&services, &config, &tui_tx).await;
+                        update_signer_balance(&services, bot_index, &signer, &tui_tx).await;
                     }
                 }
             }
             
             BotPhase::Deployed => {
+                // Don't change status here - preserve Skipped/Missed/Deployed status
+                // Status is set when deployment actually succeeds or when skip/miss is detected
                 state.set_phase(BotPhase::Deployed);
-                send_status(&tui_tx, config.bot_index, BotStatus::Deployed);
                 sleep(Duration::from_millis(100)).await;
             }
             
@@ -652,59 +687,60 @@ fn send_tx_event_typed(
 /// Update signer balance after transaction
 async fn update_signer_balance(
     services: &SharedServices,
-    config: &BotRunConfig,
+    bot_index: usize,
+    signer: &Keypair,
     tx: &mpsc::UnboundedSender<TuiUpdate>,
 ) {
-    if let Ok(balance) = services.client.rpc.get_balance(&config.signer.pubkey()) {
+    if let Ok(balance) = services.client.rpc.get_balance(&signer.pubkey()) {
         let _ = tx.send(TuiUpdate::BotSignerBalanceUpdate {
-            bot_index: config.bot_index,
+            bot_index,
             balance,
         });
     }
 }
 
-/// Build EV deploy params from config
-fn build_ev_params(config: &BotRunConfig) -> EvDeployParams {
-    match &config.strategy_params {
+/// Build EV deploy params from values (for runtime config updates)
+fn build_ev_params_from_values(strategy_params: &StrategyParams, bankroll: u64, slots_left: u64) -> EvDeployParams {
+    match strategy_params {
         StrategyParams::EV { max_per_square, min_bet, ore_value } => {
             EvDeployParams {
-                bankroll: config.bankroll,
+                bankroll,
                 max_per_square: *max_per_square,
                 min_bet: *min_bet,
                 ore_value: *ore_value,
-                slots_left: config.slots_left,
+                slots_left,
                 attempts: 0,  // Will be set per-tx in deploy loop
                 allow_multi_deploy: false,  // Don't allow multiple deploys per round
             }
         }
         _ => EvDeployParams {
-            bankroll: config.bankroll,
+            bankroll,
             max_per_square: 100_000_000,
             min_bet: 10_000,
             ore_value: 800_000_000,
-            slots_left: config.slots_left,
+            slots_left,
             attempts: 0,
             allow_multi_deploy: false,
         }
     }
 }
 
-/// Build Percentage deploy params from config
-fn build_percentage_params(config: &BotRunConfig) -> PercentageDeployParams {
-    match &config.strategy_params {
+/// Build Percentage deploy params from values (for runtime config updates)
+fn build_percentage_params_from_values(strategy_params: &StrategyParams, bankroll: u64) -> PercentageDeployParams {
+    match strategy_params {
         StrategyParams::Percentage { percentage, squares_count } => {
             PercentageDeployParams {
-                bankroll: config.bankroll,
+                bankroll,
                 percentage: *percentage,
                 squares_count: *squares_count,
-                slots_left: config.slots_left,
+                slots_left: 0, // Not used for percentage strategy
             }
         }
         _ => PercentageDeployParams {
-            bankroll: config.bankroll,
+            bankroll,
             percentage: 100,  // 1%
             squares_count: 20,
-            slots_left: config.slots_left,
+            slots_left: 0,
         }
     }
 }

@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-12-01 (Phase 11 complete, TUI Interactive Features in progress)
+> Last Updated: 2025-12-01 (Phase 11 complete, Transaction Sender + Hot-Reload complete, Resilience in progress)
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment

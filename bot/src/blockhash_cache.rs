@@ -77,6 +77,7 @@ impl BlockhashCache {
     }
 
     /// Start background polling thread
+    /// Quietly handles RPC errors and continues polling
     pub fn start_polling(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let blockhash = Arc::clone(&self.blockhash);
         let last_update = Arc::clone(&self.last_update);
@@ -90,19 +91,15 @@ impl BlockhashCache {
             );
 
             loop {
-                match client.get_latest_blockhash() {
-                    Ok(hash) => {
-                        {
-                            let mut bh = blockhash.write().unwrap();
-                            *bh = hash;
-                        }
-                        {
-                            let mut t = last_update.write().unwrap();
-                            *t = Instant::now();
-                        }
+                // Fetch blockhash - silently ignore errors (will retry on next poll)
+                if let Ok(hash) = client.get_latest_blockhash() {
+                    {
+                        let mut bh = blockhash.write().unwrap();
+                        *bh = hash;
                     }
-                    Err(e) => {
-                        eprintln!("BlockhashCache: fetch error: {}", e);
+                    {
+                        let mut t = last_update.write().unwrap();
+                        *t = Instant::now();
                     }
                 }
 

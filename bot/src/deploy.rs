@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 use tokio::time::sleep;
 
 use crate::client::EvoreClient;
+use crate::sender::create_tip_instruction;
 use crate::slot_tracker::SlotTracker;
 
 /// Result of a transaction send attempt
@@ -55,7 +56,7 @@ impl Default for EvDeployParams {
     }
 }
 
-/// Build EV deploy transaction with priority fee
+/// Build EV deploy transaction with priority fee and Jito tip
 pub fn build_ev_deploy_tx(
     signer: &Keypair,
     manager: &Pubkey,
@@ -64,6 +65,7 @@ pub fn build_ev_deploy_tx(
     params: &EvDeployParams,
     recent_blockhash: Hash,
     priority_fee: u64,  // micro-lamports per CU
+    jito_tip: u64,      // lamports for Jito tip (0 to disable)
 ) -> Transaction {
     let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
     let cu_price_ix = ComputeBudgetInstruction::set_compute_unit_price(priority_fee);
@@ -81,7 +83,18 @@ pub fn build_ev_deploy_tx(
         params.allow_multi_deploy,
     );
 
-    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, cu_price_ix, deploy_ix], Some(&signer.pubkey()));
+    // Build instructions: CU limit → CU price → Jito tip → Deploy
+    let mut instructions = vec![cu_limit_ix, cu_price_ix];
+    
+    // Add Jito tip if enabled (before deploy)
+    if jito_tip > 0 {
+        let tip_ix = create_tip_instruction(&signer.pubkey(), jito_tip);
+        instructions.push(tip_ix);
+    }
+    
+    instructions.push(deploy_ix);
+
+    let mut tx = Transaction::new_with_payer(&instructions, Some(&signer.pubkey()));
     tx.sign(&[signer], recent_blockhash);
     tx
 }
@@ -95,7 +108,7 @@ pub struct PercentageDeployParams {
     pub slots_left: u64,
 }
 
-/// Build Percentage deploy transaction
+/// Build Percentage deploy transaction with Jito tip
 /// Note: Each square deployment is a separate CPI call (~50-60k CU each).
 /// With 25 squares this can exceed the 1.4M CU transaction limit.
 /// If deploys fail with "program failed to complete", reduce squares_count.
@@ -107,6 +120,7 @@ pub fn build_percentage_deploy_tx(
     params: &PercentageDeployParams,
     recent_blockhash: Hash,
     priority_fee: u64,  // micro-lamports per CU
+    jito_tip: u64,      // lamports for Jito tip (0 to disable)
 ) -> Transaction {
     // Max CU for Solana is 1.4M. Each square CPI costs ~50-60k CU.
     // Safe limit: ~20-22 squares max. Consider reducing squares_count if this fails.
@@ -122,7 +136,18 @@ pub fn build_percentage_deploy_tx(
         params.squares_count,
     );
 
-    let mut tx = Transaction::new_with_payer(&[cu_limit_ix, cu_price_ix, deploy_ix], Some(&signer.pubkey()));
+    // Build instructions: CU limit → CU price → Jito tip → Deploy
+    let mut instructions = vec![cu_limit_ix, cu_price_ix];
+    
+    // Add Jito tip if enabled (before deploy)
+    if jito_tip > 0 {
+        let tip_ix = create_tip_instruction(&signer.pubkey(), jito_tip);
+        instructions.push(tip_ix);
+    }
+    
+    instructions.push(deploy_ix);
+
+    let mut tx = Transaction::new_with_payer(&instructions, Some(&signer.pubkey()));
     tx.sign(&[signer], recent_blockhash);
     tx
 }
@@ -343,7 +368,8 @@ pub async fn single_deploy(
             board.round_id,
             params,
             blockhash,
-            5000,  // default priority fee
+            5000,    // default priority fee
+            200_000, // default jito tip
         );
         
         tx_count += 1;
@@ -456,7 +482,8 @@ pub async fn deploy_quiet(
             board.round_id,
             params,
             blockhash,
-            5000,  // default priority fee
+            5000,    // default priority fee
+            200_000, // default jito tip
         );
         
         match client.send_transaction_no_wait(&tx) {

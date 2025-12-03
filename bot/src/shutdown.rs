@@ -56,14 +56,9 @@ impl Default for ShutdownSignal {
 
 /// Wait for shutdown signal (Ctrl+C)
 pub async fn wait_for_shutdown() {
-    match signal::ctrl_c().await {
-        Ok(()) => {
-            println!("\nReceived shutdown signal, cleaning up...");
-            request_shutdown();
-        }
-        Err(e) => {
-            eprintln!("Failed to listen for shutdown signal: {}", e);
-        }
+    // Listen for Ctrl+C - no printing to avoid messing up TUI
+    if signal::ctrl_c().await.is_ok() {
+        request_shutdown();
     }
 }
 

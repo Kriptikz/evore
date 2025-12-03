@@ -1,7 +1,7 @@
 //! Transaction Pipeline - Async send and batch confirmation
 //!
 //! Components:
-//! - TxSender: Reads from channel, sends instantly (no blocking)
+//! - TxSender: Reads from channel, sends instantly via Helius fast endpoint
 //! - TxConfirmer: Batch getSignatureStatuses, returns results via oneshot
 //!
 //! This decouples transaction sending from confirmation checking.
@@ -13,6 +13,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
+
+use crate::sender::FastSender;
 
 /// Request to send a transaction
 pub struct TxRequest {
@@ -40,10 +42,42 @@ pub(crate) struct PendingSig {
     bot_name: Option<String>,
 }
 
-/// Transaction sender task
+/// Transaction sender task (via Helius fast endpoint)
 /// 
-/// Reads transactions from channel, sends immediately, queues for confirmation.
+/// Reads transactions from channel, queues them in FastSender (which automatically sends 3x).
+/// Returns signature immediately for confirmation tracking.
 pub(crate) async fn tx_sender_task(
+    sender: Arc<FastSender>,
+    mut request_rx: mpsc::UnboundedReceiver<TxRequest>,
+    pending_tx: mpsc::UnboundedSender<PendingSig>,
+) {
+    while let Some(req) = request_rx.recv().await {
+        // send_transaction is now sync - queues tx and returns signature immediately
+        match sender.send_transaction(&req.transaction) {
+            Ok(sig) => {
+                // Queue for confirmation tracking
+                let _ = pending_tx.send(PendingSig {
+                    signature: sig,
+                    response_tx: req.response_tx,
+                    bot_name: req.bot_name,
+                });
+            }
+            Err(e) => {
+                // Send immediate failure (serialization error, etc.)
+                let _ = req.response_tx.send(TxResult {
+                    signature: Signature::default(),
+                    confirmed: false,
+                    error: Some(format!("Queue failed: {}", e)),
+                    slot_landed: None,
+                });
+            }
+        }
+    }
+}
+
+/// Legacy transaction sender task (via RPC - kept for fallback)
+#[allow(dead_code)]
+pub(crate) async fn tx_sender_task_rpc(
     rpc: Arc<RpcClient>,
     mut request_rx: mpsc::UnboundedReceiver<TxRequest>,
     pending_tx: mpsc::UnboundedSender<PendingSig>,
@@ -130,8 +164,8 @@ pub(crate) async fn tx_confirmer_task(
                     // else: still pending, keep in map
                 }
             }
-            Err(e) => {
-                eprintln!("TxConfirmer: status check error: {}", e);
+            Err(_) => {
+                // Silently ignore RPC errors - will retry on next poll
             }
         }
 
@@ -143,27 +177,33 @@ pub(crate) async fn tx_confirmer_task(
     }
 }
 
+use crate::sender::PingStats;
+
 /// Create the transaction pipeline channels and tasks
 /// 
-/// Returns the sender channel for submitting transactions.
-pub fn create_tx_pipeline(rpc: Arc<RpcClient>) -> mpsc::UnboundedSender<TxRequest> {
+/// Uses Helius fast sender for transaction sending, RPC for confirmation checking.
+/// Returns (sender channel, fast_sender, ping stats) for submitting transactions and monitoring network health.
+pub fn create_tx_pipeline(rpc: Arc<RpcClient>) -> (mpsc::UnboundedSender<TxRequest>, Arc<FastSender>, Arc<PingStats>) {
     let (request_tx, request_rx) = mpsc::unbounded_channel::<TxRequest>();
     let (pending_tx, pending_rx) = mpsc::unbounded_channel::<PendingSig>();
 
-    let rpc_sender = Arc::clone(&rpc);
+    // Create Helius fast sender
+    let fast_sender = Arc::new(FastSender::new());
+    let ping_stats = Arc::clone(&fast_sender.ping_stats);
+    let fast_sender_for_direct = Arc::clone(&fast_sender);
     let rpc_confirmer = Arc::clone(&rpc);
 
-    // Spawn sender task
+    // Spawn sender task (uses Helius fast endpoint)
     tokio::spawn(async move {
-        tx_sender_task(rpc_sender, request_rx, pending_tx).await;
+        tx_sender_task(fast_sender, request_rx, pending_tx).await;
     });
 
-    // Spawn confirmer task
+    // Spawn confirmer task (uses RPC for status checks)
     tokio::spawn(async move {
         tx_confirmer_task(rpc_confirmer, pending_rx).await;
     });
 
-    request_tx
+    (request_tx, fast_sender_for_direct, ping_stats)
 }
 
 /// Helper to send a transaction and wait for confirmation

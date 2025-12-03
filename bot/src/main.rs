@@ -18,6 +18,7 @@ mod config;
 mod coordinator;
 mod deploy;
 mod round_tracker;
+mod sender;
 mod shutdown;
 mod slot_tracker;
 mod tui;
@@ -551,6 +552,8 @@ async fn run_dashboard(
         signer.pubkey(),
         manager,
         managed_miner_auth,
+        5000,   // priority_fee (default)
+        200_000, // jito_tip (default)
         params.max_per_square,
         params.min_bet,
         params.ore_value,
@@ -766,6 +769,8 @@ async fn run_dashboard_with_config(
             signer_keypair.pubkey(),
             manager_keypair.pubkey(),
             managed_miner_auth,
+            bot_config.priority_fee,
+            bot_config.jito_tip,
             max_per_square,
             min_bet,
             ore_value,
@@ -819,6 +824,39 @@ async fn run_dashboard_with_config(
             app.update_slot(slot_tracker.get_slot());
             app.update_blockhash(slot_tracker.get_blockhash());
             
+            // Update network stats from sender and trackers
+            let ping_stats = coordinator.get_ping_stats();
+            app.network_stats.sender_east_latency_ms = ping_stats.get_east_latency();
+            app.network_stats.sender_west_latency_ms = ping_stats.get_west_latency();
+            
+            // Update connection statuses
+            app.network_stats.slot_ws = if coordinator.is_slot_ws_connected() {
+                tui::ConnectionStatus::Connected
+            } else {
+                tui::ConnectionStatus::Disconnected
+            };
+            app.network_stats.board_ws = if coordinator.is_board_ws_connected() {
+                tui::ConnectionStatus::Connected
+            } else {
+                tui::ConnectionStatus::Disconnected
+            };
+            app.network_stats.round_ws = if coordinator.is_round_ws_connected() {
+                tui::ConnectionStatus::Connected
+            } else {
+                tui::ConnectionStatus::Disconnected
+            };
+            app.network_stats.rpc = if coordinator.is_rpc_connected() {
+                tui::ConnectionStatus::Connected
+            } else {
+                tui::ConnectionStatus::Disconnected
+            };
+            
+            // Update RPS and totals (RPC and Sender)
+            app.network_stats.rpc_rps = coordinator.get_rpc_rps();
+            app.network_stats.sender_rps = coordinator.get_sender_rps();
+            app.network_stats.rpc_total = coordinator.get_rpc_total();
+            app.network_stats.sender_total = coordinator.get_sender_total();
+            
             // Draw UI
             terminal.draw(|frame| tui::draw(frame, &app))?;
             
@@ -833,12 +871,20 @@ async fn run_dashboard_with_config(
                             Ok(new_config) => {
                                 // Find the bot config by index
                                 if let Some(new_bot_config) = new_config.bots.get(bot_idx) {
-                                    // Update the bot's display config
+                                    // Update the bot's runtime config (actual deployment values)
+                                    if let Err(e) = coordinator.update_bot_config(bot_idx, new_bot_config).await {
+                                        app.set_status(format!("Config update error: {}", e), true);
+                                        continue;
+                                    }
+                                    
+                                    // Update the bot's display config (TUI)
                                     let bot_name = app.bots.get(bot_idx).map(|b| b.name.clone());
                                     if let Some(bot) = app.bots.get_mut(bot_idx) {
-                                        // Update bankroll
+                                        // Update bankroll and fees
                                         bot.bankroll = new_bot_config.bankroll;
                                         bot.slots_left_threshold = new_bot_config.slots_left;
+                                        bot.priority_fee = new_bot_config.priority_fee;
+                                        bot.jito_tip = new_bot_config.jito_tip;
                                         
                                         // Update strategy params
                                         match &new_bot_config.strategy_params {

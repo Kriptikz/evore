@@ -13,6 +13,7 @@ use solana_client::pubsub_client::PubsubClient;
 use solana_client::rpc_config::RpcAccountInfoConfig;
 use solana_sdk::commitment_config::CommitmentConfig;
 use steel::AccountDeserialize;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, RwLock};
 
 /// Tracks Round account state via websocket subscription
@@ -22,6 +23,8 @@ pub struct RoundTracker {
     current_round_id: Arc<RwLock<u64>>,
     /// Signal to stop the current subscription thread
     stop_signal: Arc<RwLock<bool>>,
+    /// True if WS subscription is currently connected
+    pub ws_connected: Arc<AtomicBool>,
 }
 
 impl RoundTracker {
@@ -31,7 +34,13 @@ impl RoundTracker {
             round: Arc::new(RwLock::new(None)),
             current_round_id: Arc::new(RwLock::new(0)),
             stop_signal: Arc::new(RwLock::new(false)),
+            ws_connected: Arc::new(AtomicBool::new(false)),
         }
+    }
+    
+    /// Check if WS is connected
+    pub fn is_connected(&self) -> bool {
+        self.ws_connected.load(Ordering::Relaxed)
     }
 
     /// Get current round state (None if not yet received)
@@ -92,8 +101,10 @@ impl RoundTracker {
     }
 
     /// Start websocket subscription for a specific round
+    /// Quietly reconnects on error with exponential backoff (max 30s)
     fn start_subscription_for_round(&self, round_id: u64) {
         let round = Arc::clone(&self.round);
+        let ws_connected = Arc::clone(&self.ws_connected);
         let ws_url = self.ws_url.clone();
         let stop_signal = Arc::clone(&self.stop_signal);
         let round_address = round_pda(round_id).0;
@@ -105,9 +116,13 @@ impl RoundTracker {
         }
 
         std::thread::spawn(move || {
+            let mut retry_delay_secs = 1u64;
+            const MAX_RETRY_DELAY: u64 = 30;
+            
             loop {
                 // Check if we should stop
                 if *stop_signal.read().unwrap() {
+                    ws_connected.store(false, Ordering::Relaxed);
                     break;
                 }
 
@@ -120,6 +135,10 @@ impl RoundTracker {
 
                 match PubsubClient::account_subscribe(&ws_url, &round_address, Some(config)) {
                     Ok((_subscription, receiver)) => {
+                        // Reset backoff on successful connection
+                        retry_delay_secs = 1;
+                        ws_connected.store(true, Ordering::Relaxed);
+                        
                         for response in receiver {
                             // Check stop signal between messages
                             if *stop_signal.read().unwrap() {
@@ -127,25 +146,25 @@ impl RoundTracker {
                             }
 
                             if let Some(account) = response.value.data.decode() {
-                                match Round::try_from_bytes(&account) {
-                                    Ok(r) => {
-                                        let mut round_lock = round.write().unwrap();
-                                        *round_lock = Some(*r);
-                                    }
-                                    Err(e) => {
-                                        eprintln!("RoundTracker: Failed to parse Round: {}", e);
-                                    }
+                                // Silently skip invalid data
+                                if let Ok(r) = Round::try_from_bytes(&account) {
+                                    let mut round_lock = round.write().unwrap();
+                                    *round_lock = Some(*r);
                                 }
                             }
                         }
+                        // Receiver closed, mark as disconnected
+                        ws_connected.store(false, Ordering::Relaxed);
                     }
-                    Err(e) => {
+                    Err(_) => {
                         // Check stop signal before reconnecting
                         if *stop_signal.read().unwrap() {
                             break;
                         }
-                        eprintln!("RoundTracker: Subscription error: {}, reconnecting...", e);
-                        std::thread::sleep(std::time::Duration::from_secs(1));
+                        // Mark as disconnected, quiet retry with exponential backoff
+                        ws_connected.store(false, Ordering::Relaxed);
+                        std::thread::sleep(std::time::Duration::from_secs(retry_delay_secs));
+                        retry_delay_secs = (retry_delay_secs * 2).min(MAX_RETRY_DELAY);
                     }
                 }
             }
