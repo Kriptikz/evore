@@ -92,6 +92,9 @@ pub struct Board {
 
     /// The slot at which the current round ends mining.
     pub end_slot: u64,
+
+    /// The current epoch id.
+    pub epoch_id: u64,
 }
 
 impl Board {
@@ -101,6 +104,42 @@ impl Board {
 }
 
 account!(OreAccount, Board);
+
+/// Treasury is a singleton account which is the mint authority for the ORE token and the authority of
+/// Treasury is a singleton account which is the mint authority for the ORE token and the authority of
+/// the program's global token account.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
+pub struct Treasury {
+    // The amount of SOL collected for buy-bury operations.
+    pub balance: u64,
+
+    /// Buffer a (placeholder)
+    pub buffer_a: u64,
+
+    /// The amount of ORE in the motherlode rewards pool.
+    pub motherlode: u64,
+
+    /// The cumulative ORE distributed to miners, divided by the total unclaimed ORE at the time of distribution.
+    pub miner_rewards_factor: Numeric,
+
+    /// The cumulative ORE distributed to stakers, divided by the total stake at the time of distribution.
+    pub stake_rewards_factor: Numeric,
+
+    /// Buffer b (placeholder)
+    pub buffer_b: u64,
+
+    /// The current total amount of refined ORE mining rewards.
+    pub total_refined: u64,
+
+    /// The current total amount of ORE staking deposits.
+    pub total_staked: u64,
+
+    /// The current total amount of unclaimed ORE mining rewards.
+    pub total_unclaimed: u64,
+}
+
+account!(OreAccount, Treasury);
 
 
 #[repr(C)]
@@ -135,6 +174,9 @@ pub struct Round {
 
     /// The total amount of SOL deployed in the round.
     pub total_deployed: u64,
+
+    /// The total number of unique miners that played in the round.
+    pub total_miners: u64,
 
     /// The total amount of SOL put in the ORE vault.
     pub total_vaulted: u64,
@@ -189,6 +231,9 @@ pub struct Miner {
 
     /// The total amount of ORE this miner has mined across all blocks.
     pub lifetime_rewards_ore: u64,
+
+    /// The total amount of ORE this miner has deployed across all rounds.
+    pub lifetime_deployed: u64,
 }
 
 account!(OreAccount, Miner);

@@ -4,7 +4,7 @@ use solana_program::{
 use steel::*;
 
 use crate::{
-    consts::{FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::{MMDeploy, DeployStrategy}, ore_api::{self, Board, Round}, state::Manager
+    consts::{DEPLOY_FEE, FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::{DeployStrategy, MMDeploy}, ore_api::{self, Board, Round}, state::Manager
 };
 
 pub fn process_mm_deploy(
@@ -104,14 +104,14 @@ pub fn process_mm_deploy(
         return Err(EvoreError::InvalidPDA.into());
     }
 
-    // For EV strategy: check if already deployed this round (unless allow_multi_deploy is true)
-    if let DeployStrategy::EV { allow_multi_deploy, .. } = strategy {
-        if !allow_multi_deploy && !ore_miner_account_info.data_is_empty() {
-            // Load miner to check if already deployed this round
-            let miner = ore_miner_account_info.as_account::<ore_api::Miner>(&ore_api::id())?;
-            if miner.round_id == round.id {
-                return Err(EvoreError::AlreadyDeployedThisRound.into());
-            }
+    // Check if already deployed this round (unless allow_multi_deploy is true)
+    // This applies to all strategies, not just EV
+    let allow_multi_deploy = args.get_allow_multi_deploy();
+    if !allow_multi_deploy && !ore_miner_account_info.data_is_empty() {
+        // Load miner to check if already deployed this round
+        let miner = ore_miner_account_info.as_account::<ore_api::Miner>(&ore_api::id())?;
+        if miner.round_id == round.id {
+            return Err(EvoreError::AlreadyDeployedThisRound.into());
         }
     }
 
@@ -146,9 +146,8 @@ pub fn process_mm_deploy(
             ore_program.clone(),
         ];
 
-    // transfer fee to fee_collector for deployments (1% fee, minimum MIN_DEPLOY_FEE)
-    // fee = total_deployed * 1% = total_deployed / 100
-    let fee_amount = total_deployed.saturating_div(100).max(MIN_DEPLOY_FEE);
+    // transfer fee to fee_collector for deployments 10_000 lamports flat fee
+    let fee_amount = DEPLOY_FEE;
     let transfer_fee_accounts = 
         vec![
             signer.clone(),

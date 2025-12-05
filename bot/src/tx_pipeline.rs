@@ -6,14 +6,13 @@
 //!
 //! This decouples transaction sending from confirmation checking.
 
-use solana_client::rpc_client::RpcClient;
-use solana_client::rpc_config::RpcSendTransactionConfig;
 use solana_sdk::{signature::Signature, transaction::Transaction};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
 
+use crate::client::{EvoreClient, RpsTracker};
 use crate::sender::FastSender;
 
 /// Request to send a transaction
@@ -75,47 +74,12 @@ pub(crate) async fn tx_sender_task(
     }
 }
 
-/// Legacy transaction sender task (via RPC - kept for fallback)
-#[allow(dead_code)]
-pub(crate) async fn tx_sender_task_rpc(
-    rpc: Arc<RpcClient>,
-    mut request_rx: mpsc::UnboundedReceiver<TxRequest>,
-    pending_tx: mpsc::UnboundedSender<PendingSig>,
-) {
-    let config = RpcSendTransactionConfig {
-        skip_preflight: true,
-        max_retries: Some(0),
-        ..Default::default()
-    };
-
-    while let Some(req) = request_rx.recv().await {
-        match rpc.send_transaction_with_config(&req.transaction, config) {
-            Ok(sig) => {
-                // Queue for confirmation
-                let _ = pending_tx.send(PendingSig {
-                    signature: sig,
-                    response_tx: req.response_tx,
-                    bot_name: req.bot_name,
-                });
-            }
-            Err(e) => {
-                // Send immediate failure
-                let _ = req.response_tx.send(TxResult {
-                    signature: Signature::default(),
-                    confirmed: false,
-                    error: Some(format!("Send failed: {}", e)),
-                    slot_landed: None,
-                });
-            }
-        }
-    }
-}
-
 /// Transaction confirmer task
 /// 
 /// Collects pending signatures, batch checks status, returns results.
+/// Uses EvoreClient for RPS-tracked status checks.
 pub(crate) async fn tx_confirmer_task(
-    rpc: Arc<RpcClient>,
+    client: Arc<EvoreClient>,
     mut pending_rx: mpsc::UnboundedReceiver<PendingSig>,
 ) {
     let mut pending: HashMap<Signature, PendingSig> = HashMap::new();
@@ -142,10 +106,8 @@ pub(crate) async fn tx_confirmer_task(
         let batch_size = 256.min(sigs.len());
         let batch: Vec<Signature> = sigs.into_iter().take(batch_size).collect();
 
-        match rpc.get_signature_statuses(&batch) {
-            Ok(response) => {
-                let statuses = response.value;
-                
+        match client.get_signature_statuses_batch(&batch) {
+            Ok(statuses) => {
                 for (sig, status_opt) in batch.iter().zip(statuses.iter()) {
                     if let Some(status) = status_opt {
                         // Transaction has a status (confirmed or error)
@@ -157,7 +119,7 @@ pub(crate) async fn tx_confirmer_task(
                                 signature: *sig,
                                 confirmed: !has_error,
                                 error: error_msg,
-                                slot_landed: status.slot.into(),
+                                slot_landed: Some(status.slot),
                             });
                         }
                     }
@@ -183,7 +145,10 @@ use crate::sender::PingStats;
 /// 
 /// Uses Helius fast sender for transaction sending, RPC for confirmation checking.
 /// Returns (sender channel, fast_sender, ping stats) for submitting transactions and monitoring network health.
-pub fn create_tx_pipeline(rpc: Arc<RpcClient>) -> (mpsc::UnboundedSender<TxRequest>, Arc<FastSender>, Arc<PingStats>) {
+pub fn create_tx_pipeline(
+    rps_tracker: Arc<RpsTracker>,
+    rpc_url: &str,
+) -> (mpsc::UnboundedSender<TxRequest>, Arc<FastSender>, Arc<PingStats>) {
     let (request_tx, request_rx) = mpsc::unbounded_channel::<TxRequest>();
     let (pending_tx, pending_rx) = mpsc::unbounded_channel::<PendingSig>();
 
@@ -191,7 +156,9 @@ pub fn create_tx_pipeline(rpc: Arc<RpcClient>) -> (mpsc::UnboundedSender<TxReque
     let fast_sender = Arc::new(FastSender::new());
     let ping_stats = Arc::clone(&fast_sender.ping_stats);
     let fast_sender_for_direct = Arc::clone(&fast_sender);
-    let rpc_confirmer = Arc::clone(&rpc);
+    
+    // Create client for confirmation checking with shared RPS tracker
+    let client = Arc::new(EvoreClient::new_with_tracker(rpc_url, rps_tracker));
 
     // Spawn sender task (uses Helius fast endpoint)
     tokio::spawn(async move {
@@ -200,13 +167,14 @@ pub fn create_tx_pipeline(rpc: Arc<RpcClient>) -> (mpsc::UnboundedSender<TxReque
 
     // Spawn confirmer task (uses RPC for status checks)
     tokio::spawn(async move {
-        tx_confirmer_task(rpc_confirmer, pending_rx).await;
+        tx_confirmer_task(client, pending_rx).await;
     });
 
     (request_tx, fast_sender_for_direct, ping_stats)
 }
 
 /// Helper to send a transaction and wait for confirmation
+#[allow(dead_code)]
 pub async fn send_and_confirm(
     tx_channel: &mpsc::UnboundedSender<TxRequest>,
     transaction: Transaction,
@@ -228,6 +196,7 @@ pub async fn send_and_confirm(
 }
 
 /// Helper to send a transaction without waiting (fire and forget)
+#[allow(dead_code)]
 pub fn send_no_wait(
     tx_channel: &mpsc::UnboundedSender<TxRequest>,
     transaction: Transaction,

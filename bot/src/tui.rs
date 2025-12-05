@@ -29,6 +29,22 @@ use cli_clipboard;
 use evore::ore_api::{Board, Miner, Round, INTERMISSION_SLOTS};
 
 // =============================================================================
+// Bot Icon Pool
+// =============================================================================
+
+/// Pool of unique icons for bots (assigned randomly, no duplicates)
+pub const BOT_ICON_POOL: &[&str] = &[
+    "🤖", "🎯", "🔥", "⚡", "🌟", "💎", "🎲", "🎰", 
+    "🚀", "🌙", "🎪", "🎨", "🎭", "🎵", "🎸",
+];
+
+/// Get a unique icon for a bot based on its index
+/// Uses modulo to wrap around if more bots than icons
+pub fn get_bot_icon(bot_index: usize) -> &'static str {
+    BOT_ICON_POOL[bot_index % BOT_ICON_POOL.len()]
+}
+
+// =============================================================================
 // TUI Update Messages (Bot → TUI)
 // =============================================================================
 
@@ -47,8 +63,18 @@ pub enum TuiUpdate {
     /// Bot status changed
     BotStatusUpdate { bot_index: usize, status: BotStatus },
     
-    /// Bot miner data updated
+    /// Bot miner data updated (full miner struct)
     BotMinerUpdate { bot_index: usize, miner: Miner },
+    
+    /// Miner deployment data update (from periodic polling)
+    MinerDataUpdate { 
+        bot_index: usize, 
+        deployed: [u64; 25], 
+        round_id: u64,
+    },
+    
+    /// Treasury data update (from periodic polling)
+    TreasuryUpdate(crate::treasury_tracker::TreasuryData),
     
     /// Bot deployed this round (amount deployed)
     BotDeployedUpdate { bot_index: usize, amount: u64, round_id: u64 },
@@ -612,6 +638,11 @@ pub struct BotState {
     // Percentage strategy params
     pub percentage: u64,       // In basis points (100 = 1%)
     pub squares_count: u64,    // Number of squares
+    // Per-square deployment tracking (from miner account)
+    /// Deployed amounts per square in current round (from miner polling)
+    pub deployed_per_square: [u64; 25],
+    /// Round ID the bot last played in (from miner polling)
+    pub miner_round_id: u64,
 }
 
 /// Helper to format pubkey as shortened version (7...7)
@@ -633,6 +664,7 @@ pub fn shorten_signature(sig: &Signature) -> String {
 impl BotState {
     pub fn new(
         name: String,
+        bot_index: usize,
         auth_id: u64,
         strategy: String,
         bankroll: u64,
@@ -648,13 +680,8 @@ impl BotState {
         percentage: u64,
         squares_count: u64,
     ) -> Self {
-        // Pick icon based on strategy
-        let icon = match strategy.as_str() {
-            "EV" => "📊",
-            "Percentage" => "📐",
-            "Manual" => "✋",
-            _ => "🤖",
-        };
+        // Assign unique icon from pool based on bot index
+        let icon = get_bot_icon(bot_index);
         
         Self {
             name,
@@ -678,6 +705,8 @@ impl BotState {
             ore_value,
             percentage,
             squares_count,
+            deployed_per_square: [0; 25],
+            miner_round_id: 0,
         }
     }
     
@@ -743,6 +772,9 @@ pub struct App {
     
     // Network stats for footer
     pub network_stats: NetworkStats,
+    
+    // Treasury data
+    pub treasury: Option<crate::treasury_tracker::TreasuryData>,
 }
 
 impl App {
@@ -775,6 +807,7 @@ impl App {
             config_path: None,
             view_mode: ViewMode::default(),
             network_stats: NetworkStats::new(),
+            treasury: None,
         }
     }
     
@@ -970,6 +1003,14 @@ impl App {
         self.bots.push(bot);
     }
     
+    /// Get bot icon by name (for tx log display)
+    pub fn get_bot_icon(&self, bot_name: &str) -> &'static str {
+        self.bots.iter()
+            .find(|b| b.name == bot_name)
+            .map(|b| b.icon)
+            .unwrap_or("🤖")
+    }
+    
     /// Get current round phase
     pub fn round_phase(&self) -> RoundPhase {
         self.board
@@ -1113,7 +1154,16 @@ impl App {
             }
             TuiUpdate::BotMinerUpdate { bot_index, miner } => {
                 if let Some(bot) = self.bots.get_mut(bot_index) {
+                    // Update deployed_per_square from full miner update
+                    bot.deployed_per_square = miner.deployed;
+                    bot.miner_round_id = miner.round_id;
                     bot.miner = Some(miner);
+                }
+            }
+            TuiUpdate::MinerDataUpdate { bot_index, deployed, round_id } => {
+                if let Some(bot) = self.bots.get_mut(bot_index) {
+                    bot.deployed_per_square = deployed;
+                    bot.miner_round_id = round_id;
                 }
             }
             TuiUpdate::BotDeployedUpdate { bot_index, amount, round_id: _ } => {
@@ -1220,6 +1270,9 @@ impl App {
                     self.network_stats.txs_failed = n;
                 }
             }
+            TuiUpdate::TreasuryUpdate(data) => {
+                self.treasury = Some(data);
+            }
         }
     }
 }
@@ -1294,6 +1347,20 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
         app.end_slot().to_string()
     };
     
+    // Format treasury data
+    let treasury_str = app.treasury.as_ref().map(|t| {
+        let balance_sol = t.balance as f64 / 1e9;
+        let motherlode_ore = t.motherlode as f64 / 1e11; // ORE has 11 decimals
+        format!("│ Treasury: {:.2}◎ | ML: {:.0} ORE ", balance_sol, motherlode_ore)
+    }).unwrap_or_default();
+    
+    // Format total deployed from round data
+    let total_deployed_str = app.round.as_ref().map(|r| {
+        let total: u64 = r.deployed.iter().sum();
+        let total_sol = total as f64 / 1e9;
+        format!("│ Deployed: {:.4}◎ ", total_sol)
+    }).unwrap_or_default();
+    
     let line1 = Line::from(vec![
         Span::styled("  ⚡ EVORE ", Style::default().fg(Color::Magenta).bold()),
         Span::styled("│ ", Style::default().fg(Color::DarkGray)),
@@ -1309,6 +1376,8 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
                 Style::default().fg(Color::Yellow)
             }
         ),
+        Span::styled(total_deployed_str, Style::default().fg(Color::Green)),
+        Span::styled(treasury_str, Style::default().fg(Color::Rgb(255, 165, 0))),
     ]);
     
     let line2 = Line::from(vec![
@@ -1640,8 +1709,11 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
 // =============================================================================
 
 /// Draw expanded board grid (when in Board view mode)
+/// Shows total deployed, EV per square, per-bot deployment breakdown, and EV totals
 fn draw_board_grid_expanded(frame: &mut Frame, area: Rect, app: &App) {
-    let view_indicator = format!(" Board (5×5) [Tab: {}] ", app.view_mode.as_str());
+    use crate::ev_calculator::calculate_board_ev;
+    
+    let view_indicator = format!(" Board (5×5) + SOL EV [Tab: {}] ", app.view_mode.as_str());
     let block = Block::default()
         .title(view_indicator)
         .borders(Borders::ALL)
@@ -1649,6 +1721,9 @@ fn draw_board_grid_expanded(frame: &mut Frame, area: Rect, app: &App) {
     
     let inner = block.inner(area);
     frame.render_widget(block, area);
+    
+    // Get current board for round comparison
+    let current_round_id = app.board.as_ref().map(|b| b.round_id).unwrap_or(0);
     
     // If no round data, show placeholder
     let round = match &app.round {
@@ -1662,11 +1737,20 @@ fn draw_board_grid_expanded(frame: &mut Frame, area: Rect, app: &App) {
         }
     };
     
+    // Calculate EV for all squares
+    let board_ev = calculate_board_ev(&round.deployed);
+    
     // Calculate max deployment for color scaling
     let max_deploy = round.deployed.iter().max().copied().unwrap_or(1).max(1);
     let total_deployed: u64 = round.deployed.iter().sum();
     
-    // Build table rows for 5x5 grid with more detail
+    // Collect per-bot deployment info for this round
+    // Only include bots whose miner_round_id matches current round
+    let bot_deployments: Vec<(&BotState, bool)> = app.bots.iter()
+        .map(|bot| (bot, bot.miner_round_id == current_round_id))
+        .collect();
+    
+    // Build table rows for 5x5 grid with EV and per-bot info
     let mut rows = Vec::new();
     
     for row_idx in 0..5 {
@@ -1676,16 +1760,20 @@ fn draw_board_grid_expanded(frame: &mut Frame, area: Rect, app: &App) {
             let idx = row_idx * 5 + col_idx;
             let deployed = round.deployed[idx];
             let sol = deployed as f64 / 1e9;
+            let sq_ev = &board_ev.squares[idx];
             
-            // Format cell content with more detail in expanded view
-            let text = if sol >= 1.0 {
-                format!(" {:>2}: {:>6.3}◎ ", idx, sol)
+            // Build cell content: total + EV + bot breakdown
+            let mut cell_parts: Vec<Span> = Vec::new();
+            
+            // Total amount
+            let total_str = if sol >= 1.0 {
+                format!("{:>2}:{:.2}", idx, sol)
             } else if sol >= 0.001 {
-                format!(" {:>2}: {:>6.4}◎ ", idx, sol)
+                format!("{:>2}:{:.3}", idx, sol)
             } else if deployed > 0 {
-                format!(" {:>2}: {:>7} ", idx, deployed)
+                format!("{:>2}:{}", idx, deployed)
             } else {
-                format!(" {:>2}:    ·    ", idx)
+                format!("{:>2}: ·", idx)
             };
             
             // Color intensity based on deployment
@@ -1696,23 +1784,87 @@ fn draw_board_grid_expanded(frame: &mut Frame, area: Rect, app: &App) {
                 Color::DarkGray
             };
             
-            cells.push(Span::styled(text, Style::default().fg(fg_color)));
+            cell_parts.push(Span::styled(format!("{} ", total_str), Style::default().fg(fg_color)));
+            
+            // EV indicator (compact)
+            if sq_ev.is_positive && sq_ev.expected_profit > 0 {
+                let ev_sol = sq_ev.expected_profit as f64 / 1e9;
+                let ev_str = if ev_sol >= 0.01 {
+                    format!("+{:.2}", ev_sol)
+                } else if ev_sol >= 0.001 {
+                    format!("+{:.3}", ev_sol)
+                } else {
+                    format!("+{:.4}", ev_sol)
+                };
+                cell_parts.push(Span::styled(ev_str, Style::default().fg(Color::Green)));
+            } else if deployed > 0 {
+                cell_parts.push(Span::styled("-EV", Style::default().fg(Color::Red)));
+            }
+            
+            // Add per-bot breakdown (compact) - show if any bot deployed
+            let has_bot_deployment = bot_deployments.iter()
+                .any(|(bot, is_current)| *is_current && bot.deployed_per_square[idx] > 0);
+            
+            if has_bot_deployment {
+                cell_parts.push(Span::styled(" ", Style::default()));
+                for (bot, is_current_round) in &bot_deployments {
+                    if *is_current_round && bot.deployed_per_square[idx] > 0 {
+                        cell_parts.push(Span::styled(bot.icon, Style::default().fg(Color::Yellow)));
+                    }
+                }
+            }
+            
+            cells.push(Line::from(cell_parts));
         }
         
-        rows.push(Row::new(cells).height(1));
+        // Convert Lines to Row
+        let row_cells: Vec<ratatui::widgets::Cell> = cells.into_iter()
+            .map(|line| ratatui::widgets::Cell::from(line))
+            .collect();
+        rows.push(Row::new(row_cells).height(1));
     }
     
-    // Add summary row
-    let summary = Row::new(vec![
+    // Add EV summary row
+    let ev_total_sol = board_ev.total_expected_profit as f64 / 1e9;
+    let ev_stake_sol = board_ev.total_optimal_stake as f64 / 1e9;
+    
+    let ev_summary_spans: Vec<Span> = vec![
+        Span::styled(" EV Summary: ", Style::default().fg(Color::White).bold()),
+        Span::styled(format!("+{} sq ", board_ev.positive_ev_count), Style::default().fg(Color::Green)),
+        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("Stake: {:.4}◎ ", ev_stake_sol), Style::default().fg(Color::Cyan)),
+        Span::styled("│ ", Style::default().fg(Color::DarkGray)),
+        Span::styled(format!("Profit: {:.4}◎", ev_total_sol), 
+            if ev_total_sol > 0.0 { Style::default().fg(Color::Green).bold() } 
+            else { Style::default().fg(Color::Red) }),
+    ];
+    rows.push(Row::new(vec![ratatui::widgets::Cell::from(Line::from(ev_summary_spans))]).height(1));
+    
+    // Add deployed summary row
+    let mut summary_spans: Vec<Span> = vec![
         Span::styled(
-            format!(" Total: {:.4}◎ ({} lamports) | Motherlode: {} ORE", 
+            format!(" Deployed: {:.4}◎ | ML: {} ORE ", 
                 total_deployed as f64 / 1e9, 
-                total_deployed,
                 round.motherlode
             ),
             Style::default().fg(Color::Cyan)
         ),
-    ]).height(1);
+    ];
+    
+    // Add bot legend if any deployed
+    for (bot, is_current_round) in &bot_deployments {
+        if *is_current_round {
+            let bot_total: u64 = bot.deployed_per_square.iter().sum();
+            if bot_total > 0 {
+                summary_spans.push(Span::styled(
+                    format!("│ {} {:.4}◎ ", bot.icon, bot_total as f64 / 1e9),
+                    Style::default().fg(Color::Yellow)
+                ));
+            }
+        }
+    }
+    
+    let summary = Row::new(vec![ratatui::widgets::Cell::from(Line::from(summary_spans))]).height(1);
     rows.push(summary);
     
     let widths = [
@@ -1867,9 +2019,13 @@ fn draw_tx_log(frame: &mut Frame, area: Rect, app: &App) {
             // Selection indicator
             let select_indicator = if is_selected { "► " } else { "  " };
             
+            // Get bot icon for this entry
+            let bot_icon = app.get_bot_icon(&entry.bot_name);
+            
             let mut spans = vec![
                 Span::styled(select_indicator, Style::default().fg(Color::White).bold()),
                 Span::styled(format!("[{}] ", time_str), Style::default().fg(Color::DarkGray)),
+                Span::styled(format!("{} ", bot_icon), Style::default()),
                 Span::styled(format!("{:<8} ", bot_name_display), Style::default().fg(Color::Cyan)),
                 Span::styled(format!("{:<10} ", entry.tx_type.as_str()), Style::default().fg(tx_type_color)),
                 Span::styled(format!("{:<4} ", status_display), Style::default().fg(status_color)),

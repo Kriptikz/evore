@@ -57,7 +57,7 @@ pub async fn run_bot_task(
     let mut last_rewards_ore_before_checkpoint: u64 = 0;
     
     // Get initial signer (fee payer) balance
-    if let Ok(balance) = client.rpc.get_balance(&signer.pubkey()) {
+    if let Ok(balance) = client.get_balance(&signer.pubkey()) {
         let _ = tx.send(TuiUpdate::BotSignerBalanceUpdate {
             bot_index: config.bot_index,
             balance,
@@ -150,9 +150,9 @@ pub async fn run_bot_task(
             }
         }
         
-        // Send slot update
+        // Send slot update (blockhash fetched on demand when needed)
         let current_slot = slot_tracker.get_slot();
-        let blockhash = slot_tracker.get_blockhash();
+        let blockhash = client.get_latest_blockhash().unwrap_or_default();
         let _ = tx.send(TuiUpdate::SlotUpdate { slot: current_slot, blockhash });
         
         let already_deployed = last_round_deployed == Some(board.round_id);
@@ -211,12 +211,15 @@ pub async fn run_bot_task(
                     last_rewards_ore_before_checkpoint = m.rewards_ore;
                 }
                 
-                // Wait for valid blockhash
-                let bh = wait_for_blockhash(&slot_tracker).await;
+                // Get blockhash
+                let bh = wait_for_blockhash_from_client(&client).await;
                 
                 // Send checkpoint
                 let checkpoint_tx = build_checkpoint_tx(&signer, &config.manager, config.auth_id, last_round, bh);
-                match client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
+                let checkpoint_result = client.send_and_confirm_transaction(&checkpoint_tx)
+                    .map_err(|e| e.to_string());
+                
+                match checkpoint_result {
                     Ok(sig) => {
                         last_round_checkpointed = Some(last_round);
                         let _ = tx.send(TuiUpdate::TxEventTyped {
@@ -231,13 +234,13 @@ pub async fn run_bot_task(
                             attempt: None,
                         });
                     }
-                    Err(e) => {
+                    Err(err_msg) => {
                         let _ = tx.send(TuiUpdate::TxEventTyped {
                             bot_name: config.name.clone(),
                             tx_type: TxType::Checkpoint,
                             status: TxStatus::Failed,
                             signature: Signature::default(),
-                            error: Some(format!("{}", e)),
+                            error: Some(err_msg),
                             slot: None,
                             round_id: Some(last_round),
                             amount: None,
@@ -288,9 +291,9 @@ pub async fn run_bot_task(
                     
                     if should_claim {
                         let rewards = miner.rewards_sol;
-                        let bh = wait_for_blockhash(&slot_tracker).await;
+                        let bh = wait_for_blockhash_from_client(&client).await;
                         let claim_tx = build_claim_sol_tx(&signer, &config.manager, config.auth_id, bh);
-                        match client.rpc.send_and_confirm_transaction(&claim_tx) {
+                        match client.send_and_confirm_transaction(&claim_tx) {
                             Ok(sig) => {
                                 let _ = tx.send(TuiUpdate::TxEventTyped {
                                     bot_name: config.name.clone(),
@@ -305,7 +308,7 @@ pub async fn run_bot_task(
                                 });
                                 
                                 // Update signer balance after claim (spent fees)
-                                if let Ok(balance) = client.rpc.get_balance(&signer.pubkey()) {
+                                if let Ok(balance) = client.get_balance(&signer.pubkey()) {
                                     let _ = tx.send(TuiUpdate::BotSignerBalanceUpdate {
                                         bot_index: config.bot_index,
                                         balance,
@@ -394,11 +397,14 @@ pub async fn run_bot_task(
                 break;
             }
             
-            let bh = slot_tracker.get_blockhash();
-            if bh == Hash::default() {
-                sleep(Duration::from_millis(10)).await;
-                continue;
-            }
+            let blockhash_result = client.get_latest_blockhash().map_err(|e| e.to_string());
+            let bh = match blockhash_result {
+                Ok(bh) => bh,
+                Err(_) => {
+                    sleep(Duration::from_millis(10)).await;
+                    continue;
+                }
+            };
             
             let deploy_tx = build_ev_deploy_tx(
                 &signer,
@@ -406,6 +412,7 @@ pub async fn run_bot_task(
                 config.auth_id,
                 board.round_id,
                 &config.params,
+                false,  // allow_multi_deploy - default to false
                 bh,
                 5000,    // default priority fee
                 200_000, // default jito tip (0.0002 SOL)
@@ -558,7 +565,7 @@ pub async fn run_bot_task(
                 }
                 
                 // Update signer balance after deploy (spent fees)
-                if let Ok(balance) = client.rpc.get_balance(&signer.pubkey()) {
+                if let Ok(balance) = client.get_balance(&signer.pubkey()) {
                     let _ = tx.send(TuiUpdate::BotSignerBalanceUpdate {
                         bot_index: config.bot_index,
                         balance,
@@ -575,11 +582,10 @@ pub async fn run_bot_task(
     }
 }
 
-/// Wait for a valid blockhash from the slot tracker
-async fn wait_for_blockhash(slot_tracker: &SlotTracker) -> Hash {
+/// Wait for a valid blockhash from the client
+async fn wait_for_blockhash_from_client(client: &EvoreClient) -> Hash {
     loop {
-        let bh = slot_tracker.get_blockhash();
-        if bh != Hash::default() {
+        if let Ok(bh) = client.get_latest_blockhash() {
             return bh;
         }
         sleep(Duration::from_millis(50)).await;

@@ -22,14 +22,14 @@ use tokio::time::sleep;
 use crate::blockhash_cache::BlockhashCache;
 use crate::board_tracker::BoardTracker;
 use crate::bot_state::{BotPhase, BotState};
-use crate::client::EvoreClient;
+use crate::client::{EvoreClient, RpsTracker};
 use crate::config::StrategyParams;
 use crate::config::DeployStrategy;
 use crate::deploy::{build_checkpoint_tx, build_claim_sol_tx, build_ev_deploy_tx, build_percentage_deploy_tx, EvDeployParams, PercentageDeployParams};
 use crate::round_tracker::RoundTracker;
 use crate::sender::PingStats;
 use crate::slot_tracker::SlotTracker;
-use crate::tui::{BotStatus, TuiUpdate, TxAction, TxType, TxStatus};
+use crate::tui::{BotStatus, TuiUpdate, TxType, TxStatus};
 use crate::tx_pipeline::{create_tx_pipeline, TxRequest};
 
 /// Shared services for all bots
@@ -42,26 +42,23 @@ pub struct SharedServices {
     pub fast_sender: Arc<crate::sender::FastSender>,
     pub ping_stats: Arc<PingStats>,
     pub client: Arc<EvoreClient>,
-    rpc_url: String,
 }
 
 impl SharedServices {
     /// Create and start all shared services
     pub fn new(rpc_url: &str, ws_url: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
+        // Create main client with shared RPS tracker
         let client = Arc::new(EvoreClient::new(rpc_url));
+        let rps_tracker = client.get_rps_tracker();
         
-        // Create trackers
+        // Create trackers with shared RPS tracker
         let slot_tracker = Arc::new(SlotTracker::new(ws_url));
         let board_tracker = Arc::new(BoardTracker::new(ws_url));
-        let round_tracker = Arc::new(RoundTracker::new(ws_url));
-        let blockhash_cache = Arc::new(BlockhashCache::new(rpc_url));
+        let round_tracker = Arc::new(RoundTracker::new(rpc_url, Arc::clone(&rps_tracker)));
+        let blockhash_cache = Arc::new(BlockhashCache::new(rpc_url, Arc::clone(&rps_tracker)));
         
-        // Create tx pipeline using a new RPC client (tx_pipeline needs Arc<RpcClient>)
-        let tx_rpc = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
-            rpc_url.to_string(),
-            solana_sdk::commitment_config::CommitmentConfig::confirmed(),
-        ));
-        let (tx_channel, fast_sender, ping_stats) = create_tx_pipeline(tx_rpc);
+        // Create tx pipeline with shared RPS tracker
+        let (tx_channel, fast_sender, ping_stats) = create_tx_pipeline(Arc::clone(&rps_tracker), rpc_url);
         
         Ok(Self {
             slot_tracker,
@@ -72,7 +69,6 @@ impl SharedServices {
             fast_sender,
             ping_stats,
             client,
-            rpc_url: rpc_url.to_string(),
         })
     }
 
@@ -81,12 +77,10 @@ impl SharedServices {
         self.slot_tracker
             .start_slot_subscription()
             .map_err(|e| format!("Slot subscription: {}", e))?;
-        self.slot_tracker
-            .start_blockhash_subscription(&self.rpc_url)
-            .map_err(|e| format!("Blockhash subscription: {}", e))?;
         self.board_tracker.start_subscription()?;
         self.blockhash_cache.start_polling()?;
-        // Note: RoundTracker needs initial round_id, started when board is available
+        // Start round tracker polling (will wait for round_id to be set via switch_round)
+        self.round_tracker.start();
         Ok(())
     }
 }
@@ -130,7 +124,7 @@ pub async fn run_bot_with_services(
     let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager, auth_id);
     
     // Get initial signer balance
-    if let Ok(balance) = services.client.rpc.get_balance(&signer.pubkey()) {
+    if let Ok(balance) = services.client.get_balance(&signer.pubkey()) {
         let _ = tui_tx.send(TuiUpdate::BotSignerBalanceUpdate {
             bot_index,
             balance,
@@ -235,8 +229,6 @@ pub async fn run_bot_with_services(
         // Update slot/blockhash from caches
         let current_slot = services.slot_tracker.get_slot();
         let blockhash = services.blockhash_cache.get_blockhash();
-        services.blockhash_cache.set_current_slot(current_slot);
-        services.blockhash_cache.set_end_slot(board.end_slot);
         
         let _ = tui_tx.send(TuiUpdate::SlotUpdate { slot: current_slot, blockhash });
 
@@ -274,7 +266,10 @@ pub async fn run_bot_with_services(
                         bh,
                     );
                     
-                    match services.client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
+                    let checkpoint_result = services.client.send_and_confirm_transaction(&checkpoint_tx)
+                        .map_err(|e| e.to_string());
+                    
+                    match checkpoint_result {
                         Ok(sig) => {
                             send_tx_event_typed(&tui_tx, &bot_name, TxType::Checkpoint, TxStatus::Confirmed, sig, None, 
                                 Some(current_slot), Some(last_round), None, None);
@@ -317,7 +312,10 @@ pub async fn run_bot_with_services(
                                         bh,
                                     );
                                     
-                                    match services.client.rpc.send_and_confirm_transaction(&claim_tx) {
+                                    let claim_result = services.client.send_and_confirm_transaction(&claim_tx)
+                                        .map_err(|e| e.to_string());
+                                    
+                                    match claim_result {
                                         Ok(sig) => {
                                             send_tx_event_typed(&tui_tx, &bot_name, TxType::ClaimSol, TxStatus::Confirmed, sig, None,
                                                 Some(current_slot), None, Some(rewards_sol), None);
@@ -328,16 +326,16 @@ pub async fn run_bot_with_services(
                                             });
                                             update_signer_balance(&services, bot_index, &signer, &tui_tx).await;
                                         }
-                                        Err(e) => {
-                                            send_tx_event_typed(&tui_tx, &bot_name, TxType::ClaimSol, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
+                                        Err(err_msg) => {
+                                            send_tx_event_typed(&tui_tx, &bot_name, TxType::ClaimSol, TxStatus::Failed, Signature::default(), Some(err_msg),
                                                 Some(current_slot), None, Some(rewards_sol), None);
                                         }
                                     }
                                 }
                             }
                         }
-                        Err(e) => {
-                            send_tx_event_typed(&tui_tx, &bot_name, TxType::Checkpoint, TxStatus::Failed, Signature::default(), Some(format!("{}", e)),
+                        Err(err_msg) => {
+                            send_tx_event_typed(&tui_tx, &bot_name, TxType::Checkpoint, TxStatus::Failed, Signature::default(), Some(err_msg),
                                 Some(current_slot), Some(last_round), None, None);
                             sleep(Duration::from_millis(500)).await;
                         }
@@ -367,12 +365,9 @@ pub async fn run_bot_with_services(
                     continue;
                 }
                 
-                // Only EV strategy supports multiple attempts (via attempts field in instruction)
-                // Percentage and Manual would create identical txs with same signature
-                let num_attempts = match strategy {
-                    DeployStrategy::EV => attempts,
-                    DeployStrategy::Percentage | DeployStrategy::Manual => 1,
-                };
+                // All strategies respect the attempts config for redundancy
+                // (duplicate txns are fine - provides resilience against dropped packets)
+                let num_attempts = attempts;
                 
                 for attempt in 0..num_attempts {
                     let current = services.slot_tracker.get_slot();
@@ -391,6 +386,7 @@ pub async fn run_bot_with_services(
                                 auth_id,
                                 board.round_id,
                                 &params,
+                                false,  // allow_multi_deploy - default to false
                                 bh,
                                 priority_fee,
                                 jito_tip,
@@ -404,6 +400,7 @@ pub async fn run_bot_with_services(
                                 auth_id,
                                 board.round_id,
                                 &params,
+                                false,  // allow_multi_deploy - default to false
                                 bh,
                                 priority_fee,
                                 jito_tip,
@@ -419,6 +416,7 @@ pub async fn run_bot_with_services(
                                 auth_id,
                                 board.round_id,
                                 &params,
+                                false,  // allow_multi_deploy - default to false
                                 bh,
                                 priority_fee,
                                 jito_tip,
@@ -642,22 +640,6 @@ fn send_status(tx: &mpsc::UnboundedSender<TuiUpdate>, bot_index: usize, status: 
     let _ = tx.send(TuiUpdate::BotStatusUpdate { bot_index, status });
 }
 
-/// Send transaction event (legacy)
-fn send_tx_event(
-    tx: &mpsc::UnboundedSender<TuiUpdate>,
-    bot_name: &str,
-    action: TxAction,
-    signature: Signature,
-    error: Option<String>,
-) {
-    let _ = tx.send(TuiUpdate::TxEvent {
-        bot_name: bot_name.to_string(),
-        action,
-        signature,
-        error,
-    });
-}
-
 /// Send transaction event with type info and details
 fn send_tx_event_typed(
     tx: &mpsc::UnboundedSender<TuiUpdate>,
@@ -691,7 +673,7 @@ async fn update_signer_balance(
     signer: &Keypair,
     tx: &mpsc::UnboundedSender<TuiUpdate>,
 ) {
-    if let Ok(balance) = services.client.rpc.get_balance(&signer.pubkey()) {
+    if let Ok(balance) = services.client.get_balance(&signer.pubkey()) {
         let _ = tx.send(TuiUpdate::BotSignerBalanceUpdate {
             bot_index,
             balance,
@@ -710,7 +692,6 @@ fn build_ev_params_from_values(strategy_params: &StrategyParams, bankroll: u64, 
                 ore_value: *ore_value,
                 slots_left,
                 attempts: 0,  // Will be set per-tx in deploy loop
-                allow_multi_deploy: false,  // Don't allow multiple deploys per round
             }
         }
         _ => EvDeployParams {
@@ -720,7 +701,6 @@ fn build_ev_params_from_values(strategy_params: &StrategyParams, bankroll: u64, 
             ore_value: 800_000_000,
             slots_left,
             attempts: 0,
-            allow_multi_deploy: false,
         }
     }
 }

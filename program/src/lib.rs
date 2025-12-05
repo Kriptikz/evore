@@ -14,7 +14,7 @@ pub mod consts;
 pub mod ore_api;
 pub mod entropy_api;
 
-declare_id!("6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb");
+declare_id!("8jaLKWLJAj5jVCZbxpe3zRUvLB3LD48MRtaQ2AjfCfxa");
 
 #[cfg(not(feature = "no-entrypoint"))]
 solana_program::entrypoint!(process_instruction);

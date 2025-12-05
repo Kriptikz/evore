@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-12-01 (Phase 11 complete, Transaction Sender + Hot-Reload complete, Resilience in progress)
+> Last Updated: 2025-12-04 (All phases complete, polish & monitoring)
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
@@ -615,33 +615,171 @@ async fn tx_confirmer_task(
 
 ### Implementation Tasks (Revised)
 
-**Phase 11a: Shared Services**
-- [ ] Create `BoardTracker` (websocket accountSubscribe to Board PDA)
-- [ ] Create `RoundTracker` (websocket accountSubscribe to Round PDA, switches on round change)
-- [ ] Create `BlockhashCache` (periodic RPC, fast refresh in deploy window)
-- [ ] Wrap all trackers in Arc for sharing
+**Phase 11a: Shared Services** ✅
+- [x] Create `BoardTracker` (websocket accountSubscribe to Board PDA)
+- [x] Create `RoundTracker` (websocket accountSubscribe to Round PDA, switches on round change)
+- [x] Create `BlockhashCache` (periodic RPC, fast refresh in deploy window)
+- [x] Wrap all trackers in Arc for sharing
 
-**Phase 11b: Transaction Pipeline**
-- [ ] Define `TxRequest`, `TxResult`, `PendingSig` structs
-- [ ] Create `TxSender` async task
-- [ ] Create `TxConfirmer` async task with batch status checking
-- [ ] Create mpsc channels for pipeline
+**Phase 11b: Transaction Pipeline** ✅
+- [x] Define `TxRequest`, `TxResult`, `PendingSig` structs
+- [x] Create `TxSender` async task (FastSender with Helius endpoints)
+- [x] Create `TxConfirmer` async task with batch status checking
+- [x] Create mpsc channels for pipeline
 
-**Phase 11c: Bot Refactor**
-- [ ] Define `BotConfig` struct
-- [ ] Define `BotState` struct with state machine
-- [ ] Refactor single bot to use shared services
-- [ ] Bot receives trackers via Arc, sends txs via channel
+**Phase 11c: Bot Refactor** ✅
+- [x] Define `BotConfig` struct
+- [x] Define `BotState` struct with state machine
+- [x] Refactor single bot to use shared services
+- [x] Bot receives trackers via Arc, sends txs via channel
 
-**Phase 11d: Multi-Bot Coordination**
-- [ ] Create `RoundCoordinator` struct
-- [ ] Implement round lifecycle detection (new round, round end)
-- [ ] Implement per-bot checkpoint/claim scheduling
-- [ ] Spawn multiple bots from config file/CLI
-- [ ] Coordinate deploy timing across bots
-- [ ] Add graceful shutdown (`Ctrl+C` handler) - cleanup websockets, cancel pending txs
+**Phase 11d: Multi-Bot Coordination** ✅
+- [x] Create `RoundCoordinator` struct
+- [x] Implement round lifecycle detection (new round, round end)
+- [x] Implement per-bot checkpoint/claim scheduling
+- [x] Spawn multiple bots from config file/CLI
+- [x] Coordinate deploy timing across bots
+- [x] Add graceful shutdown (`Ctrl+C` handler) - cleanup websockets, cancel pending txs
 
-## Phase 12: Frontend UI
+## Phase 12: Improved Board & Deployment Tracking
+> Priority: **HIGH** - Enhanced visibility
+
+### Overview
+Add per-bot deployment tracking on the board grid, unique bot icons, ORE treasury monitoring, miner tracking, and round EV calculations.
+
+### Features
+
+**Unique Bot Icons:**
+- [ ] Pool of unique icons (emoji): 🤖🎯🔥⚡🌟💎🎲🎰🚀🌙🎪🎨🎭🎵🎸
+- [ ] Random assignment at bot creation (no duplicates)
+- [ ] Icon stored in BotState, used everywhere (board, tx log, bot block)
+
+**Transaction Log Enhancement:**
+- [ ] Show bot icon alongside name in tx log entries
+- [ ] Format: `[12:34:56] 🎯 bot-1  DEPLOY  OK  5xKj3...`
+
+**Miner Tracker (for per-bot board display):**
+- [ ] Create `miner_tracker.rs` module
+- [ ] Poll each bot's Miner account (via managed_miner_auth PDA) every 2 seconds
+- [ ] Track Miner fields:
+  - `deployed[25]` - current round deployments per square
+  - `round_id` - the round this miner last played in
+- [ ] Send miner data to TUI for board grid display
+
+**Per-Bot Board Display:**
+- [ ] For each bot, check if `miner.round_id == board.round_id` (meaning deployed this round)
+- [ ] Display bot icon + deployed amount in each square where bot has deployed
+- [ ] Show multiple bots per square if they both deployed there
+- [ ] Clear/update when round changes
+
+**Treasury Tracker:**
+- [ ] Create `treasury_tracker.rs` module
+- [ ] Poll ORE Treasury account via RPC every 2 seconds
+- [ ] Track Treasury fields:
+  - `balance` - SOL collected for buy-bury operations
+  - `motherlode` - ORE in the motherlode rewards pool
+  - `total_unclaimed` - total unclaimed ORE mining rewards
+  - `total_refined` - total refined ORE mining rewards
+  - `total_staked` - total ORE staking deposits
+- [ ] No websocket needed - simple periodic RPC fetch
+
+**TUI Header Enhancement:**
+- [ ] Add treasury data to header
+- [ ] Display: `Treasury: 1234.56 ◎ | Motherlode: 45678.90 ORE | Unclaimed: X | Staked: Y`
+- [ ] Format values with K/M suffixes for large numbers
+
+**Live SOL EV Board Display:**
+- [ ] Calculate pure SOL EV for each square (ore_value = 0, no limits)
+- [ ] Display per square: optimal stake, expected profit
+- [ ] Show board totals: total optimal deployment, total expected profit
+- [ ] Color code: green = +EV, red = -EV
+- [ ] Update in real-time as round data changes
+
+**EV Formula (ore_value = 0):**
+```
+EV_sol = x * (891 * L - 24010 * (T + x)) / (25000 * (T + x))
+where L = S - T (losers pool), T = square total, S = round total
+
+Optimal stake x* (maximizes EV, no limits):
+x* = sqrt(T * 891 * L / 24010) - T
+Expected profit = EV_sol(x*)
+```
+
+### Implementation Tasks
+
+**Phase 12a: Bot Icons**
+- [ ] Create icon pool constant in tui.rs
+- [ ] Add icon selection logic (random, no duplicates)
+- [ ] Update BotState to store assigned icon
+- [ ] Update tx log to show icon with bot name
+
+**Phase 12b: Miner Tracker**
+- [ ] Create `miner_tracker.rs` with RPC polling (every 2s)
+- [ ] Track Miner data for each bot's managed_miner_auth PDA
+- [ ] Add to SharedServices
+- [ ] Add TuiUpdate::MinerDataUpdate variant
+
+**Phase 12c: Per-Bot Board Display**
+- [ ] Update App state with per-bot deployment data
+- [ ] Modify draw_board_grid to show bot icons + amounts
+- [ ] Handle multiple bots per square
+- [ ] Update on round change
+
+**Phase 12d: Treasury Tracker**
+- [ ] Create `treasury_tracker.rs` with RPC polling (every 2s)
+- [ ] Parse Treasury account: balance, motherlode, total_unclaimed, total_refined, total_staked
+- [ ] Integrate with SharedServices
+- [ ] Add TuiUpdate::TreasuryUpdate variant
+
+**Phase 12e: Header Update**
+- [ ] Add treasury fields to App state
+- [ ] Update draw_header to display treasury data
+- [ ] Format: `Treasury: X◎ | Motherlode: Y ORE | Unclaimed: Z | Staked: W`
+
+**Phase 12f: Live SOL EV Board Display**
+- [ ] Calculate pure SOL EV per square (ore_value = 0, no limits)
+- [ ] For each square show: optimal stake x*, expected profit EV(x*)
+- [ ] Board totals: sum of optimal deployments, sum of expected profits
+- [ ] Color code EV: green (+EV), red (-EV/zero)
+- [ ] Update live as round data changes
+
+**EV Formula (from `process_mm_deploy.rs`, pure SOL with ore_value = 0):**
+```
+EV_sol = x * (NUM * L - DEN24 * (T + x)) / (C_LAM * (T + x))
+
+where:
+- x = stake on this square (lamports)
+- T = total deployed on this square before our stake
+- S = total deployed across all 25 squares
+- L = S - T (losers pool - total on other squares)
+
+Constants:
+- NUM = 891 (89.1% - fraction of losers' pool to winners)
+- DEN24 = 24_010 (derived from 1/P(win) adjusted for 89.1%)
+- C_LAM = 25_000 (25 squares * 1000 fixed-point multiplier)
+
+Optimal stake (no limits, maximizes EV):
+x* = sqrt(T * NUM * L / DEN24) - T
+   = sqrt(T * 891 * L / 24010) - T
+
+Expected profit at optimal stake:
+EV(x*) = x* * (891 * L - 24010 * (T + x*)) / (25000 * (T + x*))
+```
+
+**Board Display:**
+- Per square: optimal stake (x*), expected profit (EV)
+- Totals: Σ x* (total to deploy), Σ EV (total expected profit)
+- All calculations assume unlimited bankroll (pure theoretical EV)
+
+**Phase 12g: Round Tracker Stability Fix**
+- [ ] Option: Convert `round_tracker.rs` from WebSocket to RPC polling (like treasury_tracker)
+- [ ] Fixes: Board `deployed[]` and `total_deployed` values jumping/inconsistent
+- [ ] Poll Round account every 1-2 seconds for stable display
+- [ ] Keeps WebSocket for board/slot (fast updates needed), polling for Round (stability)
+
+---
+
+## Phase 13: Frontend UI
 > Priority: **LOW** - Future
 
 - [ ] Dashboard for round monitoring
@@ -665,8 +803,9 @@ async fn tx_confirmer_task(
 | Phase 8: Mainnet Deployment | ✅ Complete | 100% (3/3) |
 | Phase 9: Evore Bot v1 | ✅ Complete | 100% (11/11) |
 | Phase 10: Dashboard TUI | ✅ Complete | 100% (8/8) |
-| Phase 11: Multi-Bot Architecture | ✅ Complete | 100% (12/12) |
-| Phase 12: Frontend UI | 🔴 Not Started | 0% |
+| Phase 11: Multi-Bot Architecture | ✅ Complete | 100% (18/18) |
+| Phase 12: Board & Treasury | 🔴 Not Started | 0% |
+| Phase 13: Frontend UI | 🔴 Not Started | 0% |
 
 ---
 
@@ -702,9 +841,12 @@ State 4: current_slot >= end_slot + 35
 
 ## Notes
 
-- Phases 1-11 complete! Multi-bot architecture built and ready.
+- Phases 1-11 complete! Multi-bot architecture fully operational.
 - Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
 - 27+ unit tests with comprehensive coverage
 - Workspace structure: `program/` (Solana program), `bot/` (deployment bot)
 - Multi-bot architecture: SharedServices, RoundCoordinator, TOML config, graceful shutdown
-- Next: Wire up multi-bot dashboard, then Phase 12 Frontend UI
+- Transaction sending: FastSender with Helius endpoints (East/West), 4x auto-retry, Jito tips
+- Network monitoring: WS status, RPC status, RPS tracking, ping latency, tx counters
+- TUI features: Cursor nav, clipboard copy, config reload, session reset, togglable views
+- Next: Phase 12 (Board & Treasury tracking), then Phase 13 (Frontend UI)

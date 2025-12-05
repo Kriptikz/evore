@@ -1,8 +1,80 @@
 # Current Tasks
 
-> Last Updated: 2025-12-01 (Resilience complete, TUI Layout improvements in progress)
+> Last Updated: 2025-12-04 (Phase 12: Board & Treasury Tracking)
 
 ## Active
+
+### Task 37: Phase 12 - Improved Board & Deployment Tracking ✅
+**Priority:** 🟢 High
+**Status:** Complete (7/7 phases)
+
+Enhanced board visualization, miner tracking, treasury monitoring, and EV display.
+
+**Phase 12a: Bot Icons** ✅
+- [x] Create icon pool: 🤖🎯🔥⚡🌟💎🎲🎰🚀🌙🎪🎨🎭🎵🎸
+- [x] Unique icon assignment at bot creation (based on bot_index)
+- [x] Store icon in BotState
+- [x] Show icon in tx log: `[12:34:56] 🎯 bot-1  DEPLOY  OK  5xKj3...`
+
+**Phase 12b: Miner Tracker** ✅
+- [x] Create `miner_tracker.rs` module
+- [x] Poll each bot's Miner account (managed_miner_auth PDA) every 2 seconds
+- [x] Track: `deployed[25]`, `round_id`
+- [x] Check if deployed this round: `miner.round_id == board.round_id`
+- [x] Add TuiUpdate::MinerDataUpdate variant
+
+**Phase 12c: Per-Bot Board Display** ✅
+- [x] Update App state with per-bot deployment arrays (deployed_per_square, miner_round_id)
+- [x] Modify draw_board_grid to show bot icons + amounts per square
+- [x] Handle multiple bots deploying to same square
+- [x] Clear/update on round change (uses miner_round_id == board.round_id)
+
+**Phase 12d: Treasury Tracker** ✅
+- [x] Create `treasury_tracker.rs` module
+- [x] Poll ORE Treasury (TREASURY_ADDRESS) via RPC every 2 seconds
+- [x] Parse fields: `balance`, `motherlode`, `total_unclaimed`, `total_refined`, `total_staked`
+- [x] Add TuiUpdate::TreasuryUpdate variant
+
+**Phase 12e: Header Update** ✅
+- [x] Add treasury fields to App state
+- [x] Display: `Treasury: X◎ | ML: Y ORE` in header
+- [x] Format with SOL/ORE units
+
+**Phase 12f: Live SOL EV Board Display** ✅
+- [x] Calculate pure SOL EV per square using program's formula (ore_value = 0):
+  ```
+  EV_sol = x * (891 * L - 24010 * (T + x)) / (25000 * (T + x))
+  Optimal stake: x* = sqrt(T * 891 * L / 24010) - T
+  ```
+- [x] Created `ev_calculator.rs` module with EV calculations
+- [x] Per-square display: total deployed, EV indicator (+EV green, -EV red)
+- [x] Board totals: +EV square count, total stake, total expected profit
+- [x] Bot icons shown for squares where bots deployed
+- [x] Color coded: green = +EV, red = -EV
+- [x] Real-time updates as round data changes
+
+**Phase 12g: Round Tracker Stability Fix** ✅
+- [x] Converted `round_tracker.rs` from WebSocket to RPC polling
+- [x] Fixes board `deployed[]` and `total_deployed` jumping values
+- [x] Poll Round account every 1 second
+- [x] Keep WS for board/slot (fast updates), use RPC polling for Round (stability)
+
+---
+
+### Task 36: TUI Polish & Bug Fixes ✅
+**Priority:** 🟢 High
+**Completed:** 2025-12-01
+
+- [x] Auth ID displayed next to bot name
+- [x] Fixed tx counters for checkpoint/claim
+- [x] Deploy transactions now use FastSender
+- [x] RPS tracking with timestamp list
+- [x] Totals display in footer
+- [x] Tx counters: OK/FAIL/MISS categorization
+
+---
+
+## Completed Recently
 
 ### Task 32: TUI Layout & Network Stats ✅
 **Priority:** 🟢 High
@@ -18,20 +90,16 @@ Improve TUI layout with togglable views and add network monitoring footer.
 **Network Stats Footer:**
 - [x] WebSocket connection status (SlotTracker, BoardTracker, RoundTracker)
 - [x] RPC connection status
-- [x] Requests per second (RPS)
+- [x] RPC RPS with total requests
+- [x] Sender RPS with total sends
 - [x] Ping latency to Helius sender endpoints (East/West)
-- [x] Transactions: missed vs total count with miss rate %
+- [x] Transaction counts: OK/FAIL/MISS with miss rate %
 
 **Implementation:**
 - [x] Add NetworkStats struct to track metrics
 - [x] Add ConnectionStatus enum for WS/RPC health
 - [x] Add ViewMode enum (TxLog, Board)
-- [x] Add TuiUpdate variants for network stats
-- [x] Update TUI to render footer with all stats
-- [x] Wire up connection status from SlotTracker, BoardTracker, RoundTracker
-- [x] Wire up RPC connection status
-- [x] Wire up ping stats from sender (East/West latency)
-- [x] Track tx counters (sent/confirmed/failed) from TxEventTyped logs
+- [x] Wire up all connection statuses and RPS tracking
 
 ---
 
@@ -39,17 +107,13 @@ Improve TUI layout with togglable views and add network monitoring footer.
 **Priority:** 🔴 Urgent
 **Completed:** 2025-12-01
 
-Make the bot resilient for long-running sessions. No println/eprintln that mess up TUI, quiet retries for all connections.
+Make the bot resilient for long-running sessions.
 
 **Subtasks:**
-- [x] Remove all println!/eprintln! from runtime code (replace with TUI status or silent handling)
-- [x] Add quiet websocket reconnection with exponential backoff for:
-  - SlotTracker
-  - BoardTracker
-  - RoundTracker
+- [x] Remove all println!/eprintln! from runtime code
+- [x] Add quiet websocket reconnection with exponential backoff
 - [x] Ensure RPC errors don't crash or print to stdout
-- [x] Add graceful recovery for all error paths (no unexpected halts)
-- [ ] Test 24+ hour runtime stability
+- [x] Add graceful recovery for all error paths
 
 ---
 
@@ -57,30 +121,20 @@ Make the bot resilient for long-running sessions. No println/eprintln that mess 
 **Priority:** 🟢 High
 **Completed:** 2025-12-01
 
-Improved transaction sending for better landing rates.
-
 **Subtasks:**
-- [x] Create FastSender with Helius endpoint (http://ewr-sender.helius-rpc.com/fast)
-- [x] Add automatic retry queue (4 sends per transaction)
-- [x] Use both East (Newark) and West (Salt Lake City) endpoints
-- [x] Alternate sends: even → East, odd → West
-- [x] Add Jito tip instruction to all deploy transactions
-- [x] Randomize tip account per transaction build
-- [x] Add jito_tip and priority_fee to config and TUI display
+- [x] Create FastSender with Helius endpoints (East + West)
+- [x] Automatic 4x retry queue (2x East, 2x West per tx)
+- [x] Add Jito tip instruction with randomized tip account
+- [x] Deploy transactions routed through FastSender
+- [x] RPS tracking for sender HTTP requests
 
 ---
 
 ### Task 29: Config Hot-Reload ✅
-**Priority:** 🟢 High
 **Completed:** 2025-12-01
 
-Allow runtime config updates without restarting bots.
-
-**Subtasks:**
-- [x] Wrap BotRunConfig in Arc<RwLock<>> for shared access
-- [x] Add update_bot_config method to RoundCoordinator
+- [x] BotRunConfig wrapped in Arc<RwLock<>> for runtime updates
 - [x] Config reload updates actual deployment values (not just TUI)
-- [x] Update bankroll, slots_left, priority_fee, jito_tip, strategy_params
 
 ---
 
@@ -97,20 +151,19 @@ Allow runtime config updates without restarting bots.
 ### Task 35: Tracker Account Failsafes
 **Priority:** 🟡 Medium
 
-Add fallback RPC polling for tracker data to ensure reliability when WebSockets fail.
+Add fallback RPC polling for tracker data when WebSockets fail.
 
 **Implementation:**
 - Create `tracker_failsafe.rs` module
-- Periodically fetch all necessary accounts in one `getMultipleAccounts` RPC call
-- Accounts to fetch: Board, Round, Miner accounts for each bot
-- If WebSocket data is stale (>X seconds), use RPC-fetched data instead
-- Update trackers with fresh data from RPC as backup
-- Configurable polling interval (e.g., every 5-10 seconds)
+- Periodically fetch accounts via `getMultipleAccounts` RPC call
+- Accounts: Board, Round, Miner accounts for each bot
+- If WebSocket data stale (>X seconds), use RPC data as backup
+- Configurable polling interval (5-10 seconds)
 
 ---
 
 - Task 34: Frontend UI (web dashboard)
-- Add `ClaimOre` CLI command (instruction exists in `mm_claim_ore`, command missing in bot)
+- Add `ClaimOre` CLI command
 - Add inline documentation for all public functions
 - Create client SDK documentation
 

@@ -24,7 +24,6 @@ pub enum DeployStrategy {
         ore_value: u64,
         slots_left: u64,
         attempts: u64,  // Attempt counter - makes each tx unique for same blockhash
-        allow_multi_deploy: bool,  // If false, fail if already deployed this round
     },
     /// Percentage-based: deploy to own X% of each square across Y squares
     Percentage {
@@ -72,7 +71,8 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
 /// Layout (272 bytes total):
 /// - auth_id: [u8; 8] - Manager auth ID
 /// - bump: u8 - PDA bump
-/// - _pad: [u8; 7] - Padding for alignment
+/// - allow_multi_deploy: u8 - If 0, fail if already deployed this round (applies to all strategies)
+/// - _pad: [u8; 6] - Padding for alignment
 /// - data: [u8; 256] - Strategy data where:
 ///   - data[0]: strategy discriminant (0 = EV, 1 = Percentage, 2 = Manual)
 ///   
@@ -83,7 +83,6 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
 ///     - data[25..33]: ore_value
 ///     - data[33..41]: slots_left
 ///     - data[41..49]: attempts (makes each tx unique for same blockhash)
-///     - data[49]: allow_multi_deploy (0 = false, 1 = true)
 ///   
 ///   Percentage (strategy = 1):
 ///     - data[1..9]: bankroll
@@ -97,19 +96,20 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
 pub struct MMDeploy {
     pub auth_id: [u8; 8],
     pub bump: u8,
-    pub _pad: [u8; 7],
+    pub allow_multi_deploy: u8,
+    pub _pad: [u8; 6],
     pub data: [u8; 256],
 }
 
 instruction!(Instructions, MMDeploy);
 
 impl MMDeploy {
-    /// Create MMDeploy instruction data from auth_id, bump, and strategy enum
-    pub fn new(auth_id: u64, bump: u8, strategy: DeployStrategy) -> Self {
+    /// Create MMDeploy instruction data from auth_id, bump, allow_multi_deploy, and strategy enum
+    pub fn new(auth_id: u64, bump: u8, allow_multi_deploy: bool, strategy: DeployStrategy) -> Self {
         let mut data = [0u8; 256];
         
         match strategy {
-            DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left, attempts, allow_multi_deploy } => {
+            DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left, attempts } => {
                 data[0] = 0; // EV strategy
                 data[1..9].copy_from_slice(&bankroll.to_le_bytes());
                 data[9..17].copy_from_slice(&max_per_square.to_le_bytes());
@@ -117,7 +117,6 @@ impl MMDeploy {
                 data[25..33].copy_from_slice(&ore_value.to_le_bytes());
                 data[33..41].copy_from_slice(&slots_left.to_le_bytes());
                 data[41..49].copy_from_slice(&attempts.to_le_bytes());
-                data[49] = if allow_multi_deploy { 1 } else { 0 };
             },
             DeployStrategy::Percentage { bankroll, percentage, squares_count } => {
                 data[0] = 1; // Percentage strategy
@@ -138,7 +137,8 @@ impl MMDeploy {
         Self {
             auth_id: auth_id.to_le_bytes(),
             bump,
-            _pad: [0; 7],
+            allow_multi_deploy: if allow_multi_deploy { 1 } else { 0 },
+            _pad: [0; 6],
             data,
         }
     }
@@ -155,8 +155,7 @@ impl MMDeploy {
                 let ore_value = u64::from_le_bytes(self.data[25..33].try_into().unwrap());
                 let slots_left = u64::from_le_bytes(self.data[33..41].try_into().unwrap());
                 let attempts = u64::from_le_bytes(self.data[41..49].try_into().unwrap());
-                let allow_multi_deploy = self.data[49] != 0;
-                Ok(DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left, attempts, allow_multi_deploy })
+                Ok(DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, slots_left, attempts })
             },
             1 => { // Percentage
                 let bankroll = u64::from_le_bytes(self.data[1..9].try_into().unwrap());
@@ -175,6 +174,11 @@ impl MMDeploy {
             },
             _ => Err(()),
         }
+    }
+
+    /// Check if allow_multi_deploy is enabled
+    pub fn get_allow_multi_deploy(&self) -> bool {
+        self.allow_multi_deploy != 0
     }
 }
 
@@ -235,13 +239,12 @@ pub fn ev_deploy(
         ore_value,
         slots_left,
         attempts,
-        allow_multi_deploy,
     };
 
     Instruction {
         program_id: crate::id(),
         accounts,
-        data: MMDeploy::new(auth_id, bump, strategy).to_bytes(),
+        data: MMDeploy::new(auth_id, bump, allow_multi_deploy, strategy).to_bytes(),
     }
 }
 
@@ -254,6 +257,7 @@ pub fn percentage_deploy(
     bankroll: u64,
     percentage: u64,      // In basis points (1000 = 10%)
     squares_count: u64,   // Number of squares (1-25)
+    allow_multi_deploy: bool,
 ) -> Instruction {
     let (accounts, bump) = build_deploy_accounts(signer, manager, auth_id, round_id);
     
@@ -266,7 +270,7 @@ pub fn percentage_deploy(
     Instruction {
         program_id: crate::id(),
         accounts,
-        data: MMDeploy::new(auth_id, bump, strategy).to_bytes(),
+        data: MMDeploy::new(auth_id, bump, allow_multi_deploy, strategy).to_bytes(),
     }
 }
 
@@ -277,6 +281,7 @@ pub fn manual_deploy(
     auth_id: u64,
     round_id: u64,
     amounts: [u64; 25],   // Amount to deploy on each square (0 = skip)
+    allow_multi_deploy: bool,
 ) -> Instruction {
     let (accounts, bump) = build_deploy_accounts(signer, manager, auth_id, round_id);
     
@@ -285,7 +290,7 @@ pub fn manual_deploy(
     Instruction {
         program_id: crate::id(),
         accounts,
-        data: MMDeploy::new(auth_id, bump, strategy).to_bytes(),
+        data: MMDeploy::new(auth_id, bump, allow_multi_deploy, strategy).to_bytes(),
     }
 }
 

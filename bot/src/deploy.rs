@@ -39,7 +39,6 @@ pub struct EvDeployParams {
     pub ore_value: u64,
     pub slots_left: u64,
     pub attempts: u64,  // Attempt counter - makes each tx unique for same blockhash
-    pub allow_multi_deploy: bool,  // If false, fail if already deployed this round
 }
 
 impl Default for EvDeployParams {
@@ -51,7 +50,6 @@ impl Default for EvDeployParams {
             ore_value: 800_000_000,      // 0.8 SOL
             slots_left: 2,
             attempts: 0,
-            allow_multi_deploy: false,  // Default: don't allow multi-deploy
         }
     }
 }
@@ -63,6 +61,7 @@ pub fn build_ev_deploy_tx(
     auth_id: u64,
     round_id: u64,
     params: &EvDeployParams,
+    allow_multi_deploy: bool,
     recent_blockhash: Hash,
     priority_fee: u64,  // micro-lamports per CU
     jito_tip: u64,      // lamports for Jito tip (0 to disable)
@@ -80,7 +79,7 @@ pub fn build_ev_deploy_tx(
         params.ore_value,
         params.slots_left,
         params.attempts,
-        params.allow_multi_deploy,
+        allow_multi_deploy,
     );
 
     // Build instructions: CU limit → CU price → Jito tip → Deploy
@@ -118,6 +117,7 @@ pub fn build_percentage_deploy_tx(
     auth_id: u64,
     round_id: u64,
     params: &PercentageDeployParams,
+    allow_multi_deploy: bool,
     recent_blockhash: Hash,
     priority_fee: u64,  // micro-lamports per CU
     jito_tip: u64,      // lamports for Jito tip (0 to disable)
@@ -134,6 +134,7 @@ pub fn build_percentage_deploy_tx(
         params.bankroll,
         params.percentage,
         params.squares_count,
+        allow_multi_deploy,
     );
 
     // Build instructions: CU limit → CU price → Jito tip → Deploy
@@ -208,11 +209,11 @@ pub async fn single_deploy(
     
     // Show account balances
     println!("--- Account Balances ---");
-    let signer_balance = client.rpc.get_balance(&signer.pubkey()).unwrap_or(0);
+    let signer_balance = client.get_balance(&signer.pubkey()).unwrap_or(0);
     println!("Signer ({}):", signer.pubkey());
     println!("  Balance: {} lamports ({:.6} SOL)", signer_balance, signer_balance as f64 / 1e9);
     
-    let auth_balance = client.rpc.get_balance(&managed_miner_auth).unwrap_or(0);
+    let auth_balance = client.get_balance(&managed_miner_auth).unwrap_or(0);
     println!("Managed Miner Auth ({}):", managed_miner_auth);
     println!("  Balance: {} lamports ({:.6} SOL)", auth_balance, auth_balance as f64 / 1e9);
     
@@ -352,14 +353,14 @@ pub async fn single_deploy(
             break;
         }
         
-        // Get fresh blockhash from tracker
-        let blockhash = slot_tracker.get_blockhash();
-        
-        // Skip if blockhash is default (not yet received)
-        if blockhash == Hash::default() {
-            sleep(Duration::from_millis(10)).await;
-            continue;
-        }
+        // Get fresh blockhash
+        let blockhash = match client.get_latest_blockhash() {
+            Ok(bh) => bh,
+            Err(_) => {
+                sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+        };
         
         let tx = build_ev_deploy_tx(
             signer,
@@ -367,6 +368,7 @@ pub async fn single_deploy(
             auth_id,
             board.round_id,
             params,
+            false,   // allow_multi_deploy - default to false for single_deploy
             blockhash,
             5000,    // default priority fee
             200_000, // default jito tip
@@ -469,11 +471,13 @@ pub async fn deploy_quiet(
         }
         
         // Get fresh blockhash
-        let blockhash = slot_tracker.get_blockhash();
-        if blockhash == Hash::default() {
-            sleep(Duration::from_millis(10)).await;
-            continue;
-        }
+        let blockhash = match client.get_latest_blockhash() {
+            Ok(bh) => bh,
+            Err(_) => {
+                sleep(Duration::from_millis(10)).await;
+                continue;
+            }
+        };
         
         let tx = build_ev_deploy_tx(
             signer,
@@ -481,6 +485,7 @@ pub async fn deploy_quiet(
             auth_id,
             board.round_id,
             params,
+            false,   // allow_multi_deploy - default to false for deploy_quiet
             blockhash,
             5000,    // default priority fee
             200_000, // default jito tip
@@ -614,18 +619,12 @@ pub async fn continuous_deploy(
             if last_round_checkpointed != Some(last_round) {
                 println!("\n--- Checkpointing previous round {} ---", last_round);
                 
-                // Wait for blockhash
-                let blockhash = loop {
-                    let bh = slot_tracker.get_blockhash();
-                    if bh != Hash::default() {
-                        break bh;
-                    }
-                    sleep(Duration::from_millis(100)).await;
-                };
+                // Get blockhash
+                let blockhash = client.get_latest_blockhash()?;
                 
                 // Checkpoint
                 let checkpoint_tx = build_checkpoint_tx(signer, manager, auth_id, last_round, blockhash);
-                match client.rpc.send_and_confirm_transaction(&checkpoint_tx) {
+                match client.send_and_confirm_transaction(&checkpoint_tx) {
                     Ok(sig) => {
                         println!("✓ Checkpoint confirmed: {}", sig);
                         last_round_checkpointed = Some(last_round);
@@ -638,9 +637,9 @@ pub async fn continuous_deploy(
                 let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(*manager, auth_id);
                 if let Ok(Some(miner)) = client.get_miner(&managed_miner_auth) {
                     if miner.rewards_sol > 0 {
-                        let blockhash = slot_tracker.get_blockhash();
+                        let blockhash = client.get_latest_blockhash()?;
                         let claim_tx = build_claim_sol_tx(signer, manager, auth_id, blockhash);
-                        match client.rpc.send_and_confirm_transaction(&claim_tx) {
+                        match client.send_and_confirm_transaction(&claim_tx) {
                             Ok(sig) => println!("✓ Claim SOL confirmed: {} ({} lamports)", sig, miner.rewards_sol),
                             Err(e) => println!("✗ Claim SOL failed: {}", e),
                         }

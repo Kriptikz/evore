@@ -102,11 +102,13 @@ pub fn add_board_account(
     round_id: u64,
     start_slot: u64,
     end_slot: u64,
+    epoch_id: u64,
 ) -> Board {
     let board = Board {
         round_id,
         start_slot,
         end_slot,
+        epoch_id,
     };
     
     let mut data = Vec::new();
@@ -147,6 +149,7 @@ pub fn add_round_account(
         top_miner: Pubkey::default(),
         top_miner_reward: 0,
         total_deployed,
+        total_miners: 0,
         total_vaulted: 0,
         total_winnings: 0,
     };
@@ -193,6 +196,7 @@ pub fn add_ore_miner_account(
         round_id,
         lifetime_rewards_sol: 0,
         lifetime_rewards_ore: 0,
+        lifetime_deployed: 0,
     };
 
     let mut data = Vec::new();
@@ -328,7 +332,7 @@ pub fn setup_deploy_test_accounts(
     let end_slot = current_slot + slots_until_end;
     
     // Board with specified timing
-    let board = add_board_account(program_test, round_id, current_slot, end_slot);
+    let board = add_board_account(program_test, round_id, current_slot, end_slot, 0);
     
     // Round with varied deployments - some squares have high bets (making other squares +EV)
     // Total deployed: ~15 SOL, spread unevenly to create EV+ opportunities
@@ -471,7 +475,7 @@ mod ev_deploy {
         // Setup accounts - round already ended (end_slot in past)
         let current_slot = 1000;
         let end_slot = current_slot - 10; // Round already ended!
-        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot - 100, end_slot);
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot - 100, end_slot, 0);
         add_round_account(&mut program_test, TEST_ROUND_ID, [1_000_000_000u64; 25], 25_000_000_000, end_slot + 1000);
         add_entropy_var_account(&mut program_test, board_pda().0, end_slot);
         add_treasury_account(&mut program_test);
@@ -899,7 +903,7 @@ mod ev_deploy {
         for i in 0..25 {
             high_deployed[i] = 100_000_000_000; // 100 SOL per square already deployed
         }
-        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 5);
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 5, 0);
         add_round_account(&mut program_test, TEST_ROUND_ID, high_deployed, 2_500_000_000_000, current_slot + 1000);
         add_entropy_var_account(&mut program_test, board_pda().0, current_slot + 5);
         add_treasury_account(&mut program_test);
@@ -1039,6 +1043,7 @@ mod percentage_deploy {
             500_000_000,  // bankroll (0.5 SOL)
             1000,         // 10% (1000 basis points)
             5,            // deploy to 5 squares
+            true,         // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -1103,6 +1108,7 @@ mod percentage_deploy {
             500_000_000,  // bankroll
             0,            // 0% - invalid
             5,
+            true,         // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -1149,6 +1155,7 @@ mod percentage_deploy {
             500_000_000,  // bankroll
             1000,         // 10%
             0,            // 0 squares - invalid
+            true,         // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -1208,6 +1215,7 @@ mod manual_deploy {
             auth_id,
             TEST_ROUND_ID,
             amounts,
+            true,  // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -1271,6 +1279,7 @@ mod manual_deploy {
             auth_id,
             TEST_ROUND_ID,
             amounts,
+            true,  // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -1316,6 +1325,7 @@ mod manual_deploy {
             auth_id,
             TEST_ROUND_ID,
             amounts,
+            true,  // allow_multi_deploy
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -1343,7 +1353,7 @@ mod checkpoint {
         
         // Setup accounts but DON'T create manager - add empty account
         let current_slot = 1000;
-        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100);
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100, 0);
         add_round_account(&mut program_test, TEST_ROUND_ID, [0u64; 25], 0, current_slot + 1000);
         add_treasury_account(&mut program_test);
         add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
@@ -1392,7 +1402,7 @@ mod checkpoint {
         
         // Setup with wrong PDA
         let current_slot = 1000;
-        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100);
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100, 0);
         add_round_account(&mut program_test, TEST_ROUND_ID, [0u64; 25], 0, current_slot + 1000);
         add_treasury_account(&mut program_test);
         add_ore_miner_account(&mut program_test, wrong_managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);
@@ -1432,7 +1442,7 @@ mod checkpoint {
         
         // Setup minimal accounts
         let current_slot = 1000;
-        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100);
+        add_board_account(&mut program_test, TEST_ROUND_ID, current_slot, current_slot + 100, 0);
         add_round_account(&mut program_test, TEST_ROUND_ID, [0u64; 25], 0, current_slot + 1000);
         add_treasury_account(&mut program_test);
         add_ore_miner_account(&mut program_test, managed_miner_auth.0, [0u64; 25], 0, 0, TEST_ROUND_ID - 1, TEST_ROUND_ID - 1);

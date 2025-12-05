@@ -165,9 +165,15 @@ impl RoundCoordinator {
         self.services.round_tracker.is_connected()
     }
     
-    /// Check if RPC is connected
+    /// Check if RPC is connected (determined by successful RPC calls)
     pub fn is_rpc_connected(&self) -> bool {
-        self.services.slot_tracker.is_rpc_connected()
+        // RPC is "connected" if we've made at least one successful request
+        self.services.client.rps_tracker.get_total() > 0
+    }
+    
+    /// Get the shared RPS tracker for monitoring
+    pub fn get_rps_tracker(&self) -> Arc<crate::client::RpsTracker> {
+        self.services.client.get_rps_tracker()
     }
     
     /// Get current RPC RPS (requests per second)

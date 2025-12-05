@@ -17,10 +17,13 @@ mod client;
 mod config;
 mod coordinator;
 mod deploy;
+mod ev_calculator;
+mod miner_tracker;
 mod round_tracker;
 mod sender;
 mod shutdown;
 mod slot_tracker;
+mod treasury_tracker;
 mod tui;
 mod tx_pipeline;
 
@@ -263,7 +266,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ore_value: *ore_value,
                 slots_left: *slots_left,
                 attempts: 0,
-                allow_multi_deploy: false,
             };
             
             println!("Signer:  {}", signer.pubkey());
@@ -275,7 +277,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             let slot_tracker = SlotTracker::new(&ws_url);
             slot_tracker.start_slot_subscription()?;
-            slot_tracker.start_blockhash_subscription(&args.rpc_url)?;
             
             // Wait for initial slot data
             println!("\nConnecting to websocket...");
@@ -301,7 +302,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ore_value: *ore_value,
                 slots_left: *slots_left,
                 attempts: 0,
-                allow_multi_deploy: false,
             };
             
             // Start slot tracker
@@ -310,7 +310,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             let slot_tracker = SlotTracker::new(&ws_url);
             slot_tracker.start_slot_subscription()?;
-            slot_tracker.start_blockhash_subscription(&args.rpc_url)?;
             
             // Wait for initial slot data
             println!("Connecting to websocket...");
@@ -395,10 +394,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             
             println!("Checkpointing round {}...", target_round);
             
-            let blockhash = client.rpc.get_latest_blockhash()?;
+            let blockhash = client.get_latest_blockhash()?;
             let tx = deploy::build_checkpoint_tx(&signer, &manager, *auth_id, target_round, blockhash);
             
-            match client.rpc.send_and_confirm_transaction(&tx) {
+            match client.send_and_confirm_transaction(&tx) {
                 Ok(sig) => println!("✓ Checkpoint confirmed: {}", sig),
                 Err(e) => println!("✗ Checkpoint failed: {}", e),
             }
@@ -413,10 +412,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             println!("Signer:  {}", signer.pubkey());
             println!("Manager: {}", manager);
             
-            let blockhash = client.rpc.get_latest_blockhash()?;
+            let blockhash = client.get_latest_blockhash()?;
             let tx = deploy::build_claim_sol_tx(&signer, &manager, *auth_id, blockhash);
             
-            match client.rpc.send_and_confirm_transaction(&tx) {
+            match client.send_and_confirm_transaction(&tx) {
                 Ok(sig) => println!("✓ Claim SOL confirmed: {}", sig),
                 Err(e) => println!("✗ Claim SOL failed: {}", e),
             }
@@ -455,7 +454,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     println!("Manager account does not exist. Creating...");
                     
                     let ix = evore::instruction::create_manager(signer.pubkey(), manager);
-                    let blockhash = client.rpc.get_latest_blockhash()?;
+                    let blockhash = client.get_latest_blockhash()?;
                     let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
                         &[ix],
                         Some(&signer.pubkey()),
@@ -463,7 +462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         blockhash,
                     );
                     
-                    match client.rpc.send_and_confirm_transaction(&tx) {
+                    match client.send_and_confirm_transaction(&tx) {
                         Ok(sig) => {
                             println!("✓ Manager created: {}", sig);
                             println!();
@@ -497,7 +496,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     ore_value: *ore_value,
                     slots_left: *slots_left,
                     attempts: 0,
-                    allow_multi_deploy: false,
                 };
                 
                 run_dashboard(
@@ -545,6 +543,7 @@ async fn run_dashboard(
     let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager, auth_id);
     let bot = BotState::new(
         bot_name.clone(),
+        0,  // bot_index (single bot mode)
         auth_id,
         strategy,
         params.bankroll,
@@ -565,7 +564,6 @@ async fn run_dashboard(
     // Start slot tracker
     let slot_tracker = Arc::new(SlotTracker::new(&ws_url));
     slot_tracker.start_slot_subscription()?;
-    slot_tracker.start_blockhash_subscription(rpc_url)?;
     
     // Wait for initial connection
     tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
@@ -627,9 +625,9 @@ async fn run_tui_loop(
             }
         }
         
-        // Update slot/blockhash from tracker (for display freshness)
+        // Update slot from tracker (for display freshness)
+        // Note: blockhash is updated via TuiUpdate::SlotUpdate from bot task
         app.update_slot(slot_tracker.get_slot());
-        app.update_blockhash(slot_tracker.get_blockhash());
         
         // Draw UI
         terminal.draw(|frame| tui::draw(frame, app))?;
@@ -704,7 +702,7 @@ async fn run_dashboard_with_config(
                 println!("  → {} - Creating manager account...", bot_config.name);
                 
                 let ix = evore::instruction::create_manager(signer_keypair.pubkey(), manager_pubkey);
-                let blockhash = setup_client.rpc.get_latest_blockhash()?;
+                let blockhash = setup_client.get_latest_blockhash()?;
                 let tx = solana_sdk::transaction::Transaction::new_signed_with_payer(
                     &[ix],
                     Some(&signer_keypair.pubkey()),
@@ -712,7 +710,7 @@ async fn run_dashboard_with_config(
                     blockhash,
                 );
                 
-                match setup_client.rpc.send_and_confirm_transaction(&tx) {
+                match setup_client.send_and_confirm_transaction(&tx) {
                     Ok(sig) => println!("    ✓ Created: {}", sig),
                     Err(e) => return Err(format!("Failed to create manager for {}: {}", bot_config.name, e).into()),
                 }
@@ -736,7 +734,7 @@ async fn run_dashboard_with_config(
     app.set_config_path(config_path.to_string());
     
     // Add bot states to app
-    for (_index, bot_config) in config.bots.iter().enumerate() {
+    for (index, bot_config) in config.bots.iter().enumerate() {
         // Extract strategy params
         let (max_per_square, min_bet, ore_value, percentage, squares_count) = match &bot_config.strategy_params {
             crate::config::StrategyParams::EV { max_per_square, min_bet, ore_value } => {
@@ -762,6 +760,7 @@ async fn run_dashboard_with_config(
         let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager_keypair.pubkey(), bot_config.auth_id);
         let bot_state = BotState::new(
             bot_config.name.clone(),
+            index,  // bot_index for unique icon assignment
             bot_config.auth_id,
             format!("{:?}", bot_config.strategy),
             bot_config.bankroll,
@@ -795,6 +794,26 @@ async fn run_dashboard_with_config(
     // Spawn bots from config
     coordinator.spawn_bots_from_config(&config)?;
     
+    // Get RPS tracker from coordinator for shared tracking
+    let rps_tracker = coordinator.get_rps_tracker();
+    
+    // Create miner tracker for per-bot deployment polling
+    let mut miner_tracker = miner_tracker::MinerTracker::new(rpc_url, Arc::clone(&rps_tracker), update_tx.clone());
+    for (index, bot_config) in config.bots.iter().enumerate() {
+        // Get manager pubkey to derive miner PDA
+        let manager_path = config.get_manager_path(bot_config);
+        if let Ok(manager_keypair) = solana_sdk::signature::read_keypair_file(&manager_path) {
+            let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager_keypair.pubkey(), bot_config.auth_id);
+            // Add the authority (managed_miner_auth), the tracker will derive the miner PDA
+            miner_tracker.add_miner(index, managed_miner_auth);
+        }
+    }
+    miner_tracker.start();
+    
+    // Create treasury tracker for ORE treasury data
+    let treasury_tracker = treasury_tracker::TreasuryTracker::new(rpc_url, Arc::clone(&rps_tracker), update_tx.clone());
+    treasury_tracker.start();
+    
     println!("Started {} bot(s). Press 'q' to quit.\n", coordinator.bot_count());
     
     // Setup shutdown handler
@@ -803,7 +822,6 @@ async fn run_dashboard_with_config(
     // Create slot tracker for TUI updates
     let slot_tracker = Arc::new(SlotTracker::new(&ws_url));
     slot_tracker.start_slot_subscription()?;
-    slot_tracker.start_blockhash_subscription(rpc_url)?;
     
     // Main TUI loop
     let result = async {
@@ -820,9 +838,9 @@ async fn run_dashboard_with_config(
                 }
             }
             
-            // Update slot/blockhash
+            // Update slot from tracker
+            // Note: blockhash is updated via TuiUpdate::SlotUpdate from bot tasks
             app.update_slot(slot_tracker.get_slot());
-            app.update_blockhash(slot_tracker.get_blockhash());
             
             // Update network stats from sender and trackers
             let ping_stats = coordinator.get_ping_stats();
