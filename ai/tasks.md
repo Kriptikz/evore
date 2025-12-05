@@ -1,8 +1,81 @@
 # Current Tasks
 
-> Last Updated: 2025-12-04 (Phase 12: Board & Treasury Tracking)
+> Last Updated: 2025-12-05 (Phase 14: Play/Pause, Phase 15: Manage Command)
 
 ## Active
+
+### Task 38: Phase 14 - Play/Pause Feature
+**Priority:** 🟢 High
+**Status:** Not Started (0/3 phases)
+
+Add play/pause functionality to control individual bot activity.
+
+**Phase 14a: Config & State**
+- [ ] Add `paused_on_startup: bool` to BotConfig struct
+- [ ] Add `Paused` variant to BotPhase enum
+- [ ] Add `is_paused: bool` to BotState
+- [ ] Parse `paused_on_startup` from TOML config
+- [ ] Initialize bot state with paused if configured
+
+**Phase 14b: Bot Runner Updates**
+- [ ] Skip all activity in main loop when `is_paused == true`
+- [ ] On unpause: trigger data reload (fetch miner, check checkpoint)
+- [ ] Add `Loading` state between Paused and normal operation
+- [ ] Handle pause during deployment (finish current tx, then pause)
+
+**Phase 14c: TUI Integration**
+- [ ] Add ▶️ (play) / ⏸️ (pause) icon to bot block
+- [ ] Make icon selectable with cursor
+- [ ] Toggle pause on Enter when icon selected
+- [ ] Add P hotkey to toggle pause for selected bot
+- [ ] Send TuiUpdate::BotPauseToggle event
+- [ ] Update bot status display for Paused state
+
+---
+
+### Task 39: Phase 15 - Manage Command (Miner Management TUI)
+**Priority:** 🟢 High
+**Status:** Not Started (0/5 phases)
+
+New CLI command with TUI for managing mining accounts across multiple signers and programs.
+
+**Phase 15a: Config & Discovery**
+- [ ] Add `[manage]` section to config with `signers_path` and `secondary_program_id`
+- [ ] Create `manage_config.rs` module for parsing
+- [ ] Implement signer keypair loading from directory (glob *.json)
+- [ ] Implement `get_managers_by_authority()` with memcmp filter (offset=8)
+- [ ] Implement `get_miners_for_manager()` with auth_id loop (1, 2, 3... until not found)
+- [ ] Add `old_program_authority_pda()` function for secondary program
+
+**Phase 15b: CLI Command**
+- [ ] Add `manage` subcommand to CLI
+- [ ] Load manage config section
+- [ ] Initialize account discovery
+- [ ] Launch manage TUI
+
+**Phase 15c: Manage TUI Layout**
+- [ ] Create `manage_tui.rs` module
+- [ ] Design miner card widget with selectable actions
+- [ ] Grid layout for miner cards (responsive to terminal size)
+- [ ] Distinguish legacy miners with program ID marker (start/end chars)
+- [ ] Status bar with signer/manager/miner counts
+
+**Phase 15d: Action Execution**
+- [ ] Implement checkpoint action (build & send tx)
+- [ ] Implement claim_sol action (build & send tx)
+- [ ] Implement claim_ore action (build & send tx)
+- [ ] Transaction status feedback (spinner, success/fail)
+- [ ] Refresh miner data after action completion
+
+**Phase 15e: Legacy Program Support**
+- [ ] Parse `secondary_program_id` from config
+- [ ] Implement old program account discovery with custom authority_pda
+- [ ] Build legacy claim_sol/claim_ore transactions (no checkpoint)
+- [ ] Display legacy miners with program ID prefix/suffix
+
+---
+
+## Completed Recently
 
 ### Task 37: Phase 12 - Improved Board & Deployment Tracking ✅
 **Priority:** 🟢 High
@@ -74,8 +147,6 @@ Enhanced board visualization, miner tracking, treasury monitoring, and EV displa
 
 ---
 
-## Completed Recently
-
 ### Task 32: TUI Layout & Network Stats ✅
 **Priority:** 🟢 High
 **Completed:** 2025-12-01
@@ -140,13 +211,21 @@ Make the bot resilient for long-running sessions.
 
 ## Up Next
 
+### Task 38: Phase 14 - Play/Pause Feature
+See Active section above.
+
+### Task 39: Phase 15 - Manage Command
+See Active section above.
+
+---
+
+## Backlog
+
 ### Task 33: Performance & Reliability Improvements
 **Priority:** 🟡 Medium
 
 - [ ] Add retry logic for failed checkpoints
 - [ ] Timeout tracking for pending transactions
-
-## Backlog
 
 ### Task 35: Tracker Account Failsafes
 **Priority:** 🟡 Medium
@@ -162,7 +241,16 @@ Add fallback RPC polling for tracker data when WebSockets fail.
 
 ---
 
-- Task 34: Frontend UI (web dashboard)
+### ~~Task 34: Legacy Evore Frontend UI~~
+**Priority:** ⚪ Backlog (Deprioritized)
+
+~~- [ ] Dashboard for round monitoring~~
+~~- [ ] Manual deployment interface~~
+~~- [ ] Wallet connection~~
+~~- [ ] Claim interface~~
+
+---
+
 - Add `ClaimOre` CLI command
 - Add inline documentation for all public functions
 - Create client SDK documentation

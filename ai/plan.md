@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-12-04 (All phases complete, polish & monitoring)
+> Last Updated: 2025-12-05 (Phase 14: Play/Pause, Phase 15: Manage Command)
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
@@ -779,13 +779,267 @@ EV(x*) = x* * (891 * L - 24010 * (T + x*)) / (25000 * (T + x*))
 
 ---
 
-## Phase 13: Frontend UI
-> Priority: **LOW** - Future
+## Phase 14: Play/Pause Feature
+> Priority: **HIGH** - Bot control enhancement
 
-- [ ] Dashboard for round monitoring
-- [ ] Manual deployment interface
-- [ ] Wallet connection
-- [ ] Claim interface
+### Overview
+Add play/pause functionality to control bot activity. When paused, bots stop all activity (no data loading, no deployments). Includes `paused_on_startup` config option.
+
+### Config Changes
+
+```toml
+[[bots]]
+name = "EV ORE"
+auth_id = 1
+strategy = "ev"
+paused_on_startup = true  # New: bot starts paused
+# ... rest of config
+```
+
+### Bot State Machine Update
+
+```
+                    ┌─────────────────┐
+                    │     Paused      │◄─── Toggle with spacebar/P
+                    │  ⏸️ No activity │     No data loading, no deploys
+                    └────────┬────────┘
+                             │ Unpause
+                             ▼
+                    ┌─────────────────┐
+                    │   Loading       │◄─── Fetch miner data, check
+                    │                 │     if checkpoint needed
+                    └────────┬────────┘
+                             │ Data loaded
+                             ▼
+                    ┌─────────────────┐
+                    │   Idle/Waiting  │◄─── Resume normal operation
+                    │   (existing)    │
+                    └─────────────────┘
+```
+
+### TUI Updates
+- [ ] Add ▶️/⏸️ icon to bot block (toggle with cursor + Enter or P key)
+- [ ] Paused status shows: `Status: ⏸️ Paused`
+- [ ] Paused bots skip all activity (no checkpoint, no deploy, no claim)
+- [ ] On unpause: load miner data, checkpoint if needed, then normal cycle
+
+### Implementation Tasks
+
+**Phase 14a: Config & State**
+- [ ] Add `paused_on_startup: bool` to BotConfig struct
+- [ ] Add `Paused` variant to BotPhase enum
+- [ ] Add `is_paused: bool` to BotState
+- [ ] Parse `paused_on_startup` from TOML config
+- [ ] Initialize bot state with paused if configured
+
+**Phase 14b: Bot Runner Updates**
+- [ ] Skip all activity in main loop when `is_paused == true`
+- [ ] On unpause: trigger data reload (fetch miner, check checkpoint)
+- [ ] Add `Loading` state between Paused and normal operation
+- [ ] Handle pause during deployment (finish current tx, then pause)
+
+**Phase 14c: TUI Integration**
+- [ ] Add ▶️ (play) / ⏸️ (pause) icon to bot block
+- [ ] Make icon selectable with cursor
+- [ ] Toggle pause on Enter when icon selected
+- [ ] Add P hotkey to toggle pause for selected bot
+- [ ] Send TuiUpdate::BotPauseToggle event
+- [ ] Update bot status display for Paused state
+
+---
+
+## Phase 15: Manage Command (Miner Management TUI)
+> Priority: **HIGH** - Account management interface
+
+### Overview
+New `manage` CLI command that launches a TUI for managing mining accounts across multiple signers and programs. Displays all miners the signers have authority over, with clickable commands.
+
+### Config Changes
+
+```toml
+# New section for manage command
+[manage]
+signers_path = "/path/to/signers/directory"  # Directory containing signer keypairs
+secondary_program_id = "OLD_PROGRAM_ID_HERE"  # Optional: old program for claim-only
+```
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                         Manage TUI                                   │
+│  - Loads signer keypairs from signers_path directory                │
+│  - Fetches managers by authority filter (data slice)                │
+│  - Fetches miners per manager using authority_pda                   │
+│  - Displays miners in grid/list with action icons                   │
+└─────────────────────────────────────────────────────────────────────┘
+                              ▲
+                              │
+┌─────────────────────────────┴────────────────────────────────────────┐
+│                     Account Discovery                                 │
+├───────────────────────────────────────────────────────────────────────┤
+│ 1. Load all .json keypairs from signers_path                         │
+│ 2. For each signer pubkey:                                           │
+│    - getProgramAccounts(Evore) with memcmp filter:                   │
+│      offset=8 (discriminator), bytes=signer_pubkey (32 bytes)        │
+│    - Returns Manager accounts where signer is authority              │
+│ 3. For each Manager:                                                 │
+│    - Calculate authority_pda(manager, auth_id) for auth_id=1,2,3...  │
+│    - Fetch miner at authority_pda until account not found            │
+│    - Collect all miners                                              │
+│ 4. If secondary_program_id configured:                               │
+│    - Same process but with old_program_authority_pda()               │
+│    - Mark miners as "legacy" in display                              │
+└───────────────────────────────────────────────────────────────────────┘
+```
+
+### Account Discovery Details
+
+**Manager Account Layout:**
+```
+Offset 0-7:   Discriminator (8 bytes)
+Offset 8-39:  Authority pubkey (32 bytes) ← filter on this
+Offset 40+:   Other fields...
+```
+
+**getProgramAccounts Filter:**
+```rust
+let filters = vec![
+    RpcFilterType::Memcmp(Memcmp {
+        offset: 8,  // Skip discriminator
+        bytes: MemcmpEncodedBytes::Base58(signer_pubkey.to_string()),
+        encoding: None,
+    }),
+];
+rpc.get_program_accounts_with_config(EVORE_PROGRAM_ID, config)?
+```
+
+**Miner Discovery Loop:**
+```rust
+// For primary program
+for auth_id in 1.. {
+    let authority_pda = evore_authority_pda(manager, auth_id);
+    let miner = get_miner(authority_pda);
+    if miner.is_none() { break; }
+    miners.push(miner);
+}
+
+// For secondary program (if configured)
+for auth_id in 1.. {
+    let authority_pda = old_program_authority_pda(manager, auth_id);
+    let miner = get_miner_old_program(authority_pda);
+    if miner.is_none() { break; }
+    legacy_miners.push((miner, "OLD_PRG"));
+}
+```
+
+### TUI Layout
+
+```
+┌─────────────────────────────────────────────────────────────────────────┐
+│                        MINER MANAGEMENT                                  │
+│  Signers: 3 loaded | Managers: 5 | Miners: 12 | Legacy: 8               │
+└─────────────────────────────────────────────────────────────────────────┘
+
+┌─────────────────────────┐ ┌─────────────────────────┐ ┌─────────────────────────┐
+│ 📦 Miner #1             │ │ 📦 Miner #2             │ │ 📦 Miner #3             │
+│ Manager: 7xKj3...4mN2   │ │ Manager: 7xKj3...4mN2   │ │ Manager: 9pQr5...8sT1   │
+│ Auth ID: 1              │ │ Auth ID: 2              │ │ Auth ID: 1              │
+│ Signer: 5aB...2cD       │ │ Signer: 5aB...2cD       │ │ Signer: 6eF...3gH       │
+│ ─────────────────────── │ │ ─────────────────────── │ │ ─────────────────────── │
+│ Claimable SOL: 0.234 ◎  │ │ Claimable SOL: 0.567 ◎  │ │ Claimable SOL: 0.123 ◎  │
+│ Claimable ORE: 12.5     │ │ Claimable ORE: 8.2      │ │ Claimable ORE: 45.1     │
+│ ─────────────────────── │ │ ─────────────────────── │ │ ─────────────────────── │
+│ [✓] Checkpoint          │ │ [✓] Checkpoint          │ │ [✓] Checkpoint          │
+│ [💰] Claim SOL          │ │ [💰] Claim SOL          │ │ [💰] Claim SOL          │
+│ [⛏️] Claim ORE          │ │ [⛏️] Claim ORE          │ │ [⛏️] Claim ORE          │
+└─────────────────────────┘ └─────────────────────────┘ └─────────────────────────┘
+
+┌─────────────────────────┐ ┌─────────────────────────┐
+│ 📦 Legacy Miner #1      │ │ 📦 Legacy Miner #2      │
+│ [6kJM...prHb] OLD       │ │ [6kJM...prHb] OLD       │
+│ Manager: 2tUv1...6wX3   │ │ Manager: 2tUv1...6wX3   │
+│ Auth ID: 1              │ │ Auth ID: 2              │
+│ ─────────────────────── │ │ ─────────────────────── │
+│ Claimable SOL: 1.234 ◎  │ │ Claimable SOL: 0.890 ◎  │
+│ Claimable ORE: 100.5    │ │ Claimable ORE: 55.2     │
+│ ─────────────────────── │ │ ─────────────────────── │
+│ [💰] Claim SOL          │ │ [💰] Claim SOL          │  ← No checkpoint for legacy
+│ [⛏️] Claim ORE          │ │ [⛏️] Claim ORE          │
+└─────────────────────────┘ └─────────────────────────┘
+
+┌─────────────────────────────────────────────────────────────────────────┐
+│  [↑↓] Navigate  [Enter] Execute Action  [R] Refresh  [Q] Quit          │
+└─────────────────────────────────────────────────────────────────────────┘
+```
+
+### Action Commands
+
+**For Current Program Miners:**
+- **Checkpoint** - Checkpoint the miner's pending rewards
+- **Claim SOL** - Claim accumulated SOL rewards
+- **Claim ORE** - Claim accumulated ORE rewards
+
+**For Legacy (Secondary Program) Miners:**
+- **Claim SOL** - Claim SOL from old program
+- **Claim ORE** - Claim ORE from old program
+- No checkpoint (old program may have different mechanics)
+
+### PDA Functions
+
+```rust
+// Current program authority PDA
+pub fn evore_authority_pda(manager: Pubkey, auth_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"authority", manager.as_ref(), &auth_id.to_le_bytes()],
+        &EVORE_PROGRAM_ID,
+    ).0
+}
+
+// Old program authority PDA (claim-only)
+pub fn old_program_authority_pda(manager: Pubkey, auth_id: u64) -> Pubkey {
+    Pubkey::find_program_address(
+        &[b"authority", manager.as_ref(), &auth_id.to_le_bytes()],
+        &OLD_PROGRAM_ID,  // Secondary program ID from config
+    ).0
+}
+```
+
+### Implementation Tasks
+
+**Phase 15a: Config & Discovery**
+- [ ] Add `[manage]` section to config with `signers_path` and `secondary_program_id`
+- [ ] Create `manage_config.rs` module for parsing
+- [ ] Implement signer keypair loading from directory (glob *.json)
+- [ ] Implement `get_managers_by_authority()` with memcmp filter (offset=8)
+- [ ] Implement `get_miners_for_manager()` with auth_id loop
+- [ ] Add `old_program_authority_pda()` function for secondary program
+
+**Phase 15b: CLI Command**
+- [ ] Add `manage` subcommand to CLI
+- [ ] Load manage config section
+- [ ] Initialize account discovery
+- [ ] Launch manage TUI
+
+**Phase 15c: Manage TUI Layout**
+- [ ] Create `manage_tui.rs` module
+- [ ] Design miner card widget with selectable actions
+- [ ] Grid layout for miner cards (responsive to terminal size)
+- [ ] Distinguish legacy miners with program ID marker
+- [ ] Status bar with signer/manager/miner counts
+
+**Phase 15d: Action Execution**
+- [ ] Implement checkpoint action (build & send tx)
+- [ ] Implement claim_sol action (build & send tx)
+- [ ] Implement claim_ore action (build & send tx)
+- [ ] Transaction status feedback (spinner, success/fail)
+- [ ] Refresh miner data after action completion
+
+**Phase 15e: Legacy Program Support**
+- [ ] Parse `secondary_program_id` from config
+- [ ] Implement old program account discovery
+- [ ] Build legacy claim_sol/claim_ore transactions
+- [ ] Display legacy miners with program ID prefix/suffix
 
 ---
 
@@ -804,8 +1058,10 @@ EV(x*) = x* * (891 * L - 24010 * (T + x*)) / (25000 * (T + x*))
 | Phase 9: Evore Bot v1 | ✅ Complete | 100% (11/11) |
 | Phase 10: Dashboard TUI | ✅ Complete | 100% (8/8) |
 | Phase 11: Multi-Bot Architecture | ✅ Complete | 100% (18/18) |
-| Phase 12: Board & Treasury | 🔴 Not Started | 0% |
-| Phase 13: Frontend UI | 🔴 Not Started | 0% |
+| Phase 12: Board & Treasury | ✅ Complete | 100% (7/7) |
+| Phase 14: Play/Pause | 🔴 Not Started | 0% |
+| Phase 15: Manage Command | 🔴 Not Started | 0% |
+| ~~Phase 13: Legacy Evore Frontend~~ | ⚪ Backlog | - |
 
 ---
 
@@ -839,9 +1095,21 @@ State 4: current_slot >= end_slot + 35
 
 ---
 
+## Backlog
+
+### ~~Phase 13: Legacy Evore Frontend UI~~
+> Priority: **BACKLOG** - Deprioritized
+
+~~- [ ] Dashboard for round monitoring~~
+~~- [ ] Manual deployment interface~~
+~~- [ ] Wallet connection~~
+~~- [ ] Claim interface~~
+
+---
+
 ## Notes
 
-- Phases 1-11 complete! Multi-bot architecture fully operational.
+- Phases 1-12 complete! Multi-bot architecture fully operational with treasury tracking.
 - Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
 - 27+ unit tests with comprehensive coverage
 - Workspace structure: `program/` (Solana program), `bot/` (deployment bot)
@@ -849,4 +1117,4 @@ State 4: current_slot >= end_slot + 35
 - Transaction sending: FastSender with Helius endpoints (East/West), 4x auto-retry, Jito tips
 - Network monitoring: WS status, RPC status, RPS tracking, ping latency, tx counters
 - TUI features: Cursor nav, clipboard copy, config reload, session reset, togglable views
-- Next: Phase 12 (Board & Treasury tracking), then Phase 13 (Frontend UI)
+- Next: Phase 14 (Play/Pause), Phase 15 (Manage Command)
