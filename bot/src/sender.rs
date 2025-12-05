@@ -55,7 +55,7 @@ pub const HELIUS_EAST_PING: &str = "http://ewr-sender.helius-rpc.com/ping";
 pub const HELIUS_WEST_PING: &str = "http://slc-sender.helius-rpc.com/ping";
 
 /// Number of times to send each transaction (4 = 2x East + 2x West)
-const SENDS_PER_TX: u8 = 4;
+const SENDS_PER_TX: u8 = 2;
 
 /// Interval between sends in milliseconds
 const SEND_INTERVAL_MS: u64 = 100;
