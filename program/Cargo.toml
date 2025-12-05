@@ -1,7 +1,7 @@
 [package]
 name = "evore"
-version.workspace = true
-edition.workspace = true
+version = { workspace = true }
+edition = { workspace = true }
 
 [lib]
 crate-type = ["cdylib", "lib"]
@@ -12,18 +12,18 @@ no-entrypoint = []
 default = []
 
 [dependencies]
-bytemuck.workspace = true
-bytemuck_derive.workspace = true
-num_enum.workspace = true
-serde.workspace = true
-solana-program.workspace = true
-spl-token.workspace = true
-spl-pod.workspace = true
-spl-associated-token-account.workspace = true
-thiserror.workspace = true
-steel.workspace = true
+bytemuck = { workspace = true }
+bytemuck_derive = { workspace = true }
+num_enum = { workspace = true }
+serde = { workspace = true }
+solana-program = { workspace = true }
+spl-token = { workspace = true }
+spl-pod = { workspace = true }
+spl-associated-token-account = { workspace = true }
+thiserror = { workspace = true }
+steel = { workspace = true }
 
 [dev-dependencies]
-solana-program-test.workspace = true
-solana-sdk.workspace = true
-tokio.workspace = true
+solana-program-test = { workspace = true }
+solana-sdk = { workspace = true }
+tokio = { workspace = true }
