@@ -70,6 +70,7 @@ impl RoundCoordinator {
             attempts: bot_config.attempts,
             priority_fee: bot_config.priority_fee,
             jito_tip: bot_config.jito_tip,
+            is_paused: bot_config.paused_on_startup,
         }));
 
         // Store config for runtime updates
@@ -99,6 +100,25 @@ impl RoundCoordinator {
         cfg.strategy_params = new_config.strategy_params.clone();
         
         Ok(())
+    }
+    
+    /// Toggle pause state for a bot
+    pub async fn toggle_bot_pause(&self, bot_index: usize) -> Result<bool, String> {
+        let config = self.bot_configs.get(bot_index)
+            .ok_or_else(|| format!("Bot {} not found", bot_index))?;
+        
+        let mut cfg = config.write().await;
+        cfg.is_paused = !cfg.is_paused;
+        Ok(cfg.is_paused)
+    }
+    
+    /// Get pause state for a bot
+    pub async fn is_bot_paused(&self, bot_index: usize) -> Result<bool, String> {
+        let config = self.bot_configs.get(bot_index)
+            .ok_or_else(|| format!("Bot {} not found", bot_index))?;
+        
+        let cfg = config.read().await;
+        Ok(cfg.is_paused)
     }
 
     /// Spawn multiple bots from full config
@@ -220,6 +240,7 @@ pub async fn run_single_bot(
         attempts: 4,
         priority_fee: 5000,  // Default priority fee
         jito_tip: 200_000,   // Default jito tip (0.0002 SOL)
+        paused_on_startup: false,
         strategy_params,
         signer_path: None,
         manager_path: None,

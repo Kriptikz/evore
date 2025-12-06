@@ -1,6 +1,6 @@
 # Evore Development Plan
 
-> Last Updated: 2025-12-05 (Phase 14: Play/Pause, Phase 15: Manage Command)
+> Last Updated: 2025-12-05 (Phase 14: Play/Pause Complete, Phase 15: Manage Command)
 
 ## Phase 1: Security Fixes (Critical)
 > Priority: **IMMEDIATE** - Must complete before any deployment
@@ -818,33 +818,33 @@ paused_on_startup = true  # New: bot starts paused
 ```
 
 ### TUI Updates
-- [ ] Add ▶️/⏸️ icon to bot block (toggle with cursor + Enter or P key)
-- [ ] Paused status shows: `Status: ⏸️ Paused`
-- [ ] Paused bots skip all activity (no checkpoint, no deploy, no claim)
-- [ ] On unpause: load miner data, checkpoint if needed, then normal cycle
+- [x] Add ▶️/⏸️ icon to bot block (toggle with cursor + Enter or P key)
+- [x] Paused status shows: `Status: ⏸️ Paused`
+- [x] Paused bots skip all activity (no checkpoint, no deploy, no claim)
+- [x] On unpause: load miner data, checkpoint if needed, then normal cycle
 
 ### Implementation Tasks
 
-**Phase 14a: Config & State**
-- [ ] Add `paused_on_startup: bool` to BotConfig struct
-- [ ] Add `Paused` variant to BotPhase enum
-- [ ] Add `is_paused: bool` to BotState
-- [ ] Parse `paused_on_startup` from TOML config
-- [ ] Initialize bot state with paused if configured
+**Phase 14a: Config & State** ✅
+- [x] Add `paused_on_startup: bool` to BotConfig struct
+- [x] Add `Paused` and `Loading` variants to BotPhase enum
+- [x] Add `is_paused: bool` and `needs_reload: bool` to BotState
+- [x] Parse `paused_on_startup` from TOML config
+- [x] Initialize bot state with paused if configured
 
-**Phase 14b: Bot Runner Updates**
-- [ ] Skip all activity in main loop when `is_paused == true`
-- [ ] On unpause: trigger data reload (fetch miner, check checkpoint)
-- [ ] Add `Loading` state between Paused and normal operation
-- [ ] Handle pause during deployment (finish current tx, then pause)
+**Phase 14b: Bot Runner Updates** ✅
+- [x] Skip all activity in main loop when `is_paused == true`
+- [x] On unpause: trigger data reload (fetch miner, check checkpoint)
+- [x] Add `Loading` state between Paused and normal operation
+- [x] Handle pause transition via coordinator toggle
 
-**Phase 14c: TUI Integration**
-- [ ] Add ▶️ (play) / ⏸️ (pause) icon to bot block
-- [ ] Make icon selectable with cursor
-- [ ] Toggle pause on Enter when icon selected
-- [ ] Add P hotkey to toggle pause for selected bot
-- [ ] Send TuiUpdate::BotPauseToggle event
-- [ ] Update bot status display for Paused state
+**Phase 14c: TUI Integration** ✅
+- [x] Add ▶️ (play) / ⏸️ (pause) icon to bot block
+- [x] Make icon selectable with cursor (first selectable element)
+- [x] Toggle pause on Enter when icon selected
+- [x] Add P hotkey to toggle pause for selected bot
+- [x] Add TuiUpdate::BotPauseUpdate event
+- [x] Update bot status display for Paused/Loading states
 
 ---
 
@@ -1059,7 +1059,7 @@ pub fn old_program_authority_pda(manager: Pubkey, auth_id: u64) -> Pubkey {
 | Phase 10: Dashboard TUI | ✅ Complete | 100% (8/8) |
 | Phase 11: Multi-Bot Architecture | ✅ Complete | 100% (18/18) |
 | Phase 12: Board & Treasury | ✅ Complete | 100% (7/7) |
-| Phase 14: Play/Pause | 🔴 Not Started | 0% |
+| Phase 14: Play/Pause | ✅ Complete | 100% |
 | Phase 15: Manage Command | 🔴 Not Started | 0% |
 | ~~Phase 13: Legacy Evore Frontend~~ | ⚪ Backlog | - |
 
@@ -1109,12 +1109,13 @@ State 4: current_slot >= end_slot + 35
 
 ## Notes
 
-- Phases 1-12 complete! Multi-bot architecture fully operational with treasury tracking.
+- Phases 1-12 & 14 complete! Multi-bot architecture with play/pause control.
 - Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
 - 27+ unit tests with comprehensive coverage
 - Workspace structure: `program/` (Solana program), `bot/` (deployment bot)
 - Multi-bot architecture: SharedServices, RoundCoordinator, TOML config, graceful shutdown
 - Transaction sending: FastSender with Helius endpoints (East/West), 4x auto-retry, Jito tips
 - Network monitoring: WS status, RPC status, RPS tracking, ping latency, tx counters
-- TUI features: Cursor nav, clipboard copy, config reload, session reset, togglable views
-- Next: Phase 14 (Play/Pause), Phase 15 (Manage Command)
+- TUI features: Cursor nav, clipboard copy, config reload, session reset, togglable views, play/pause control
+- Play/Pause: `paused_on_startup` config, P hotkey, ▶️/⏸️ toggle, Loading state on resume
+- Next: Phase 15 (Manage Command)

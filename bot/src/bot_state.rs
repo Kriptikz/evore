@@ -12,6 +12,10 @@ use solana_sdk::signature::Signature;
 /// Bot phase in the round lifecycle
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BotPhase {
+    /// Bot is paused - no activity
+    Paused,
+    /// Loading data after unpause
+    Loading,
     /// No active round (end_slot == MAX)
     Idle,
     /// Round active, waiting for deploy window (slots_left > threshold)
@@ -36,6 +40,8 @@ impl BotPhase {
     /// Get display string for TUI
     pub fn as_str(&self) -> &'static str {
         match self {
+            BotPhase::Paused => "Paused",
+            BotPhase::Loading => "Loading",
             BotPhase::Idle => "Idle",
             BotPhase::Waiting => "Waiting",
             BotPhase::Deploying => "Deploying",
@@ -51,6 +57,12 @@ impl BotPhase {
 pub struct BotState {
     /// Current phase in round lifecycle
     pub phase: BotPhase,
+    
+    /// Whether the bot is paused
+    pub is_paused: bool,
+    
+    /// Flag to trigger data reload on unpause
+    pub needs_reload: bool,
     
     /// Current round ID being tracked
     pub current_round_id: u64,
@@ -88,6 +100,8 @@ impl Default for BotState {
     fn default() -> Self {
         Self {
             phase: BotPhase::Idle,
+            is_paused: false,
+            needs_reload: false,
             current_round_id: 0,
             last_deployed_round: None,
             last_checkpointed_round: None,
@@ -189,6 +203,35 @@ impl BotState {
         self.current_round_id = round_id;
         self.deployed_amount = 0;
         self.pending_signatures.clear();
+    }
+    
+    /// Pause the bot
+    pub fn pause(&mut self) {
+        self.is_paused = true;
+        self.phase = BotPhase::Paused;
+    }
+    
+    /// Unpause the bot and trigger reload
+    pub fn unpause(&mut self) {
+        self.is_paused = false;
+        self.needs_reload = true;
+        self.phase = BotPhase::Loading;
+    }
+    
+    /// Toggle pause state
+    pub fn toggle_pause(&mut self) {
+        if self.is_paused {
+            self.unpause();
+        } else {
+            self.pause();
+        }
+    }
+    
+    /// Check if reload is needed (and clear the flag)
+    pub fn take_needs_reload(&mut self) -> bool {
+        let needs = self.needs_reload;
+        self.needs_reload = false;
+        needs
     }
 }
 

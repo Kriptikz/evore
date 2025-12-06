@@ -1,35 +1,36 @@
 # Current Tasks
 
-> Last Updated: 2025-12-05 (Phase 14: Play/Pause, Phase 15: Manage Command)
+> Last Updated: 2025-12-05 (Phase 14: Play/Pause Complete, Phase 15: Manage Command Next)
 
 ## Active
 
-### Task 38: Phase 14 - Play/Pause Feature
+### Task 38: Phase 14 - Play/Pause Feature ✅
 **Priority:** 🟢 High
-**Status:** Not Started (0/3 phases)
+**Status:** Complete (3/3 phases)
 
 Add play/pause functionality to control individual bot activity.
 
-**Phase 14a: Config & State**
-- [ ] Add `paused_on_startup: bool` to BotConfig struct
-- [ ] Add `Paused` variant to BotPhase enum
-- [ ] Add `is_paused: bool` to BotState
-- [ ] Parse `paused_on_startup` from TOML config
-- [ ] Initialize bot state with paused if configured
+**Phase 14a: Config & State** ✅
+- [x] Add `paused_on_startup: bool` to BotConfig struct
+- [x] Add `Paused` and `Loading` variants to BotPhase enum
+- [x] Add `is_paused: bool` and `needs_reload: bool` to BotState
+- [x] Parse `paused_on_startup` from TOML config
+- [x] Initialize bot state with paused if configured
 
-**Phase 14b: Bot Runner Updates**
-- [ ] Skip all activity in main loop when `is_paused == true`
-- [ ] On unpause: trigger data reload (fetch miner, check checkpoint)
-- [ ] Add `Loading` state between Paused and normal operation
-- [ ] Handle pause during deployment (finish current tx, then pause)
+**Phase 14b: Bot Runner Updates** ✅
+- [x] Skip all activity in main loop when `is_paused == true`
+- [x] On unpause: trigger data reload (fetch miner, check checkpoint)
+- [x] Add `Loading` state between Paused and normal operation
+- [x] Handle pause transition via coordinator toggle
 
-**Phase 14c: TUI Integration**
-- [ ] Add ▶️ (play) / ⏸️ (pause) icon to bot block
-- [ ] Make icon selectable with cursor
-- [ ] Toggle pause on Enter when icon selected
-- [ ] Add P hotkey to toggle pause for selected bot
-- [ ] Send TuiUpdate::BotPauseToggle event
-- [ ] Update bot status display for Paused state
+**Phase 14c: TUI Integration** ✅
+- [x] Add ▶️ (play) / ⏸️ (pause) icon to bot block
+- [x] Make icon selectable with cursor (first selectable element)
+- [x] Toggle pause on Enter when icon selected
+- [x] Add P hotkey to toggle pause for selected bot
+- [x] Add TuiUpdate::BotPauseUpdate event
+- [x] Update bot status display for Paused/Loading states
+- [x] Update header help text to show P:pause
 
 ---
 

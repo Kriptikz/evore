@@ -145,6 +145,9 @@ pub enum TuiUpdate {
         confirmed: Option<u64>,
         failed: Option<u64>,
     },
+    
+    /// Bot pause state changed
+    BotPauseUpdate { bot_index: usize, is_paused: bool },
 }
 
 /// View mode for bottom section (toggled with Tab)
@@ -313,6 +316,8 @@ impl RoundPhase {
 /// Bot deployment status
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BotStatus {
+    Paused,
+    Loading,
     Idle,
     Waiting,
     Deploying,
@@ -325,6 +330,8 @@ pub enum BotStatus {
 impl BotStatus {
     pub fn as_str(&self) -> &'static str {
         match self {
+            BotStatus::Paused => "Paused",
+            BotStatus::Loading => "Loading",
             BotStatus::Idle => "Idle",
             BotStatus::Waiting => "Waiting",
             BotStatus::Deploying => "Deploying",
@@ -337,6 +344,8 @@ impl BotStatus {
     
     pub fn color(&self) -> Color {
         match self {
+            BotStatus::Paused => Color::Rgb(128, 128, 128),
+            BotStatus::Loading => Color::Blue,
             BotStatus::Idle => Color::Gray,
             BotStatus::Waiting => Color::Yellow,
             BotStatus::Deploying => Color::Cyan,
@@ -620,6 +629,8 @@ pub struct BotState {
     pub bankroll: u64,
     pub slots_left_threshold: u64,
     pub status: BotStatus,
+    /// Whether this bot is paused
+    pub is_paused: bool,
     pub deployed_this_round: u64,
     pub miner: Option<Miner>,
     pub session_stats: BotSessionStats,
@@ -691,6 +702,7 @@ impl BotState {
             bankroll,
             slots_left_threshold,
             status: BotStatus::Idle,
+            is_paused: false,
             deployed_this_round: 0,
             miner: None,
             session_stats: BotSessionStats::default(),
@@ -722,6 +734,7 @@ impl BotState {
 /// Selectable element type for cursor navigation
 #[derive(Clone, Debug, PartialEq)]
 pub enum SelectableElement {
+    BotPauseToggle(usize),   // Bot index - toggle pause state
     BotSigner(usize),        // Bot index - copies pubkey
     BotAuthPda(usize),       // Bot index - copies pubkey
     BotConfigReload(usize),  // Bot index - reloads config from file
@@ -735,6 +748,7 @@ pub enum SelectAction {
     Copy(String),           // Copy value to clipboard
     ReloadConfig(usize),    // Reload config for bot at index
     RefreshSession(usize),  // Reset session stats for bot at index
+    TogglePause(usize),     // Toggle pause for bot at index
     None,
 }
 
@@ -818,19 +832,19 @@ impl App {
     
     /// Move selection up
     pub fn select_prev(&mut self) {
-        // Navigation order per bot: Signer -> AuthPda -> ConfigReload -> SessionRefresh
+        // Navigation order per bot: PauseToggle -> Signer -> AuthPda -> ConfigReload -> SessionRefresh
         // Then tx logs, then wrap to last bot's SessionRefresh
         self.selected = match &self.selected {
             None => {
                 if !self.bots.is_empty() {
-                    Some(SelectableElement::BotSigner(0))
+                    Some(SelectableElement::BotPauseToggle(0))
                 } else if !self.tx_log.is_empty() {
                     Some(SelectableElement::TxLog(0))
                 } else {
                     None
                 }
             }
-            Some(SelectableElement::BotSigner(i)) => {
+            Some(SelectableElement::BotPauseToggle(i)) => {
                 if *i > 0 {
                     // Go to previous bot's SessionRefresh
                     Some(SelectableElement::BotSessionRefresh(i - 1))
@@ -844,6 +858,9 @@ impl App {
                         None
                     }
                 }
+            }
+            Some(SelectableElement::BotSigner(i)) => {
+                Some(SelectableElement::BotPauseToggle(*i))
             }
             Some(SelectableElement::BotAuthPda(i)) => {
                 Some(SelectableElement::BotSigner(*i))
@@ -871,17 +888,20 @@ impl App {
     
     /// Move selection down
     pub fn select_next(&mut self) {
-        // Navigation order per bot: Signer -> AuthPda -> ConfigReload -> SessionRefresh
+        // Navigation order per bot: PauseToggle -> Signer -> AuthPda -> ConfigReload -> SessionRefresh
         // Then next bot or tx logs
         self.selected = match &self.selected {
             None => {
                 if !self.bots.is_empty() {
-                    Some(SelectableElement::BotSigner(0))
+                    Some(SelectableElement::BotPauseToggle(0))
                 } else if !self.tx_log.is_empty() {
                     Some(SelectableElement::TxLog(0))
                 } else {
                     None
                 }
+            }
+            Some(SelectableElement::BotPauseToggle(i)) => {
+                Some(SelectableElement::BotSigner(*i))
             }
             Some(SelectableElement::BotSigner(i)) => {
                 Some(SelectableElement::BotAuthPda(*i))
@@ -894,13 +914,13 @@ impl App {
             }
             Some(SelectableElement::BotSessionRefresh(i)) => {
                 if *i + 1 < self.bots.len() {
-                    Some(SelectableElement::BotSigner(i + 1))
+                    Some(SelectableElement::BotPauseToggle(i + 1))
                 } else {
                     // Move to tx log
                     if !self.tx_log.is_empty() {
                         Some(SelectableElement::TxLog(0))
                     } else {
-                        Some(SelectableElement::BotSigner(0))
+                        Some(SelectableElement::BotPauseToggle(0))
                     }
                 }
             }
@@ -911,7 +931,7 @@ impl App {
                 } else {
                     // Wrap to first bot
                     if !self.bots.is_empty() {
-                        Some(SelectableElement::BotSigner(0))
+                        Some(SelectableElement::BotPauseToggle(0))
                     } else {
                         Some(SelectableElement::TxLog(0))
                     }
@@ -923,6 +943,9 @@ impl App {
     /// Get the action for current selection when Enter is pressed
     pub fn get_select_action(&self) -> SelectAction {
         match &self.selected {
+            Some(SelectableElement::BotPauseToggle(i)) => {
+                SelectAction::TogglePause(*i)
+            }
             Some(SelectableElement::BotSigner(i)) => {
                 self.bots.get(*i).map(|b| SelectAction::Copy(b.signer.to_string()))
                     .unwrap_or(SelectAction::None)
@@ -983,6 +1006,10 @@ impl App {
                     
                     self.status_msg = Some((format!("Session reset: {}", bot.name), Instant::now(), false));
                 }
+            }
+            SelectAction::TogglePause(_) => {
+                // Toggle pause is handled externally via InputResult - this shouldn't be called
+                // but we handle it gracefully
             }
             SelectAction::None => {}
         }
@@ -1273,6 +1300,14 @@ impl App {
             TuiUpdate::TreasuryUpdate(data) => {
                 self.treasury = Some(data);
             }
+            TuiUpdate::BotPauseUpdate { bot_index, is_paused } => {
+                if let Some(bot) = self.bots.get_mut(bot_index) {
+                    bot.is_paused = is_paused;
+                    if is_paused {
+                        bot.status = BotStatus::Paused;
+                    }
+                }
+            }
         }
     }
 }
@@ -1397,7 +1432,7 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
             Span::styled("", Style::default())
         },
         // Help text
-        Span::styled("  ↑↓:nav Tab:view Enter:act q:quit", Style::default().fg(Color::DarkGray)),
+        Span::styled("  ↑↓:nav Tab:view Enter:act P:pause q:quit", Style::default().fg(Color::DarkGray)),
     ]);
     
     let block = Block::default()
@@ -1492,16 +1527,30 @@ fn draw_single_bot_block(frame: &mut Frame, area: Rect, bot: &BotState, app: &Ap
     let title = format!(" {} {} ({}) ", bot.icon, bot.name, bot.auth_id);
     
     // Check selection state for highlighting
+    let pause_selected = app.selected == Some(SelectableElement::BotPauseToggle(bot_index));
     let signer_selected = app.selected == Some(SelectableElement::BotSigner(bot_index));
     let auth_selected = app.selected == Some(SelectableElement::BotAuthPda(bot_index));
     let config_selected = app.selected == Some(SelectableElement::BotConfigReload(bot_index));
     let session_selected = app.selected == Some(SelectableElement::BotSessionRefresh(bot_index));
     
+    // Pause/play icon
+    let pause_icon = if bot.is_paused { "▶️" } else { "⏸️" };
+    let pause_label = if bot.is_paused { " Play" } else { " Pause" };
+    
     // Build lines with visual sections
     let mut lines = vec![
-        // ═══ STATUS BAR ═══
+        // ═══ PAUSE/PLAY CONTROL ═══
         Line::from(vec![
-            Span::styled("▶ ", Style::default().fg(bot.status.color())),
+            if pause_selected { Span::styled("► ", Style::default().fg(Color::White).bold()) } 
+            else { Span::styled("  ", Style::default()) },
+            Span::styled(
+                format!("{}{}", pause_icon, pause_label),
+                if pause_selected { Style::default().fg(Color::White).bold().on_blue() }
+                else if bot.is_paused { Style::default().fg(Color::Yellow) }
+                else { Style::default().fg(Color::DarkGray) }
+            ),
+            Span::styled("  ", Style::default()),
+            // Show status after pause control
             Span::styled(status_str, Style::default().fg(bot.status.color()).bold()),
         ]),
         // ═══ PUBKEYS (selectable) ═══
@@ -2100,6 +2149,7 @@ pub enum InputResult {
     Continue,
     Quit,
     ReloadConfig(usize),  // Bot index to reload config for
+    TogglePause(usize),   // Bot index to toggle pause for
 }
 
 /// Handle keyboard input
@@ -2122,14 +2172,34 @@ pub fn handle_input(app: &mut App) -> io::Result<InputResult> {
                     }
                     // Enter to execute action
                     KeyCode::Enter => {
-                        // Check if it's a config reload action first
+                        // Check if it's a config reload action
                         if let Some(SelectableElement::BotConfigReload(bot_idx)) = &app.selected {
                             let idx = *bot_idx;
                             app.status_msg = Some((format!("Reloading config..."), Instant::now(), false));
                             return Ok(InputResult::ReloadConfig(idx));
                         }
+                        // Check if it's a pause toggle action
+                        if let Some(SelectableElement::BotPauseToggle(bot_idx)) = &app.selected {
+                            let idx = *bot_idx;
+                            return Ok(InputResult::TogglePause(idx));
+                        }
                         // Otherwise execute normally (copy or session refresh)
                         app.execute_select_action();
+                    }
+                    // P to toggle pause for selected bot (if any bot element is selected)
+                    KeyCode::Char('p') | KeyCode::Char('P') => {
+                        // Get bot index from current selection
+                        let bot_idx = match &app.selected {
+                            Some(SelectableElement::BotPauseToggle(i)) |
+                            Some(SelectableElement::BotSigner(i)) |
+                            Some(SelectableElement::BotAuthPda(i)) |
+                            Some(SelectableElement::BotConfigReload(i)) |
+                            Some(SelectableElement::BotSessionRefresh(i)) => Some(*i),
+                            _ => None,
+                        };
+                        if let Some(idx) = bot_idx {
+                            return Ok(InputResult::TogglePause(idx));
+                        }
                     }
                     // Tab to toggle view mode
                     KeyCode::Tab => {

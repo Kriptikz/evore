@@ -639,6 +639,10 @@ async fn run_tui_loop(
                 // Config reload not supported in single-bot mode
                 app.set_status("Config reload not available".to_string(), true);
             }
+            tui::InputResult::TogglePause(_) => {
+                // Pause not supported in legacy single-bot mode
+                app.set_status("Pause not available in legacy mode".to_string(), true);
+            }
             tui::InputResult::Continue => {}
         }
         
@@ -758,7 +762,7 @@ async fn run_dashboard_with_config(
             .map_err(|e| format!("Failed to load signer from {:?}: {}", signer_path, e))?;
         
         let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager_keypair.pubkey(), bot_config.auth_id);
-        let bot_state = BotState::new(
+        let mut bot_state = BotState::new(
             bot_config.name.clone(),
             index,  // bot_index for unique icon assignment
             bot_config.auth_id,
@@ -776,6 +780,11 @@ async fn run_dashboard_with_config(
             percentage,
             squares_count,
         );
+        // Set initial pause state from config
+        if bot_config.paused_on_startup {
+            bot_state.is_paused = true;
+            bot_state.status = tui::BotStatus::Paused;
+        }
         app.add_bot(bot_state);
     }
     
@@ -881,6 +890,37 @@ async fn run_dashboard_with_config(
             // Handle input
             match tui::handle_input(&mut app)? {
                 tui::InputResult::Quit => break,
+                tui::InputResult::TogglePause(bot_idx) => {
+                    // Toggle pause state for bot
+                    match coordinator.toggle_bot_pause(bot_idx).await {
+                        Ok(is_paused) => {
+                            // Get bot name first, then update state
+                            let bot_name = app.bots.get(bot_idx).map(|b| b.name.clone());
+                            
+                            // Update TUI state
+                            if let Some(bot) = app.bots.get_mut(bot_idx) {
+                                bot.is_paused = is_paused;
+                                if is_paused {
+                                    bot.status = tui::BotStatus::Paused;
+                                } else {
+                                    bot.status = tui::BotStatus::Loading;
+                                }
+                            }
+                            
+                            // Show status message
+                            if let Some(name) = bot_name {
+                                if is_paused {
+                                    app.set_status(format!("⏸️ {} paused", name), false);
+                                } else {
+                                    app.set_status(format!("▶️ {} resumed", name), false);
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            app.set_status(format!("Pause error: {}", e), true);
+                        }
+                    }
+                }
                 tui::InputResult::ReloadConfig(bot_idx) => {
                     // Try to reload config from file
                     let config_path_clone = app.config_path.clone();

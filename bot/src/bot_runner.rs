@@ -99,6 +99,7 @@ pub struct BotRunConfig {
     pub attempts: u64,   // Number of deploy txs to send (default 4)
     pub priority_fee: u64,  // Priority fee in micro-lamports per CU
     pub jito_tip: u64,   // Jito tip in lamports (default 200_000 = 0.0002 SOL)
+    pub is_paused: bool, // Whether bot is paused
 }
 
 /// Run a single bot using shared services
@@ -110,7 +111,7 @@ pub async fn run_bot_with_services(
     let mut state = BotState::new();
     
     // Extract static values that don't change at runtime
-    let (signer, manager, auth_id, bot_index, bot_name) = {
+    let (signer, manager, auth_id, bot_index, bot_name, initial_paused) = {
         let cfg = config.read().await;
         (
             Arc::clone(&cfg.signer),
@@ -118,12 +119,26 @@ pub async fn run_bot_with_services(
             cfg.auth_id,
             cfg.bot_index,
             cfg.name.clone(),
+            cfg.is_paused,
         )
     };
     
+    // Initialize pause state from config
+    if initial_paused {
+        state.pause();
+        let _ = tui_tx.send(TuiUpdate::BotPauseUpdate {
+            bot_index,
+            is_paused: true,
+        });
+        let _ = tui_tx.send(TuiUpdate::BotStatusUpdate {
+            bot_index,
+            status: BotStatus::Paused,
+        });
+    }
+    
     let (managed_miner_auth, _) = evore::state::managed_miner_auth_pda(manager, auth_id);
     
-    // Get initial signer balance
+    // Get initial signer balance (even if paused, show balance)
     if let Ok(balance) = services.client.get_balance(&signer.pubkey()) {
         let _ = tui_tx.send(TuiUpdate::BotSignerBalanceUpdate {
             bot_index,
@@ -145,7 +160,7 @@ pub async fn run_bot_with_services(
         services.round_tracker.switch_round(initial_round_id);
     }
 
-    // Initialize miner state
+    // Initialize miner state (load once even if paused for display)
     if let Ok(Some(miner)) = services.client.get_miner(&managed_miner_auth) {
         state.init_starting_values(miner.rewards_sol, miner.rewards_ore);
         
@@ -164,30 +179,102 @@ pub async fn run_bot_with_services(
             miner: miner.clone(),
         });
 
-        // Check if already deployed to current round
-        if let Some(board) = services.board_tracker.get_board() {
-            if miner.round_id == board.round_id {
-                state.last_deployed_round = Some(board.round_id);
-                let deployed: u64 = miner.deployed.iter().sum();
-                state.deployed_amount = deployed;
-                state.set_phase(BotPhase::Deployed);
+        // Check if already deployed to current round (only track if not paused)
+        if !state.is_paused {
+            if let Some(board) = services.board_tracker.get_board() {
+                if miner.round_id == board.round_id {
+                    state.last_deployed_round = Some(board.round_id);
+                    let deployed: u64 = miner.deployed.iter().sum();
+                    state.deployed_amount = deployed;
+                    state.set_phase(BotPhase::Deployed);
+                    
+                    let _ = tui_tx.send(TuiUpdate::BotDeployedUpdate {
+                        bot_index,
+                        amount: deployed,
+                        round_id: board.round_id,
+                    });
+                }
                 
-                let _ = tui_tx.send(TuiUpdate::BotDeployedUpdate {
-                    bot_index,
-                    amount: deployed,
-                    round_id: board.round_id,
-                });
-            }
-            
-            // Check if previous round needs checkpointing
-            if miner.round_id > miner.checkpoint_id {
-                state.last_deployed_round = Some(miner.round_id);
+                // Check if previous round needs checkpointing
+                if miner.round_id > miner.checkpoint_id {
+                    state.last_deployed_round = Some(miner.round_id);
+                }
             }
         }
     }
 
     // Main loop
     loop {
+        // Check for pause state changes from coordinator
+        let is_paused = {
+            let cfg = config.read().await;
+            cfg.is_paused
+        };
+        
+        // Handle pause state transition
+        if is_paused && !state.is_paused {
+            // Just became paused
+            state.pause();
+            let _ = tui_tx.send(TuiUpdate::BotPauseUpdate {
+                bot_index,
+                is_paused: true,
+            });
+            let _ = tui_tx.send(TuiUpdate::BotStatusUpdate {
+                bot_index,
+                status: BotStatus::Paused,
+            });
+        } else if !is_paused && state.is_paused {
+            // Just became unpaused - trigger reload
+            state.unpause();
+            let _ = tui_tx.send(TuiUpdate::BotPauseUpdate {
+                bot_index,
+                is_paused: false,
+            });
+            let _ = tui_tx.send(TuiUpdate::BotStatusUpdate {
+                bot_index,
+                status: BotStatus::Loading,
+            });
+        }
+        
+        // If paused, just sleep and continue (don't do any work)
+        if state.is_paused {
+            sleep(Duration::from_millis(500)).await;
+            continue;
+        }
+        
+        // Handle loading state (reload data after unpause)
+        if state.take_needs_reload() {
+            // Reload miner data
+            if let Ok(Some(miner)) = services.client.get_miner(&managed_miner_auth) {
+                let _ = tui_tx.send(TuiUpdate::BotMinerUpdate {
+                    bot_index,
+                    miner: miner.clone(),
+                });
+                
+                // Check if we need to checkpoint
+                if let Some(board) = services.board_tracker.get_board() {
+                    if miner.round_id > miner.checkpoint_id {
+                        state.last_deployed_round = Some(miner.round_id);
+                        state.last_checkpointed_round = Some(miner.checkpoint_id);
+                    }
+                    // Check if already deployed this round
+                    if miner.round_id == board.round_id {
+                        state.last_deployed_round = Some(board.round_id);
+                        let deployed: u64 = miner.deployed.iter().sum();
+                        state.deployed_amount = deployed;
+                    }
+                }
+            }
+            
+            // Update signer balance
+            if let Ok(balance) = services.client.get_balance(&signer.pubkey()) {
+                let _ = tui_tx.send(TuiUpdate::BotSignerBalanceUpdate {
+                    bot_index,
+                    balance,
+                });
+            }
+        }
+        
         // Get current state from trackers
         let board = match services.board_tracker.get_board() {
             Some(b) => {
@@ -574,6 +661,12 @@ pub async fn run_bot_with_services(
             
             BotPhase::Claiming => {
                 // Handled within Checkpointing
+                sleep(Duration::from_millis(100)).await;
+            }
+            
+            // Paused and Loading are handled earlier in the loop before determine_phase
+            BotPhase::Paused | BotPhase::Loading => {
+                // Should never reach here - paused state is handled at the start of the loop
                 sleep(Duration::from_millis(100)).await;
             }
         }

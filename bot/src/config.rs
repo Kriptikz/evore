@@ -92,6 +92,10 @@ pub struct BotConfig {
     #[serde(default = "default_jito_tip")]
     pub jito_tip: u64,
     
+    /// Whether bot starts in paused state (default false)
+    #[serde(default)]
+    pub paused_on_startup: bool,
+    
     /// Strategy-specific parameters
     #[serde(default)]
     pub strategy_params: StrategyParams,
@@ -138,6 +142,7 @@ impl BotConfig {
             attempts: 4,
             priority_fee: 5000,
             jito_tip: 200_000,
+            paused_on_startup: false,
             strategy_params: StrategyParams::EV {
                 max_per_square,
                 min_bet,

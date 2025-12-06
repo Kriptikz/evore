@@ -29,6 +29,7 @@ bankroll = 50_000_000
 attempts = 2
 priority_fee = 4_000
 jito_tip = 200_000
+paused_on_startup = false
 signer_path = "/Users/kriptikz/Development/game-wallets/perc-bot.json"
 manager_path = "/Users/kriptikz/Development/game-wallets/perc-bot-manager.json"
 
