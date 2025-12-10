@@ -191,6 +191,24 @@ pub fn build_claim_sol_tx(
     tx
 }
 
+/// Build a claim ORE transaction
+pub fn build_claim_ore_tx(
+    signer: &Keypair,
+    manager: &Pubkey,
+    auth_id: u64,
+    recent_blockhash: Hash,
+) -> Transaction {
+    let claim_ix = evore::instruction::mm_claim_ore(
+        signer.pubkey(),
+        *manager,
+        auth_id,
+    );
+
+    let mut tx = Transaction::new_with_payer(&[claim_ix], Some(&signer.pubkey()));
+    tx.sign(&[signer], recent_blockhash);
+    tx
+}
+
 /// Single deployment using websocket slot tracking
 /// Sends transactions every 100ms until slot changes past end_slot
 pub async fn single_deploy(

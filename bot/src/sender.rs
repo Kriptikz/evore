@@ -1,9 +1,10 @@
-//! Helius Fast Sender - Uses Helius Sender endpoints for faster transaction sending
+//! Fast Sender - Uses Helius and Jito endpoints for faster transaction sending
 //!
 //! Features:
-//! - Uses both East and West region endpoints for geographic distribution
-//! - Automatic retry queue: each transaction is sent 4 times (2x East, 2x West)
-//! - Round-robin sending: cycles through all queued transactions every 100ms
+//! - Uses both East and West region Helius endpoints for geographic distribution
+//! - Jito block engine endpoints (NY and SLC) with 1 RPS rate limiting
+//! - Automatic retry queue: each transaction is sent multiple times across endpoints
+//! - Round-robin sending: cycles through all queued transactions
 //! - Automatic Jito tip inclusion for MEV protection
 //! - Periodic ping measurement for latency monitoring
 
@@ -54,11 +55,20 @@ pub const HELIUS_EAST_PING: &str = "http://ewr-sender.helius-rpc.com/ping";
 /// Helius ping endpoint - West region
 pub const HELIUS_WEST_PING: &str = "http://slc-sender.helius-rpc.com/ping";
 
-/// Number of times to send each transaction (4 = 2x East + 2x West)
-const SENDS_PER_TX: u8 = 2;
+/// Jito block engine endpoint - East region (New York)
+pub const JITO_EAST_ENDPOINT: &str = "https://ny.mainnet.block-engine.jito.wtf/api/v1/transactions";
 
-/// Interval between sends in milliseconds
-const SEND_INTERVAL_MS: u64 = 100;
+/// Jito block engine endpoint - West region (Salt Lake City)
+pub const JITO_WEST_ENDPOINT: &str = "https://slc.mainnet.block-engine.jito.wtf/api/v1/transactions";
+
+/// Number of times to send each transaction via Helius (2 = 1x East + 1x West)
+const HELIUS_SENDS_PER_TX: u8 = 2;
+
+/// Interval between Helius sends in milliseconds (fast)
+const HELIUS_SEND_INTERVAL_MS: u64 = 100;
+
+/// Interval between Jito sends in milliseconds (1 RPS = 1000ms per endpoint)
+const JITO_SEND_INTERVAL_MS: u64 = 1000;
 
 /// Interval between ping checks in seconds
 const PING_INTERVAL_SECS: u64 = 10;
@@ -174,29 +184,38 @@ struct QueuedTx {
 // Sender Client
 // =============================================================================
 
-/// Fast sender client using Helius endpoint with automatic retry queue
+/// Fast sender client using Helius and Jito endpoints with automatic retry queue
 /// 
-/// Each transaction is automatically sent 4 times, with the sender cycling
-/// through all queued transactions every 100ms in round-robin fashion.
+/// Helius endpoints: Each transaction sent 2 times (1x East, 1x West) every 100ms
+/// Jito endpoints: Each transaction sent once to each endpoint, rate limited to 1 RPS
 /// Includes ping monitoring for latency tracking.
 pub struct FastSender {
-    /// Channel to send transactions to the background worker
-    queue_tx: mpsc::UnboundedSender<String>,
+    /// Channel to send transactions to the Helius background worker
+    helius_queue_tx: mpsc::UnboundedSender<String>,
+    /// Channel to send transactions to the Jito background worker
+    jito_queue_tx: mpsc::UnboundedSender<String>,
     /// Shared ping statistics (readable by TUI)
     pub ping_stats: Arc<PingStats>,
 }
 
 impl FastSender {
-    /// Create new sender with both East and West Helius endpoints
+    /// Create new sender with Helius and Jito endpoints
     /// Spawns background tasks for transaction sending and ping monitoring
     pub fn new() -> Self {
-        let (queue_tx, queue_rx) = mpsc::unbounded_channel();
+        let (helius_queue_tx, helius_queue_rx) = mpsc::unbounded_channel();
+        let (jito_queue_tx, jito_queue_rx) = mpsc::unbounded_channel();
         let ping_stats = Arc::new(PingStats::new());
         
-        // Spawn background sender loop with both endpoints
-        let stats_for_sender = Arc::clone(&ping_stats);
+        // Spawn background Helius sender loop (fast, multiple sends)
+        let stats_for_helius = Arc::clone(&ping_stats);
         tokio::spawn(async move {
-            sender_loop(queue_rx, stats_for_sender).await;
+            helius_sender_loop(helius_queue_rx, stats_for_helius).await;
+        });
+        
+        // Spawn background Jito sender loop (rate limited, 1 RPS per endpoint)
+        let stats_for_jito = Arc::clone(&ping_stats);
+        tokio::spawn(async move {
+            jito_sender_loop(jito_queue_rx, stats_for_jito).await;
         });
         
         // Spawn background ping monitor
@@ -205,10 +224,12 @@ impl FastSender {
             ping_monitor_loop(ping_stats_clone).await;
         });
         
-        Self { queue_tx, ping_stats }
+        Self { helius_queue_tx, jito_queue_tx, ping_stats }
     }
 
-    /// Queue a transaction to be sent 4 times automatically (2x East, 2x West)
+    /// Queue a transaction to be sent via all endpoints:
+    /// - Helius: 2 times (1x East, 1x West) at 100ms interval
+    /// - Jito: 1 time (alternates between NY and SLC) at 1 RPS rate limit
     /// Returns the signature immediately (extracted from signed transaction)
     pub fn send_transaction(&self, transaction: &Transaction) -> Result<Signature, SendError> {
         use base64::Engine;
@@ -222,9 +243,13 @@ impl FastSender {
             .map_err(|e| SendError::Serialization(e.to_string()))?;
         let base64_tx = base64::engine::general_purpose::STANDARD.encode(&serialized);
         
-        // Queue for sending
-        self.queue_tx.send(base64_tx)
-            .map_err(|e| SendError::Network(format!("Failed to queue transaction: {}", e)))?;
+        // Queue for Helius sending (fast)
+        self.helius_queue_tx.send(base64_tx.clone())
+            .map_err(|e| SendError::Network(format!("Failed to queue for Helius: {}", e)))?;
+        
+        // Queue for Jito sending (rate limited)
+        self.jito_queue_tx.send(base64_tx)
+            .map_err(|e| SendError::Network(format!("Failed to queue for Jito: {}", e)))?;
         
         Ok(*signature)
     }
@@ -242,15 +267,14 @@ impl Default for FastSender {
 }
 
 // =============================================================================
-// Background Sender Loop
+// Background Sender Loops
 // =============================================================================
 
-/// Background loop that processes the transaction queue
+/// Helius background loop that processes the transaction queue
 /// - Receives new transactions and adds them to the queue
 /// - Every 100ms, sends the next transaction in the queue
-/// - Each transaction is sent 4 times: even sends go East, odd sends go West
-/// - This gives 2x East + 2x West per transaction
-async fn sender_loop(mut rx: mpsc::UnboundedReceiver<String>, stats: Arc<PingStats>) {
+/// - Each transaction is sent 2 times: even sends go East, odd sends go West
+async fn helius_sender_loop(mut rx: mpsc::UnboundedReceiver<String>, stats: Arc<PingStats>) {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(5))
         .build()
@@ -261,7 +285,7 @@ async fn sender_loop(mut rx: mpsc::UnboundedReceiver<String>, stats: Arc<PingSta
     let west_endpoint = Arc::new(HELIUS_WEST_ENDPOINT.to_string());
     
     let mut queue: VecDeque<QueuedTx> = VecDeque::new();
-    let mut interval = tokio::time::interval(Duration::from_millis(SEND_INTERVAL_MS));
+    let mut interval = tokio::time::interval(Duration::from_millis(HELIUS_SEND_INTERVAL_MS));
     
     loop {
         tokio::select! {
@@ -285,7 +309,7 @@ async fn sender_loop(mut rx: mpsc::UnboundedReceiver<String>, stats: Arc<PingSta
             _ = interval.tick() => {
                 if let Some(mut queued) = queue.pop_front() {
                     // Alternate between East and West based on send_count
-                    // Even (0, 2) -> East, Odd (1, 3) -> West
+                    // Even (0) -> East, Odd (1) -> West
                     let endpoint = if queued.send_count % 2 == 0 {
                         Arc::clone(&east_endpoint)
                     } else {
@@ -300,13 +324,13 @@ async fn sender_loop(mut rx: mpsc::UnboundedReceiver<String>, stats: Arc<PingSta
                     let base64_tx = queued.base64_tx.clone();
                     
                     tokio::spawn(async move {
-                        let _ = send_raw_transaction(&client, &endpoint, &base64_tx).await;
+                        let _ = send_helius_transaction(&client, &endpoint, &base64_tx).await;
                     });
                     
                     queued.send_count += 1;
                     
                     // Re-add to back of queue if not done
-                    if queued.send_count < SENDS_PER_TX {
+                    if queued.send_count < HELIUS_SENDS_PER_TX {
                         queue.push_back(queued);
                     }
                 }
@@ -315,8 +339,68 @@ async fn sender_loop(mut rx: mpsc::UnboundedReceiver<String>, stats: Arc<PingSta
     }
 }
 
-/// Send a raw base64-encoded transaction to the endpoint
-async fn send_raw_transaction(
+/// Jito background loop that processes the transaction queue
+/// - Rate limited to 1 RPS (alternates between NY and SLC endpoints)
+/// - Each transaction is sent once, endpoint alternates per transaction
+async fn jito_sender_loop(mut rx: mpsc::UnboundedReceiver<String>, stats: Arc<PingStats>) {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(5))
+        .build()
+        .expect("Failed to create HTTP client for Jito");
+    
+    let client = Arc::new(client);
+    let east_endpoint = Arc::new(JITO_EAST_ENDPOINT.to_string());
+    let west_endpoint = Arc::new(JITO_WEST_ENDPOINT.to_string());
+    
+    let mut queue: VecDeque<String> = VecDeque::new();
+    let mut interval = tokio::time::interval(Duration::from_millis(JITO_SEND_INTERVAL_MS));
+    let mut endpoint_toggle = false; // false = east, true = west
+    
+    loop {
+        tokio::select! {
+            // Receive new transactions (non-blocking check)
+            result = rx.recv() => {
+                match result {
+                    Some(base64_tx) => {
+                        queue.push_back(base64_tx);
+                    }
+                    None => {
+                        // Channel closed, exit loop
+                        break;
+                    }
+                }
+            }
+            
+            // Send on interval (1 RPS)
+            _ = interval.tick() => {
+                if let Some(base64_tx) = queue.pop_front() {
+                    // Alternate between East (NY) and West (SLC)
+                    let endpoint = if endpoint_toggle {
+                        Arc::clone(&west_endpoint)
+                    } else {
+                        Arc::clone(&east_endpoint)
+                    };
+                    endpoint_toggle = !endpoint_toggle;
+                    
+                    // Record the send for RPS tracking
+                    stats.record_send();
+                    
+                    // Fire off the send (don't wait for response)
+                    let client = Arc::clone(&client);
+                    
+                    tokio::spawn(async move {
+                        let _ = send_jito_transaction(&client, &endpoint, &base64_tx).await;
+                    });
+                    
+                    // Transaction sent once, don't re-add to queue
+                }
+            }
+        }
+    }
+}
+
+/// Send a transaction to Helius endpoint (JSON-RPC format with options)
+async fn send_helius_transaction(
     client: &reqwest::Client,
     endpoint: &str,
     base64_tx: &str,
@@ -337,6 +421,40 @@ async fn send_raw_transaction(
                 "encoding": "base64",
                 "skipPreflight": true,
                 "maxRetries": 0
+            }
+        ]
+    });
+
+    // Fire and forget - we don't care about the response
+    let _ = client
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await;
+
+    Ok(())
+}
+
+/// Send a transaction to Jito block engine endpoint (JSON-RPC format)
+async fn send_jito_transaction(
+    client: &reqwest::Client,
+    endpoint: &str,
+    base64_tx: &str,
+) -> Result<(), SendError> {
+    let request_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+
+    let body = serde_json::json!({
+        "id": request_id,
+        "jsonrpc": "2.0",
+        "method": "sendTransaction",
+        "params": [
+            base64_tx,
+            {
+                "encoding": "base64"
             }
         ]
     });

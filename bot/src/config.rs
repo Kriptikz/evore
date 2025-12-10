@@ -160,6 +160,23 @@ impl BotConfig {
     }
 }
 
+/// Manage command configuration
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ManageConfig {
+    /// Path to directory containing signer keypair files (*.json)
+    pub signers_path: Option<PathBuf>,
+    
+    /// Secondary/legacy program ID for claim-only operations
+    pub secondary_program_id: Option<String>,
+}
+
+impl ManageConfig {
+    /// Check if config is valid (has signers_path)
+    pub fn is_valid(&self) -> bool {
+        self.signers_path.is_some()
+    }
+}
+
 /// Top-level configuration with defaults and bot list
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -174,6 +191,10 @@ pub struct Config {
     /// List of bots to run
     #[serde(default)]
     pub bots: Vec<BotConfig>,
+    
+    /// Manage command configuration
+    #[serde(default)]
+    pub manage: ManageConfig,
 }
 
 fn default_signer_path() -> PathBuf {
@@ -192,6 +213,7 @@ impl Default for Config {
             default_signer_path: default_signer_path(),
             default_manager_path: default_manager_path(),
             bots: Vec::new(),
+            manage: ManageConfig::default(),
         }
     }
 }

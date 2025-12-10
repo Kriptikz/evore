@@ -25,6 +25,7 @@ pub fn process_mm_deploy(
             ore_miner_account_info,
             fee_collector_account_info,
             automation_account_info,
+            config_account_info,
             board_account_info,
             round_account_info,
             entropy_var_account_info,
@@ -39,8 +40,8 @@ pub fn process_mm_deploy(
     let board = board_account_info
         .as_account::<Board>(&ore_api::id())?;
 
-    if clock.slot > board.end_slot {
-        return Err(EvoreError::EndSlotExceeded.into());
+    if clock.slot >= board.end_slot {
+        return Err(EvoreError::EndSlotReached.into());
     }
 
     // EV strategy has slots_left check
@@ -138,9 +139,11 @@ pub fn process_mm_deploy(
             managed_miner_auth_account_info.clone(),
             automation_account_info.clone(),
             board_account_info.clone(),
+            config_account_info.clone(),
             ore_miner_account_info.clone(),
             round_account_info.clone(),
             system_program.clone(),
+            ore_program.clone(),
             entropy_var_account_info.clone(),
             entropy_program.clone(),
             ore_program.clone(),

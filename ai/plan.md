@@ -1005,41 +1005,41 @@ pub fn old_program_authority_pda(manager: Pubkey, auth_id: u64) -> Pubkey {
 }
 ```
 
-### Implementation Tasks
+### Implementation Tasks ✅
 
-**Phase 15a: Config & Discovery**
-- [ ] Add `[manage]` section to config with `signers_path` and `secondary_program_id`
-- [ ] Create `manage_config.rs` module for parsing
-- [ ] Implement signer keypair loading from directory (glob *.json)
-- [ ] Implement `get_managers_by_authority()` with memcmp filter (offset=8)
-- [ ] Implement `get_miners_for_manager()` with auth_id loop
-- [ ] Add `old_program_authority_pda()` function for secondary program
+**Phase 15a: Config & Discovery** ✅
+- [x] Add `[manage]` section to config with `signers_path` and `secondary_program_id`
+- [x] Create ManageConfig in config.rs module
+- [x] Implement signer keypair loading from directory (*.json files)
+- [x] Implement `get_managers_by_authority()` with memcmp filter (offset=8)
+- [x] Implement `get_miners_for_manager()` with auth_id loop
+- [x] Add `authority_pda()` function with configurable program_id
 
-**Phase 15b: CLI Command**
-- [ ] Add `manage` subcommand to CLI
-- [ ] Load manage config section
-- [ ] Initialize account discovery
-- [ ] Launch manage TUI
+**Phase 15b: CLI Command** ✅
+- [x] Add `manage` subcommand to CLI
+- [x] Load manage config section
+- [x] Initialize account discovery
+- [x] Launch manage TUI
 
-**Phase 15c: Manage TUI Layout**
-- [ ] Create `manage_tui.rs` module
-- [ ] Design miner card widget with selectable actions
-- [ ] Grid layout for miner cards (responsive to terminal size)
-- [ ] Distinguish legacy miners with program ID marker
-- [ ] Status bar with signer/manager/miner counts
+**Phase 15c: Manage TUI Layout** ✅
+- [x] Create `manage_tui.rs` module
+- [x] Design miner list widget with selectable actions
+- [x] List layout with scroll support
+- [x] Distinguish legacy miners with program ID marker
+- [x] Status bar with signer/manager/miner counts
 
-**Phase 15d: Action Execution**
-- [ ] Implement checkpoint action (build & send tx)
-- [ ] Implement claim_sol action (build & send tx)
-- [ ] Implement claim_ore action (build & send tx)
-- [ ] Transaction status feedback (spinner, success/fail)
-- [ ] Refresh miner data after action completion
+**Phase 15d: Action Execution** ✅
+- [x] Implement checkpoint action (build & send tx)
+- [x] Implement claim_sol action (build & send tx)
+- [x] Implement claim_ore action (build & send tx)
+- [x] Transaction status feedback (success/fail messages)
+- [x] Refresh miner data via R hotkey
 
-**Phase 15e: Legacy Program Support**
-- [ ] Parse `secondary_program_id` from config
-- [ ] Implement old program account discovery
-- [ ] Build legacy claim_sol/claim_ore transactions
-- [ ] Display legacy miners with program ID prefix/suffix
+**Phase 15e: Legacy Program Support** ✅
+- [x] Parse `secondary_program_id` from config
+- [x] Implement old program account discovery
+- [x] Build legacy claim_sol/claim_ore transactions
+- [x] Display legacy miners with LEGACY label and program ID prefix
 
 ---
 
@@ -1060,7 +1060,7 @@ pub fn old_program_authority_pda(manager: Pubkey, auth_id: u64) -> Pubkey {
 | Phase 11: Multi-Bot Architecture | ✅ Complete | 100% (18/18) |
 | Phase 12: Board & Treasury | ✅ Complete | 100% (7/7) |
 | Phase 14: Play/Pause | ✅ Complete | 100% |
-| Phase 15: Manage Command | 🔴 Not Started | 0% |
+| Phase 15: Manage Command | ✅ Complete | 100% (5/5) |
 | ~~Phase 13: Legacy Evore Frontend~~ | ⚪ Backlog | - |
 
 ---
@@ -1109,7 +1109,7 @@ State 4: current_slot >= end_slot + 35
 
 ## Notes
 
-- Phases 1-12 & 14 complete! Multi-bot architecture with play/pause control.
+- Phases 1-12, 14, 15 complete! Full miner management TUI added.
 - Program ID: `6kJMMw6psY1MjH3T3yK351uw1FL1aE7rF3xKFz4prHb`
 - 27+ unit tests with comprehensive coverage
 - Workspace structure: `program/` (Solana program), `bot/` (deployment bot)
@@ -1118,4 +1118,5 @@ State 4: current_slot >= end_slot + 35
 - Network monitoring: WS status, RPC status, RPS tracking, ping latency, tx counters
 - TUI features: Cursor nav, clipboard copy, config reload, session reset, togglable views, play/pause control
 - Play/Pause: `paused_on_startup` config, P hotkey, ▶️/⏸️ toggle, Loading state on resume
-- Next: Phase 15 (Manage Command)
+- Manage Command: `cargo run -- manage --config app-config.toml` - discovers signers, managers, miners and provides TUI for checkpoint/claim actions
+- Legacy Program Support: Configure `secondary_program_id` in `[manage]` section for claiming from old program

@@ -526,7 +526,7 @@ pub async fn run_bot_with_services(
                     
                     // Sleep between attempts (except after last one)
                     if attempt < num_attempts - 1 {
-                        sleep(Duration::from_millis(100)).await;
+                        sleep(Duration::from_millis(400)).await;
                     }
                 }
                 
@@ -704,13 +704,9 @@ fn determine_phase(
     }
     
     // Calculate deploy window
-    let deploy_start_slot = if slots_left_threshold > 10 {
-        board.end_slot.saturating_sub(slots_left_threshold - 1)
-    } else {
-        board.end_slot.saturating_sub(slots_left_threshold)
-    };
+    let deploy_start_slot = board.end_slot.saturating_sub(slots_left_threshold);
     
-    if current_slot >= deploy_start_slot.saturating_sub(1) {
+    if current_slot >= deploy_start_slot {
         return BotPhase::Deploying;
     }
     

@@ -1,7 +1,7 @@
 use spl_associated_token_account::get_associated_token_address;
 use steel::*;
 
-use crate::{consts::FEE_COLLECTOR, entropy_api, ore_api::{self, automation_pda, board_pda, miner_pda, round_pda, treasury_pda}, state::managed_miner_auth_pda};
+use crate::{consts::FEE_COLLECTOR, entropy_api, ore_api::{self, automation_pda, board_pda, config_pda, miner_pda, round_pda, treasury_pda}, state::managed_miner_auth_pda};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromPrimitive)]
@@ -195,6 +195,7 @@ fn build_deploy_accounts(
     let authority = managed_miner_auth_address;
     let automation_address = automation_pda(authority).0;
     let board_address = board_pda().0;
+    let config_address = config_pda().0;
     let round_address = round_pda(round_id).0;
     let entropy_var_address = entropy_api::var_pda(board_address, 0).0;
 
@@ -205,6 +206,7 @@ fn build_deploy_accounts(
         AccountMeta::new(ore_miner_address.0, false),
         AccountMeta::new(FEE_COLLECTOR, false),
         AccountMeta::new(automation_address, false),
+        AccountMeta::new(config_address, false),
         AccountMeta::new(board_address, false),
         AccountMeta::new(round_address, false),
         AccountMeta::new(entropy_var_address, false),

@@ -18,6 +18,8 @@ mod config;
 mod coordinator;
 mod deploy;
 mod ev_calculator;
+mod manage;
+mod manage_tui;
 mod miner_tracker;
 mod round_tracker;
 mod sender;
@@ -177,6 +179,13 @@ enum Commands {
         /// Deploy strategy (EV, Percentage, Manual)
         #[arg(long, default_value = "EV")]
         strategy: String,
+    },
+    
+    /// Manage miners - TUI for checkpoint, claim SOL/ORE across all signers
+    Manage {
+        /// Path to TOML config file (must have [manage] section)
+        #[arg(long)]
+        config: String,
     },
 }
 
@@ -509,6 +518,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     client,
                 ).await?;
             }
+        }
+        
+        Commands::Manage { config: config_path } => {
+            run_manage_tui(&args.rpc_url, config_path).await?;
         }
     }
     
@@ -987,4 +1000,229 @@ async fn run_dashboard_with_config(
     tui::restore()?;
     
     result
+}
+
+/// Run the manage TUI for managing miners across all signers
+async fn run_manage_tui(
+    rpc_url: &str,
+    config_path: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use crate::config::Config;
+    use crate::manage::{discover_accounts, load_signers_from_directory};
+    use crate::manage_tui::{self, ManageApp};
+    use std::path::Path;
+    use solana_client::rpc_client::RpcClient;
+    
+    // Load config
+    let config = Config::load(Path::new(config_path))?;
+    
+    if !config.manage.is_valid() {
+        return Err("No [manage] section with signers_path in config file".into());
+    }
+    
+    println!("=== Evore Miner Management ===");
+    println!("Config: {}", config_path);
+    println!("Signers path: {:?}", config.manage.signers_path);
+    if let Some(ref secondary) = config.manage.secondary_program_id {
+        println!("Secondary program: {}", secondary);
+    }
+    println!();
+    
+    // Create RPC client
+    let rpc = RpcClient::new(rpc_url.to_string());
+    
+    // Load signers
+    println!("Loading signers...");
+    let signers_path = config.manage.signers_path.as_ref().unwrap();
+    let signers = load_signers_from_directory(signers_path)?;
+    println!("  Found {} signer(s)", signers.len());
+    
+    // Discover accounts
+    println!("Discovering accounts...");
+    let discovery = discover_accounts(&rpc, &config.manage)?;
+    println!("  Managers: {}", discovery.managers.len());
+    println!("  Miners: {}", discovery.miners.len());
+    println!("  Legacy miners: {}", discovery.legacy_miners.len());
+    println!();
+    
+    if discovery.miners.is_empty() && discovery.legacy_miners.is_empty() {
+        println!("No miners found. Check that:");
+        println!("  - signers_path contains valid keypair files (*.json)");
+        println!("  - The signers are authorities on Manager accounts");
+        println!("  - The managers have associated Miner accounts");
+        return Ok(());
+    }
+    
+    // Set panic hook to restore terminal on panic
+    let original_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let _ = manage_tui::restore();
+        original_hook(panic_info);
+    }));
+    
+    // Initialize TUI
+    let mut terminal = manage_tui::init()?;
+    
+    // Create app state
+    let mut app = ManageApp::new(rpc_url, config.manage.clone(), discovery, signers);
+    
+    // Main TUI loop
+    let result = async {
+        while app.running {
+            // Draw UI
+            terminal.draw(|frame| manage_tui::draw(frame, &app))?;
+            
+            // Handle input
+            match manage_tui::handle_input(&mut app)? {
+                manage_tui::InputResult::Quit => break,
+                manage_tui::InputResult::Refresh => {
+                    app.set_status("Refreshing...".to_string(), false);
+                    app.refreshing = true;
+                    
+                    // Re-discover accounts
+                    match discover_accounts(&rpc, &config.manage) {
+                        Ok(new_discovery) => {
+                            app.discovery = new_discovery.clone();
+                            app.all_miners = new_discovery.miners.clone();
+                            app.all_miners.extend(new_discovery.legacy_miners.clone());
+                            app.set_status(format!("Refreshed: {} miners", app.all_miners.len()), false);
+                        }
+                        Err(e) => {
+                            app.set_status(format!("Refresh failed: {}", e), true);
+                        }
+                    }
+                    app.refreshing = false;
+                }
+                manage_tui::InputResult::ExecuteAction(miner_idx, action) => {
+                    // Clone the miner data we need to avoid borrow conflicts
+                    let miner_data = app.all_miners.get(miner_idx).cloned();
+                    
+                    match miner_data {
+                        None => {
+                            app.set_status("Miner not found".to_string(), true);
+                        }
+                        Some(miner) => {
+                            // Find the signer keypair for this miner
+                            let signer = {
+                                use solana_sdk::signer::Signer;
+                                app.signers.iter()
+                                    .find(|(kp, _)| kp.pubkey() == miner.signer)
+                                    .map(|(kp, _)| kp.clone())
+                            };
+                            
+                            match signer {
+                                None => {
+                                    app.set_status("Signer keypair not found".to_string(), true);
+                                }
+                                Some(signer_keypair) => {
+                                    app.set_status(format!("Executing {}...", action.as_str()), false);
+                                    
+                                    let blockhash = rpc.get_latest_blockhash()
+                                        .map_err(|e| format!("Failed to get blockhash: {}", e));
+                                    
+                                    match blockhash {
+                                        Ok(bh) => {
+                                            let tx_result = execute_miner_action(
+                                                &rpc,
+                                                &signer_keypair,
+                                                &miner,
+                                                action,
+                                                bh,
+                                            );
+                                            
+                                            match tx_result {
+                                                Ok(sig) => {
+                                                    app.log_tx(miner_idx, action, Some(sig), None);
+                                                    app.set_status(format!("✓ {} complete: {}...", action.as_str(), &sig.to_string()[..8]), false);
+                                                }
+                                                Err(e) => {
+                                                    app.log_tx(miner_idx, action, None, Some(e.clone()));
+                                                    app.set_status(format!("✗ {} failed: {}", action.as_str(), e), true);
+                                                }
+                                            }
+                                        }
+                                        Err(e) => {
+                                            app.set_status(e, true);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                manage_tui::InputResult::Continue => {}
+            }
+            
+            tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        }
+        Ok::<(), Box<dyn std::error::Error>>(())
+    }.await;
+    
+    // Restore terminal
+    manage_tui::restore()?;
+    
+    result
+}
+
+/// Execute a miner action (checkpoint, claim_sol, claim_ore)
+fn execute_miner_action(
+    rpc: &solana_client::rpc_client::RpcClient,
+    signer: &std::sync::Arc<Keypair>,
+    miner: &manage::DiscoveredMiner,
+    action: manage_tui::MinerAction,
+    blockhash: solana_sdk::hash::Hash,
+) -> Result<solana_sdk::signature::Signature, String> {
+    
+    let tx = match action {
+        manage_tui::MinerAction::Checkpoint => {
+            if miner.is_legacy {
+                return Err("Checkpoint not supported for legacy miners".to_string());
+            }
+            
+            // Build checkpoint transaction
+            let round_id = miner.miner.round_id;
+            deploy::build_checkpoint_tx(
+                signer.as_ref(),
+                &miner.manager,
+                miner.auth_id,
+                round_id,
+                blockhash,
+            )
+        }
+        manage_tui::MinerAction::ClaimSol => {
+            if miner.is_legacy {
+                // For legacy miners, we need to build the tx with the legacy program ID
+                // For now, use the same instruction but note this may need adjustment
+                // based on the legacy program's instruction format
+                deploy::build_claim_sol_tx(
+                    signer.as_ref(),
+                    &miner.manager,
+                    miner.auth_id,
+                    blockhash,
+                )
+            } else {
+                deploy::build_claim_sol_tx(
+                    signer.as_ref(),
+                    &miner.manager,
+                    miner.auth_id,
+                    blockhash,
+                )
+            }
+        }
+        manage_tui::MinerAction::ClaimOre => {
+            // Build claim ORE transaction
+            deploy::build_claim_ore_tx(
+                signer.as_ref(),
+                &miner.manager,
+                miner.auth_id,
+                blockhash,
+            )
+        }
+    };
+    
+    // Send and confirm transaction
+    match rpc.send_and_confirm_transaction(&tx) {
+        Ok(sig) => Ok(sig),
+        Err(e) => Err(format!("{}", e)),
+    }
 }

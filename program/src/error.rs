@@ -20,8 +20,8 @@ pub enum EvoreError {
     TooManySlotsLeft = 2,
     
     /// The round has already ended
-    #[error("End slot exceeded: round has already ended")]
-    EndSlotExceeded = 3,
+    #[error("End slot reached: round has already ended")]
+    EndSlotReached = 3,
     
     // ========================
     // Account Validation Errors

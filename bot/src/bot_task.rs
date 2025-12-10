@@ -353,7 +353,8 @@ pub async fn run_bot_task(
         let deploy_start_slot = config.params.slots_left;
         
         // Wait until one slot BEFORE deploy_start_slot
-        let wait_until_slot = deploy_start_slot.saturating_sub(1);
+        //let wait_until_slot = deploy_start_slot.saturating_sub(1);
+        let wait_until_slot = deploy_start_slot;
         
         if current_slot < wait_until_slot {
             let _ = tx.send(TuiUpdate::BotStatusUpdate {

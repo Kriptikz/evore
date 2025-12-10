@@ -1,8 +1,14 @@
 # Current Tasks
 
-> Last Updated: 2025-12-05 (Phase 14: Play/Pause Complete, Phase 15: Manage Command Next)
+> Last Updated: 2025-12-05 (Phase 14: Play/Pause Complete, Phase 15: Manage Command Complete)
 
 ## Active
+
+(No active tasks - Phase 15 complete!)
+
+---
+
+## Completed Recently
 
 ### Task 38: Phase 14 - Play/Pause Feature ✅
 **Priority:** 🟢 High
@@ -34,49 +40,64 @@ Add play/pause functionality to control individual bot activity.
 
 ---
 
-### Task 39: Phase 15 - Manage Command (Miner Management TUI)
+### Task 39: Phase 15 - Manage Command (Miner Management TUI) ✅
 **Priority:** 🟢 High
-**Status:** Not Started (0/5 phases)
+**Status:** Complete (5/5 phases)
 
 New CLI command with TUI for managing mining accounts across multiple signers and programs.
 
-**Phase 15a: Config & Discovery**
-- [ ] Add `[manage]` section to config with `signers_path` and `secondary_program_id`
-- [ ] Create `manage_config.rs` module for parsing
-- [ ] Implement signer keypair loading from directory (glob *.json)
-- [ ] Implement `get_managers_by_authority()` with memcmp filter (offset=8)
-- [ ] Implement `get_miners_for_manager()` with auth_id loop (1, 2, 3... until not found)
-- [ ] Add `old_program_authority_pda()` function for secondary program
+**Phase 15a: Config & Discovery** ✅
+- [x] Add `[manage]` section to config with `signers_path` and `secondary_program_id`
+- [x] Create ManageConfig in config.rs module
+- [x] Implement signer keypair loading from directory (*.json files)
+- [x] Implement `get_managers_by_authority()` with memcmp filter (offset=8)
+- [x] Implement `get_miners_for_manager()` with auth_id loop (1, 2, 3... until not found)
+- [x] Add `authority_pda()` function with configurable program_id for legacy support
 
-**Phase 15b: CLI Command**
-- [ ] Add `manage` subcommand to CLI
-- [ ] Load manage config section
-- [ ] Initialize account discovery
-- [ ] Launch manage TUI
+**Phase 15b: CLI Command** ✅
+- [x] Add `manage` subcommand to CLI
+- [x] Load manage config section
+- [x] Initialize account discovery
+- [x] Launch manage TUI
 
-**Phase 15c: Manage TUI Layout**
-- [ ] Create `manage_tui.rs` module
-- [ ] Design miner card widget with selectable actions
-- [ ] Grid layout for miner cards (responsive to terminal size)
-- [ ] Distinguish legacy miners with program ID marker (start/end chars)
-- [ ] Status bar with signer/manager/miner counts
+**Phase 15c: Manage TUI Layout** ✅
+- [x] Create `manage_tui.rs` module
+- [x] Design miner list with selectable actions (Checkpoint, Claim SOL, Claim ORE)
+- [x] List layout with scrolling support
+- [x] Distinguish legacy miners with program ID marker and LEGACY label
+- [x] Status bar with signer/manager/miner counts and total claimable amounts
 
-**Phase 15d: Action Execution**
-- [ ] Implement checkpoint action (build & send tx)
-- [ ] Implement claim_sol action (build & send tx)
-- [ ] Implement claim_ore action (build & send tx)
-- [ ] Transaction status feedback (spinner, success/fail)
-- [ ] Refresh miner data after action completion
+**Phase 15d: Action Execution** ✅
+- [x] Implement checkpoint action (build & send tx)
+- [x] Implement claim_sol action (build & send tx)
+- [x] Implement claim_ore action (build & send tx)
+- [x] Transaction status feedback (success/fail messages)
+- [x] Refresh miner data via R hotkey
 
-**Phase 15e: Legacy Program Support**
-- [ ] Parse `secondary_program_id` from config
-- [ ] Implement old program account discovery with custom authority_pda
-- [ ] Build legacy claim_sol/claim_ore transactions (no checkpoint)
-- [ ] Display legacy miners with program ID prefix/suffix
+**Phase 15e: Legacy Program Support** ✅
+- [x] Parse `secondary_program_id` from config
+- [x] Implement old program account discovery with configurable authority_pda
+- [x] Build legacy claim_sol/claim_ore transactions (no checkpoint for legacy)
+- [x] Display legacy miners with LEGACY label and program ID prefix
+
+**New Files Created:**
+- `bot/src/manage.rs` - Account discovery and miner management logic
+- `bot/src/manage_tui.rs` - TUI for miner management
+- `bot/src/deploy.rs` - Added `build_claim_ore_tx()` function
+
+**Usage:**
+```bash
+cargo run -- manage --config app-config.toml
+```
+
+**Config Example:**
+```toml
+[manage]
+signers_path = "/path/to/signers/directory"
+# secondary_program_id = "OLD_PROGRAM_ID_HERE"  # Optional
+```
 
 ---
-
-## Completed Recently
 
 ### Task 37: Phase 12 - Improved Board & Deployment Tracking ✅
 **Priority:** 🟢 High
