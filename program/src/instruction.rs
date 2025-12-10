@@ -1,7 +1,7 @@
 use spl_associated_token_account::get_associated_token_address;
 use steel::*;
 
-use crate::{consts::FEE_COLLECTOR, entropy_api, ore_api::{self, automation_pda, board_pda, config_pda, miner_pda, round_pda, treasury_pda}, state::managed_miner_auth_pda};
+use crate::{consts::FEE_COLLECTOR, entropy_api, ore_api::{self, automation_pda, board_pda, config_pda, miner_pda, round_pda, treasury_pda}, state::{managed_miner_auth_pda, deployer_pda, autodeploy_balance_pda}};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, TryFromPrimitive)]
@@ -11,6 +11,12 @@ pub enum Instructions {
     MMCheckpoint = 2,
     MMClaimSOL = 3,
     MMClaimORE = 4,
+    CreateDeployer = 5,
+    UpdateDeployer = 6,
+    MMAutodeploy = 7,
+    DepositAutodeployBalance = 8,
+    RecycleSol = 9,
+    WithdrawAutodeployBalance = 10,
 }
 
 /// Deployment strategy enum with associated data
@@ -436,6 +442,308 @@ pub fn mm_claim_ore(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instructio
         data: MMClaimORE {
             auth_id: auth_id.to_le_bytes(),
             bump,
+        }.to_bytes(),
+    }
+}
+
+// ============================================================================
+// Deployer Instructions
+// ============================================================================
+
+/// CreateDeployer instruction data
+/// Creates a new deployer account for a manager
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct CreateDeployer {
+    /// Fee in basis points (1000 = 10%)
+    pub fee_bps: [u8; 8],
+}
+
+instruction!(Instructions, CreateDeployer);
+
+/// Create a deployer account for a manager
+/// The manager authority signs to authorize the deployer creation
+/// deploy_authority is the key that will be allowed to execute autodeploys
+pub fn create_deployer(
+    signer: Pubkey,
+    manager: Pubkey,
+    deploy_authority: Pubkey,
+    fee_bps: u64,
+) -> Instruction {
+    let (deployer_address, _bump) = deployer_pda(manager);
+
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(manager, false),
+            AccountMeta::new(deployer_address, false),
+            AccountMeta::new_readonly(deploy_authority, false),
+            AccountMeta::new_readonly(system_program::id(), false),
+        ],
+        data: CreateDeployer {
+            fee_bps: fee_bps.to_le_bytes(),
+        }.to_bytes(),
+    }
+}
+
+/// UpdateDeployer instruction data
+/// Updates deployer configuration (manager authority only)
+/// Pass current values for fields you don't want to change
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct UpdateDeployer {
+    /// New fee in basis points (1000 = 10%)
+    pub fee_bps: [u8; 8],
+}
+
+instruction!(Instructions, UpdateDeployer);
+
+/// Update deployer configuration (manager authority only)
+/// Pass current values for fields you don't want to change
+pub fn update_deployer(
+    signer: Pubkey,
+    manager: Pubkey,
+    new_deploy_authority: Pubkey,
+    new_fee_bps: u64,
+) -> Instruction {
+    let (deployer_address, _bump) = deployer_pda(manager);
+
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(manager, false),
+            AccountMeta::new(deployer_address, false),
+            AccountMeta::new_readonly(new_deploy_authority, false),
+        ],
+        data: UpdateDeployer {
+            fee_bps: new_fee_bps.to_le_bytes(),
+        }.to_bytes(),
+    }
+}
+
+/// MMAutodeploy instruction data
+/// A simplified deploy wrapper for third-party deployers
+/// Funds come from the autodeploy_balance PDA (deposited by manager authority)
+/// 
+/// Layout:
+/// - auth_id: [u8; 8] - Manager auth ID
+/// - bump: u8 - managed_miner_auth PDA bump
+/// - deployer_bump: u8 - deployer PDA bump
+/// - autodeploy_balance_bump: u8 - autodeploy_balance PDA bump
+/// - _pad: [u8; 5] - Padding for alignment
+/// - amount: [u8; 8] - Amount to deploy per square
+/// - squares_mask: [u8; 4] - Bitmask of squares to deploy to
+/// - expected_fee: [u8; 8] - Expected deployer fee (in basis points), 0 to skip check
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct MMAutodeploy {
+    pub auth_id: [u8; 8],
+    pub bump: u8,
+    pub deployer_bump: u8,
+    pub autodeploy_balance_bump: u8,
+    pub _pad: [u8; 5],
+    pub amount: [u8; 8],
+    pub squares_mask: [u8; 4],
+    pub expected_fee: [u8; 8],
+}
+
+instruction!(Instructions, MMAutodeploy);
+
+/// Build autodeploy accounts
+fn build_autodeploy_accounts(
+    signer: Pubkey,
+    manager: Pubkey,
+    auth_id: u64,
+    round_id: u64,
+) -> (Vec<AccountMeta>, u8, u8, u8) {
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let (deployer_address, deployer_bump) = deployer_pda(manager);
+    let (autodeploy_balance_address, autodeploy_balance_bump) = autodeploy_balance_pda(deployer_address);
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
+
+    let automation_address = automation_pda(managed_miner_auth_address).0;
+    let board_address = board_pda().0;
+    let config_address = config_pda().0;
+    let round_address = round_pda(round_id).0;
+    let entropy_var_address = entropy_api::var_pda(board_address, 0).0;
+
+    let accounts = vec![
+        AccountMeta::new(signer, true),                           // 0: deploy_authority (signer)
+        AccountMeta::new(manager, false),                         // 1: manager
+        AccountMeta::new(deployer_address, false),                // 2: deployer PDA
+        AccountMeta::new(autodeploy_balance_address, false),      // 3: autodeploy_balance PDA (funds source)
+        AccountMeta::new(managed_miner_auth_address, false),      // 4: managed_miner_auth PDA
+        AccountMeta::new(ore_miner_address.0, false),             // 5: ore_miner
+        AccountMeta::new(FEE_COLLECTOR, false),                   // 6: fee_collector
+        AccountMeta::new(automation_address, false),              // 7: automation
+        AccountMeta::new(config_address, false),                  // 8: config
+        AccountMeta::new(board_address, false),                   // 9: board
+        AccountMeta::new(round_address, false),                   // 10: round
+        AccountMeta::new(entropy_var_address, false),             // 11: entropy_var
+        AccountMeta::new_readonly(ore_api::id(), false),          // 12: ore_program
+        AccountMeta::new_readonly(entropy_api::id(), false),      // 13: entropy_program
+        AccountMeta::new_readonly(system_program::id(), false),   // 14: system_program
+    ];
+
+    (accounts, bump, deployer_bump, autodeploy_balance_bump)
+}
+
+/// Deploy using autodeploy (via deployer)
+/// Funds are taken from the autodeploy_balance PDA
+/// 
+/// Args:
+/// - signer: The deploy_authority (must match deployer.deploy_authority)
+/// - manager: The manager account
+/// - auth_id: The auth ID for the managed miner
+/// - round_id: The current round ID
+/// - amount: Amount to deploy per selected square
+/// - squares: Bitmask of squares to deploy to (each bit = one square, 25 bits used)
+/// - expected_fee: The fee in basis points expected (0 to skip fee validation)
+pub fn mm_autodeploy(
+    signer: Pubkey,
+    manager: Pubkey,
+    auth_id: u64,
+    round_id: u64,
+    amount: u64,
+    squares_mask: u32,
+    expected_fee: u64,
+) -> Instruction {
+    let (accounts, bump, deployer_bump, autodeploy_balance_bump) = build_autodeploy_accounts(signer, manager, auth_id, round_id);
+
+    Instruction {
+        program_id: crate::id(),
+        accounts,
+        data: MMAutodeploy {
+            auth_id: auth_id.to_le_bytes(),
+            bump,
+            deployer_bump,
+            autodeploy_balance_bump,
+            _pad: [0; 5],
+            amount: amount.to_le_bytes(),
+            squares_mask: squares_mask.to_le_bytes(),
+            expected_fee: expected_fee.to_le_bytes(),
+        }.to_bytes(),
+    }
+}
+
+// ============================================================================
+// Autodeploy Balance Instructions
+// ============================================================================
+
+/// DepositAutodeployBalance instruction data
+/// Deposits SOL into the autodeploy_balance PDA for a deployer
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct DepositAutodeployBalance {
+    /// Amount to deposit in lamports
+    pub amount: [u8; 8],
+}
+
+instruction!(Instructions, DepositAutodeployBalance);
+
+/// Deposit SOL into the autodeploy balance PDA
+/// Only the manager authority can deposit
+pub fn deposit_autodeploy_balance(
+    signer: Pubkey,
+    manager: Pubkey,
+    amount: u64,
+) -> Instruction {
+    let (deployer_address, _) = deployer_pda(manager);
+    let (autodeploy_balance_address, _) = autodeploy_balance_pda(deployer_address);
+
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),                      // 0: signer (manager authority)
+            AccountMeta::new(manager, false),                    // 1: manager
+            AccountMeta::new(deployer_address, false),           // 2: deployer PDA
+            AccountMeta::new(autodeploy_balance_address, false), // 3: autodeploy_balance PDA
+            AccountMeta::new_readonly(system_program::id(), false), // 4: system_program
+        ],
+        data: DepositAutodeployBalance {
+            amount: amount.to_le_bytes(),
+        }.to_bytes(),
+    }
+}
+
+/// RecycleSol instruction data
+/// Claims SOL from miner account and puts it into the autodeploy_balance PDA
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct RecycleSol {
+    /// Auth ID of the managed miner
+    pub auth_id: [u8; 8],
+    /// Bump for managed_miner_auth PDA
+    pub bump: u8,
+}
+
+instruction!(Instructions, RecycleSol);
+
+/// Recycle SOL from a miner account to the autodeploy_balance PDA
+/// Can be called by deploy_authority
+pub fn recycle_sol(
+    signer: Pubkey,
+    manager: Pubkey,
+    auth_id: u64,
+) -> Instruction {
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
+    let (deployer_address, _) = deployer_pda(manager);
+    let (autodeploy_balance_address, _) = autodeploy_balance_pda(deployer_address);
+
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),                      // 0: signer (deploy_authority)
+            AccountMeta::new(manager, false),                    // 1: manager
+            AccountMeta::new(deployer_address, false),           // 2: deployer PDA
+            AccountMeta::new(autodeploy_balance_address, false), // 3: autodeploy_balance PDA
+            AccountMeta::new(managed_miner_auth_address, false), // 4: managed_miner_auth PDA
+            AccountMeta::new(ore_miner_address.0, false),        // 5: ore_miner
+            AccountMeta::new_readonly(ore_api::id(), false),     // 6: ore_program
+            AccountMeta::new_readonly(system_program::id(), false), // 7: system_program
+        ],
+        data: RecycleSol {
+            auth_id: auth_id.to_le_bytes(),
+            bump,
+        }.to_bytes(),
+    }
+}
+
+/// WithdrawAutodeployBalance instruction data
+/// Withdraws SOL from the autodeploy_balance PDA to the manager authority
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct WithdrawAutodeployBalance {
+    /// Amount to withdraw in lamports
+    pub amount: [u8; 8],
+}
+
+instruction!(Instructions, WithdrawAutodeployBalance);
+
+/// Withdraw SOL from the autodeploy_balance PDA
+/// Only the manager authority can withdraw, and only to themselves
+pub fn withdraw_autodeploy_balance(
+    signer: Pubkey,
+    manager: Pubkey,
+    amount: u64,
+) -> Instruction {
+    let (deployer_address, _) = deployer_pda(manager);
+    let (autodeploy_balance_address, _) = autodeploy_balance_pda(deployer_address);
+
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),                      // 0: signer (manager authority, also recipient)
+            AccountMeta::new(manager, false),                    // 1: manager
+            AccountMeta::new(deployer_address, false),           // 2: deployer PDA
+            AccountMeta::new(autodeploy_balance_address, false), // 3: autodeploy_balance PDA
+            AccountMeta::new_readonly(system_program::id(), false), // 4: system_program
+        ],
+        data: WithdrawAutodeployBalance {
+            amount: amount.to_le_bytes(),
         }.to_bytes(),
     }
 }

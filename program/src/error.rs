@@ -58,6 +58,34 @@ pub enum EvoreError {
     /// Already deployed to this round and multi-deploy is not allowed
     #[error("Already deployed: multi-deploy not allowed for this strategy")]
     AlreadyDeployedThisRound = 9,
+    
+    // ========================
+    // Deployer Errors
+    // ========================
+    
+    /// The deployer account has not been initialized
+    #[error("Deployer not initialized: create deployer first")]
+    DeployerNotInitialized = 10,
+    
+    /// The signer is not the deployer's deploy_authority
+    #[error("Invalid deploy authority: signer is not authorized to deploy")]
+    InvalidDeployAuthority = 11,
+    
+    /// The expected fee does not match the deployer's configured fee
+    #[error("Unexpected fee: deployer fee does not match expected_fee")]
+    UnexpectedFee = 12,
+    
+    /// The deployer account is already initialized
+    #[error("Deployer already initialized")]
+    DeployerAlreadyInitialized = 13,
+    
+    /// Insufficient balance in autodeploy_balance PDA
+    #[error("Insufficient autodeploy balance: deposit more SOL")]
+    InsufficientAutodeployBalance = 14,
+    
+    /// No claimable SOL in miner account
+    #[error("Nothing to recycle: no claimable SOL in miner")]
+    NothingToRecycle = 15,
 }
 
 error!(EvoreError);

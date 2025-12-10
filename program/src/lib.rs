@@ -51,6 +51,24 @@ pub fn process_instruction(
         Instructions::MMClaimORE => {
             process_claim_ore::process_claim_ore(accounts, data)?;
         }
+        Instructions::CreateDeployer => {
+            process_create_deployer::process_create_deployer(accounts, data)?;
+        }
+        Instructions::UpdateDeployer => {
+            process_update_deployer::process_update_deployer(accounts, data)?;
+        }
+        Instructions::MMAutodeploy => {
+            process_mm_autodeploy::process_mm_autodeploy(accounts, data)?;
+        }
+        Instructions::DepositAutodeployBalance => {
+            process_deposit_autodeploy_balance::process_deposit_autodeploy_balance(accounts, data)?;
+        }
+        Instructions::RecycleSol => {
+            process_recycle_sol::process_recycle_sol(accounts, data)?;
+        }
+        Instructions::WithdrawAutodeployBalance => {
+            process_withdraw_autodeploy_balance::process_withdraw_autodeploy_balance(accounts, data)?;
+        }
     }
 
     Ok(())
