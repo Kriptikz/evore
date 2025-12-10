@@ -35,6 +35,10 @@ pub enum DeployStrategy {
     Manual {
         amounts: [u64; 25],   // Amount to deploy on each square (0 = skip)
     },
+    /// Split: deploy total amount equally across all 25 squares in one CPI call
+    Split {
+        amount: u64,          // Total amount to split across 25 squares
+    },
 }
 
 impl DeployStrategy {
@@ -44,6 +48,7 @@ impl DeployStrategy {
             DeployStrategy::EV { .. } => 0,
             DeployStrategy::Percentage { .. } => 1,
             DeployStrategy::Manual { .. } => 2,
+            DeployStrategy::Split { .. } => 3,
         }
     }
 }
@@ -74,7 +79,7 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
 /// - allow_multi_deploy: u8 - If 0, fail if already deployed this round (applies to all strategies)
 /// - _pad: [u8; 6] - Padding for alignment
 /// - data: [u8; 256] - Strategy data where:
-///   - data[0]: strategy discriminant (0 = EV, 1 = Percentage, 2 = Manual)
+///   - data[0]: strategy discriminant (0 = EV, 1 = Percentage, 2 = Manual, 3 = Split)
 ///   
 ///   EV (strategy = 0):
 ///     - data[1..9]: bankroll
@@ -91,6 +96,9 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
 ///   
 ///   Manual (strategy = 2):
 ///     - data[1..201]: 25 x u64 amounts (one per square)
+///   
+///   Split (strategy = 3):
+///     - data[1..9]: amount (total to split across 25 squares)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MMDeploy {
@@ -132,6 +140,10 @@ impl MMDeploy {
                     data[start..end].copy_from_slice(&amount.to_le_bytes());
                 }
             },
+            DeployStrategy::Split { amount } => {
+                data[0] = 3; // Split strategy
+                data[1..9].copy_from_slice(&amount.to_le_bytes());
+            },
         }
         
         Self {
@@ -171,6 +183,10 @@ impl MMDeploy {
                     amounts[i] = u64::from_le_bytes(self.data[start..end].try_into().unwrap());
                 }
                 Ok(DeployStrategy::Manual { amounts })
+            },
+            3 => { // Split
+                let amount = u64::from_le_bytes(self.data[1..9].try_into().unwrap());
+                Ok(DeployStrategy::Split { amount })
             },
             _ => Err(()),
         }
@@ -288,6 +304,26 @@ pub fn manual_deploy(
     let (accounts, bump) = build_deploy_accounts(signer, manager, auth_id, round_id);
     
     let strategy = DeployStrategy::Manual { amounts };
+
+    Instruction {
+        program_id: crate::id(),
+        accounts,
+        data: MMDeploy::new(auth_id, bump, allow_multi_deploy, strategy).to_bytes(),
+    }
+}
+
+/// Deploy using split strategy - split total amount equally across all 25 squares in one CPI call
+pub fn split_deploy(
+    signer: Pubkey,
+    manager: Pubkey,
+    auth_id: u64,
+    round_id: u64,
+    amount: u64,          // Total amount to split across 25 squares
+    allow_multi_deploy: bool,
+) -> Instruction {
+    let (accounts, bump) = build_deploy_accounts(signer, manager, auth_id, round_id);
+    
+    let strategy = DeployStrategy::Split { amount };
 
     Instruction {
         program_id: crate::id(),

@@ -36,7 +36,7 @@ manager_path = "/Users/kriptikz/Development/game-wallets/perc-bot-manager.json"
 [bots.strategy_params]
 type = "percentage"
 percentage = 5000
-squares_count = 18
+squares_count = 25
 
 [[bots]]
 name = "EV SOL"

@@ -4,8 +4,39 @@ use solana_program::{
 use steel::*;
 
 use crate::{
-    consts::{DEPLOY_FEE, FEE_COLLECTOR, MIN_DEPLOY_FEE}, entropy_api, error::EvoreError, instruction::{DeployStrategy, MMDeploy}, ore_api::{self, Board, Round}, state::Manager
+    consts::{DEPLOY_FEE, FEE_COLLECTOR}, entropy_api, error::EvoreError, instruction::{DeployStrategy, MMDeploy}, ore_api::{self, Board, Round}, state::Manager
 };
+
+/// Maximum number of CPI calls allowed per transaction
+const MAX_CPI_CALLS: usize = 18;
+
+/// A batch of deployments to execute in a single CPI call
+/// Multiple squares can receive the same amount in one CPI
+#[derive(Clone, Debug)]
+pub struct DeploymentBatch {
+    pub amount: u64,
+    pub squares: [bool; 25],
+}
+
+impl DeploymentBatch {
+    pub fn new(amount: u64, squares: [bool; 25]) -> Self {
+        Self { amount, squares }
+    }
+    
+    /// Create a batch for a single square
+    pub fn single(amount: u64, square_idx: usize) -> Self {
+        let mut squares = [false; 25];
+        if square_idx < 25 {
+            squares[square_idx] = true;
+        }
+        Self { amount, squares }
+    }
+    
+    /// Create a batch for all 25 squares
+    pub fn all_squares(amount: u64) -> Self {
+        Self { amount, squares: [true; 25] }
+    }
+}
 
 pub fn process_mm_deploy(
     accounts: &[AccountInfo],
@@ -116,8 +147,8 @@ pub fn process_mm_deploy(
         }
     }
 
-    // Calculate deployments based on strategy
-    let (squares, total_deployed) = match strategy {
+    // Calculate deployments based on strategy - returns batched deployments
+    let (batches, total_deployed) = match strategy {
         DeployStrategy::EV { bankroll, max_per_square, min_bet, ore_value, .. } => {
             calculate_ev_deployments(round, bankroll, min_bet, max_per_square, ore_value)
         },
@@ -126,6 +157,9 @@ pub fn process_mm_deploy(
         },
         DeployStrategy::Manual { amounts } => {
             calculate_manual_deployments(amounts)
+        },
+        DeployStrategy::Split { amount } => {
+            calculate_split_deployments(round, amount)
         },
     };
 
@@ -211,24 +245,20 @@ pub fn process_mm_deploy(
         )?;
     }
 
-    for i in 0..25 {
-        let amt = squares[i];
-        if amt == 0 {
+    // Execute batched deployments - each batch is a single CPI call
+    let managed_miner_auth_key = *deploy_accounts[0].key;
+    for batch in batches {
+        if batch.amount == 0 {
             continue;
         }
 
-        let selected_squares = get_selected_squares(i);
-        let managed_miner_auth_key = deploy_accounts[0].key.clone();
-
-        // cpi deploy amount on square
-        let amt: u64 = amt.try_into().map_err(|_| EvoreError::ArithmeticOverflow)?;
         solana_program::program::invoke_signed(
             &ore_api::deploy(
                 managed_miner_auth_key,
                 managed_miner_auth_key,
-                amt,
+                batch.amount,
                 round.id,
-                selected_squares,
+                batch.squares,
             ),
             &deploy_accounts,
             &[&[
@@ -243,13 +273,14 @@ pub fn process_mm_deploy(
     Ok(())
 }
 
-/// Calculate deployments using percentage strategy
+/// Calculate deployments using percentage strategy with bucketing for CPI optimization.
 /// Deploys to own `percentage` (in basis points) of each square across `squares_count` squares.
 /// 
-/// Key behavior: If bankroll is insufficient to achieve the requested percentage across all
-/// squares, the percentage is automatically reduced so that ALL specified squares receive
-/// an equal (lower) percentage of deployment. This ensures even coverage rather than
-/// partial coverage at the full percentage.
+/// Key behavior: 
+/// - If bankroll is insufficient, percentage is automatically reduced.
+/// - If more than 18 squares need deployment, squares are grouped into exactly 18 buckets
+///   based on similar deployment amounts. Squares in each bucket receive the average amount.
+/// - If 18 or fewer squares, each square gets its own deployment (no bucketing).
 /// 
 /// Formula to own P% of square: amount = P * T / (10000 - P)
 /// Max affordable percentage: P_max = 10000 * B / (Total + B)
@@ -258,103 +289,193 @@ fn calculate_percentage_deployments(
     bankroll: u64,
     percentage: u64,      // In basis points (1000 = 10%)
     squares_count: u64,   // Number of squares to deploy to (1-25)
-) -> ([u128; 25], u64) {
-    let mut out = [0u128; 25];
-    
+) -> (Vec<DeploymentBatch>, u64) {
     // Validate inputs
     if percentage == 0 || percentage >= 10000 || squares_count == 0 || squares_count > 25 || bankroll == 0 {
-        return (out, 0);
+        return (Vec::new(), 0);
     }
     
     let count = (squares_count as usize).min(25);
     
-    // Step 1: Calculate total deployed across the squares we want to deploy to
-    // and count how many have non-zero amounts (can't deploy to empty squares)
+    // Step 1: Calculate total deployed across target squares and identify deployable squares
     let mut total_on_target_squares: u128 = 0;
-    let mut deployable_squares = 0usize;
+    let mut deployable_indices: Vec<usize> = Vec::new();
     
     for i in 0..count {
         if round.deployed[i] > 0 {
             total_on_target_squares += round.deployed[i] as u128;
-            deployable_squares += 1;
+            deployable_indices.push(i);
         }
     }
     
     // If no squares have existing deployments, we can't deploy
-    if deployable_squares == 0 || total_on_target_squares == 0 {
-        return (out, 0);
+    if deployable_indices.is_empty() || total_on_target_squares == 0 {
+        return (Vec::new(), 0);
     }
     
-    // Step 2: Calculate the cost to deploy at requested percentage across all target squares
-    // amount_for_p% = P * T / (10000 - P)
+    // Step 2: Determine actual percentage (may reduce if bankroll insufficient)
     let p = percentage as u128;
     let b = bankroll as u128;
     let total_cost_at_requested = (p * total_on_target_squares) / (10000 - p);
     
-    // Step 3: Determine actual percentage to use
-    // If requested percentage costs more than bankroll, calculate max affordable percentage
-    // P_max = 10000 * B / (Total + B)
     let actual_percentage = if total_cost_at_requested > b {
-        // Scale down to what we can afford
-        // P = 10000 * B / (T + B)
         let p_max = (10000u128 * b) / (total_on_target_squares + b);
         p_max.min(percentage as u128) as u64
     } else {
         percentage
     };
     
-    // If percentage rounds to 0, no deployment possible
     if actual_percentage == 0 {
-        return (out, 0);
+        return (Vec::new(), 0);
     }
     
-    // Step 4: Deploy to each square at the (possibly reduced) percentage
-    let mut total_spent: u64 = 0;
+    // Step 3: Calculate ideal amount for each deployable square
     let p_actual = actual_percentage as u128;
+    let mut square_amounts: Vec<(usize, u64)> = Vec::new();
     
-    for i in 0..count {
-        let current_total = round.deployed[i];
-        
-        // Skip empty squares
-        if current_total == 0 {
-            continue;
-        }
-        
-        // amount = P * T / (10000 - P)
-        let t = current_total as u128;
+    for &i in &deployable_indices {
+        let t = round.deployed[i] as u128;
         let amount_u128 = (p_actual * t) / (10000 - p_actual);
-        
-        // Clamp to u64
         let amount = amount_u128.min(u64::MAX as u128) as u64;
         
-        if amount == 0 {
+        if amount > 0 {
+            square_amounts.push((i, amount));
+        }
+    }
+    
+    if square_amounts.is_empty() {
+        return (Vec::new(), 0);
+    }
+    
+    // Step 4: Create batches - bucket if >18 squares, otherwise individual
+    let num_squares = square_amounts.len();
+    
+    if num_squares <= MAX_CPI_CALLS {
+        // No bucketing needed - each square gets its own batch
+        let mut batches = Vec::with_capacity(num_squares);
+        let mut total_spent: u64 = 0;
+        
+        for (square_idx, amount) in square_amounts {
+            batches.push(DeploymentBatch::single(amount, square_idx));
+            total_spent = total_spent.saturating_add(amount);
+        }
+        
+        (batches, total_spent)
+    } else {
+        // Bucketing required - sort by amount and group into exactly 18 buckets
+        bucket_deployments(square_amounts)
+    }
+}
+
+/// Group squares into exactly 18 buckets based on similar deployment amounts.
+/// Squares are sorted by amount and then divided into 18 groups.
+/// Each bucket deploys the average amount to all squares in that bucket.
+fn bucket_deployments(mut square_amounts: Vec<(usize, u64)>) -> (Vec<DeploymentBatch>, u64) {
+    let num_squares = square_amounts.len();
+    
+    // Sort by amount ascending so adjacent squares have similar amounts
+    square_amounts.sort_by_key(|&(_, amt)| amt);
+    
+    // Distribute squares into exactly 18 buckets
+    // With N squares and 18 buckets:
+    // - First (N % 18) buckets get (N / 18 + 1) squares each
+    // - Remaining buckets get (N / 18) squares each
+    let base_size = num_squares / MAX_CPI_CALLS;
+    let extra_squares = num_squares % MAX_CPI_CALLS;
+    
+    let mut batches = Vec::with_capacity(MAX_CPI_CALLS);
+    let mut total_spent: u64 = 0;
+    let mut idx = 0;
+    
+    for bucket_idx in 0..MAX_CPI_CALLS {
+        // Determine how many squares go in this bucket
+        let bucket_size = if bucket_idx < extra_squares {
+            base_size + 1
+        } else {
+            base_size
+        };
+        
+        if bucket_size == 0 {
             continue;
         }
         
-        out[i] = amount as u128;
-        total_spent = total_spent.saturating_add(amount);
+        // Collect squares for this bucket and calculate average amount
+        let mut squares_mask = [false; 25];
+        let mut sum_amounts: u64 = 0;
+        
+        for _ in 0..bucket_size {
+            if idx < num_squares {
+                let (square_idx, amount) = square_amounts[idx];
+                squares_mask[square_idx] = true;
+                sum_amounts = sum_amounts.saturating_add(amount);
+                idx += 1;
+            }
+        }
+        
+        // Use average amount for this bucket
+        let avg_amount = sum_amounts / (bucket_size as u64);
+        
+        if avg_amount > 0 {
+            // Total for this batch is avg_amount * number of squares in batch
+            let batch_total = avg_amount.saturating_mul(bucket_size as u64);
+            total_spent = total_spent.saturating_add(batch_total);
+            batches.push(DeploymentBatch::new(avg_amount, squares_mask));
+        }
     }
     
-    (out, total_spent)
+    (batches, total_spent)
+}
+
+/// Calculate deployments using split strategy
+/// Splits the total amount equally across all 25 squares in a single CPI call
+fn calculate_split_deployments(
+    round: &Round,
+    total_amount: u64,
+) -> (Vec<DeploymentBatch>, u64) {
+    if total_amount == 0 {
+        return (Vec::new(), 0);
+    }
+    
+    // Check that at least one square has existing deployments
+    // (can't deploy to completely empty board)
+    let has_deployments = round.deployed.iter().any(|&d| d > 0);
+    if !has_deployments {
+        return (Vec::new(), 0);
+    }
+    
+    // Split equally across all 25 squares
+    let per_square = total_amount / 25;
+    
+    if per_square == 0 {
+        return (Vec::new(), 0);
+    }
+    
+    // Total actually deployed (may be slightly less due to integer division)
+    let actual_total = per_square * 25;
+    
+    // Single batch with all 25 squares
+    let batch = DeploymentBatch::all_squares(per_square);
+    
+    (vec![batch], actual_total)
 }
 
 /// Calculate deployments using manual strategy
-/// Simply uses the provided amounts directly
+/// Simply uses the provided amounts directly, one batch per square
 fn calculate_manual_deployments(
     amounts: [u64; 25],
-) -> ([u128; 25], u64) {
-    let mut out = [0u128; 25];
+) -> (Vec<DeploymentBatch>, u64) {
+    let mut batches = Vec::new();
     let mut total: u64 = 0;
     
     for i in 0..25 {
         let amount = amounts[i];
         if amount > 0 {
-            out[i] = u128::from(amount);
+            batches.push(DeploymentBatch::single(amount, i));
             total = total.saturating_add(amount);
         }
     }
     
-    (out, total)
+    (batches, total)
 }
 
 /// Calculate deployments using EV waterfill strategy
@@ -364,7 +485,7 @@ fn calculate_ev_deployments(
     min_bet: u64,
     max_per_square: u64,
     ore_value_lamports: u64,
-) -> ([u128; 25], u64) {
+) -> (Vec<DeploymentBatch>, u64) {
     // Round.deployed is already [u64; 25], no conversion needed
     let r_deploys = round.deployed;
 
@@ -383,15 +504,17 @@ fn calculate_ev_deployments(
         max_per_square,
     );
 
-    // Widen u64 to u128 for the caller (safe widening cast)
-    // Also compute actual total from per_square to ensure consistency
-    let mut out = [0u128; 25];
+    // Convert per-square amounts to batches (one batch per non-zero square)
+    let mut batches = Vec::new();
     let mut actual_total: u64 = 0;
     for i in 0..25 {
-        out[i] = u128::from(plan.per_square[i]);
-        actual_total = actual_total.saturating_add(plan.per_square[i]);
+        let amount = plan.per_square[i];
+        if amount > 0 {
+            batches.push(DeploymentBatch::single(amount, i));
+            actual_total = actual_total.saturating_add(amount);
+        }
     }
-    (out, actual_total)
+    (batches, actual_total)
 }
 
 // ========================== EV Calculation Constants ==========================
@@ -921,14 +1044,5 @@ pub fn plan_max_profit_waterfill(
     }
 
     best_alloc
-}
-
-fn get_selected_squares(selected: usize) -> [bool; 25] {
-    // O(1) one-hot without a loop over 25 entries.
-    let mut selections = [false; 25];
-    if selected < 25 {
-        selections[selected] = true;
-    }
-    selections
 }
 
