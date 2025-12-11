@@ -63,12 +63,12 @@ pub fn process_update_deployer(
     // Update the deployer data
     let mut data = deployer_account_info.try_borrow_mut_data()?;
     
-    // Update deploy_authority field (offset: 8 discriminator)
-    let authority_offset = 8;
+    // Update deploy_authority field (offset: 8 discriminator + 32 manager_key = 40)
+    let authority_offset = 8 + 32;
     data[authority_offset..authority_offset + 32].copy_from_slice(new_deploy_authority_info.key.as_ref());
     
-    // Update fee_bps field (offset: 8 discriminator + 32 deploy_authority = 40)
-    let fee_offset = 8 + 32;
+    // Update fee_bps field (offset: 8 discriminator + 32 manager_key + 32 deploy_authority = 72)
+    let fee_offset = 8 + 32 + 32;
     data[fee_offset..fee_offset + 8].copy_from_slice(&new_fee_bps.to_le_bytes());
 
     Ok(())

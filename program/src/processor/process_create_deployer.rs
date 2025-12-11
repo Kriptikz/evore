@@ -84,6 +84,7 @@ pub fn process_create_deployer(
 
     // Initialize the deployer data
     let deployer = Deployer {
+        manager_key: *manager_account_info.key,
         deploy_authority: *deploy_authority_info.key,
         fee_bps,
     };

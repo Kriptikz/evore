@@ -21,11 +21,14 @@ pub struct Manager {
 account!(EvoreAccount, Manager);
 
 /// Deployer account - allows a deploy_authority to execute deploys on behalf of a manager
-/// PDA seeds: ["deployer", manager_key] - so manager_key is implicit
+/// PDA seeds: ["deployer", manager_key]
+/// Stores manager_key for easy lookup when scanning by deploy_authority
 /// The deployer charges a fee (in basis points) on each deployment
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct Deployer {
+    /// The manager account this deployer is for (needed for PDA derivation lookups)
+    pub manager_key: Pubkey,
     /// The authority that can execute deploys via this deployer
     pub deploy_authority: Pubkey,
     /// Fee in basis points (1000 = 10%, 500 = 5%, etc.)

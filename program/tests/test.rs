@@ -2907,10 +2907,12 @@ mod claim_ore {
 pub fn add_deployer_account(
     program_test: &mut ProgramTest,
     deployer_address: Pubkey,
+    manager_key: Pubkey,
     deploy_authority: Pubkey,
     fee_bps: u64,
 ) {
     let deployer = Deployer {
+        manager_key,
         deploy_authority,
         fee_bps,
     };
@@ -3049,6 +3051,7 @@ mod create_deployer {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             500,
         );
@@ -3097,6 +3100,7 @@ mod update_deployer {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             initial_fee,
         );
@@ -3145,6 +3149,7 @@ mod update_deployer {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             500,
         );
@@ -3197,6 +3202,7 @@ mod mm_autodeploy {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             fee_bps,
         );
@@ -3316,6 +3322,7 @@ mod mm_autodeploy {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             1000,
         );
@@ -3377,6 +3384,7 @@ mod mm_autodeploy {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             actual_fee,
         );
@@ -3439,6 +3447,7 @@ mod mm_autodeploy {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             actual_fee,
         );
@@ -3548,6 +3557,7 @@ mod mm_autodeploy {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             1000,
         );
@@ -3615,6 +3625,7 @@ mod mm_autodeploy {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             1000,
         );
@@ -3676,6 +3687,7 @@ mod mm_autodeploy {
         add_deployer_account(
             &mut program_test,
             deployer_address,
+            manager_address,
             deploy_authority.pubkey(),
             fee_bps,
         );

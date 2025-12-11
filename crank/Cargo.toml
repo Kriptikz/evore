@@ -1,0 +1,35 @@
+[package]
+name = "evore-crank"
+version = { workspace = true }
+edition = { workspace = true }
+
+[[bin]]
+name = "evore-crank"
+path = "src/main.rs"
+
+[dependencies]
+evore = { workspace = true }
+solana-sdk = { workspace = true }
+solana-client = { workspace = true }
+solana-account-decoder = { workspace = true }
+spl-token = { workspace = true }
+spl-associated-token-account = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+steel = { workspace = true }
+tokio = { workspace = true }
+clap = { workspace = true }
+dotenvy = { workspace = true }
+thiserror = { workspace = true }
+
+# Database
+sqlx = { version = "0.8", features = ["runtime-tokio", "sqlite"] }
+
+# HTTP client for sending transactions
+reqwest = { version = "0.11", features = ["json"] }
+base64 = "0.21"
+bincode = "1.3"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
