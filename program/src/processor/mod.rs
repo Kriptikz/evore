@@ -9,3 +9,4 @@ pub mod process_mm_autodeploy;
 pub mod process_deposit_autodeploy_balance;
 pub mod process_recycle_sol;
 pub mod process_withdraw_autodeploy_balance;
+pub mod process_mm_autocheckpoint;

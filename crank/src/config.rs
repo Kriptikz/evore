@@ -1,6 +1,6 @@
 //! Configuration for the crank program
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use solana_sdk::{pubkey::Pubkey, signature::Keypair};
 use std::path::PathBuf;
 
@@ -9,6 +9,10 @@ use std::path::PathBuf;
 #[command(name = "evore-crank")]
 #[command(about = "Automated deployer crank for Evore", long_about = None)]
 pub struct Config {
+    /// Subcommand to run
+    #[command(subcommand)]
+    pub command: Option<Command>,
+    
     /// RPC URL
     #[arg(long, env = "RPC_URL", default_value = "https://api.mainnet-beta.solana.com")]
     pub rpc_url: String,
@@ -40,6 +44,27 @@ pub struct Config {
     /// Poll interval in milliseconds
     #[arg(long, env = "POLL_INTERVAL_MS", default_value = "400")]
     pub poll_interval_ms: u64,
+    
+    /// Address Lookup Table (LUT) address for versioned transactions
+    /// If not set, a new LUT will be created on first run
+    #[arg(long, env = "LUT_ADDRESS")]
+    pub lut_address: Option<Pubkey>,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum Command {
+    /// Run the main crank loop (default)
+    Run,
+    /// Send a test transaction to verify connectivity
+    Test,
+    /// Show deployer accounts we manage
+    List,
+    /// Create a new Address Lookup Table (LUT)
+    CreateLut,
+    /// Extend LUT with deployer accounts
+    ExtendLut,
+    /// Show LUT contents
+    ShowLut,
 }
 
 impl Config {

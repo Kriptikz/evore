@@ -106,16 +106,16 @@ pub fn process_recycle_sol(
         return Err(EvoreError::InvalidPDA.into());
     }
 
-    // Check if miner exists and has claimable SOL
+    // Check if miner exists and has claimable SOL - return Ok if nothing to recycle
     if ore_miner_account_info.data_is_empty() {
-        return Err(EvoreError::NothingToRecycle.into());
+        return Ok(());
     }
 
     let miner = ore_miner_account_info.as_account::<Miner>(&ore_api::id())?;
     let claimable_sol = miner.rewards_sol;
 
     if claimable_sol == 0 {
-        return Err(EvoreError::NothingToRecycle.into());
+        return Ok(());
     }
 
     // Get balance before claim

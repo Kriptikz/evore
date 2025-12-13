@@ -40,7 +40,7 @@ squares_count = 25
 
 [[bots]]
 name = "EV SOL"
-auth_id = 1
+auth_id = 3
 strategy = "ev"
 slots_left = 4
 bankroll = 10_000_000_000

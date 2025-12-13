@@ -17,6 +17,7 @@ pub enum Instructions {
     DepositAutodeployBalance = 8,
     RecycleSol = 9,
     WithdrawAutodeployBalance = 10,
+    MMAutocheckpoint = 11,
 }
 
 /// Deployment strategy enum with associated data
@@ -744,6 +745,57 @@ pub fn withdraw_autodeploy_balance(
         ],
         data: WithdrawAutodeployBalance {
             amount: amount.to_le_bytes(),
+        }.to_bytes(),
+    }
+}
+
+// =============================================================================
+// MMAutocheckpoint - Checkpoint callable by deploy_authority
+// =============================================================================
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct MMAutocheckpoint {
+    pub auth_id: [u8; 8],
+    pub bump: u8,
+}
+
+instruction!(Instructions, MMAutocheckpoint);
+
+/// Create an MMAutocheckpoint instruction
+/// 
+/// Similar to MMCheckpoint but can be called by deploy_authority instead of manager authority.
+/// This allows the autodeploy crank to checkpoint before deploying.
+pub fn mm_autocheckpoint(
+    signer: Pubkey,
+    manager: Pubkey,
+    round_id: u64,
+    auth_id: u64,
+) -> Instruction {
+    let (deployer_address, _) = deployer_pda(manager);
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
+    let treasury_address = ore_api::TREASURY_ADDRESS;
+    let board_address = board_pda();
+    let round_address = round_pda(round_id);
+
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),                           // 0: deploy_authority (signer)
+            AccountMeta::new(manager, false),                         // 1: manager
+            AccountMeta::new(deployer_address, false),                // 2: deployer PDA
+            AccountMeta::new(managed_miner_auth_address, false),      // 3: managed_miner_auth PDA
+            AccountMeta::new(ore_miner_address.0, false),             // 4: ore_miner
+            AccountMeta::new(treasury_address, false),                // 5: treasury
+            AccountMeta::new(board_address.0, false),                 // 6: board
+            AccountMeta::new(round_address.0, false),                 // 7: round
+            AccountMeta::new_readonly(system_program::id(), false),   // 8: system_program
+            AccountMeta::new_readonly(ore_api::id(), false),          // 9: ore_program
+        ],
+        data: MMAutocheckpoint {
+            auth_id: auth_id.to_le_bytes(),
+            bump,
         }.to_bytes(),
     }
 }

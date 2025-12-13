@@ -1,0 +1,23 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --background: #0a0a0a;
+  --foreground: #ededed;
+}
+
+body {
+  color: var(--foreground);
+  background: var(--background);
+  font-family: system-ui, -apple-system, sans-serif;
+}
+
+/* Wallet adapter button styling */
+.wallet-adapter-button {
+  background-color: #512da8 !important;
+}
+
+.wallet-adapter-button:hover {
+  background-color: #673ab7 !important;
+}

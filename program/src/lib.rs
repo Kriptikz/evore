@@ -69,6 +69,9 @@ pub fn process_instruction(
         Instructions::WithdrawAutodeployBalance => {
             process_withdraw_autodeploy_balance::process_withdraw_autodeploy_balance(accounts, data)?;
         }
+        Instructions::MMAutocheckpoint => {
+            process_mm_autocheckpoint::process_mm_autocheckpoint(accounts, data)?;
+        }
     }
 
     Ok(())

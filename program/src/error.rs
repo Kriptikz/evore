@@ -86,6 +86,10 @@ pub enum EvoreError {
     /// No claimable SOL in miner account
     #[error("Nothing to recycle: no claimable SOL in miner")]
     NothingToRecycle = 15,
+    
+    /// Invalid batch size for batched autodeploy
+    #[error("Invalid batch size: must be 1-10 deployments")]
+    InvalidBatchSize = 16,
 }
 
 error!(EvoreError);
