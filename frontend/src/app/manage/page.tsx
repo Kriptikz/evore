@@ -114,18 +114,19 @@ export default function ManagePage() {
                           ? {
                               address: deployer.address,
                               deployAuthority: deployer.data.deployAuthority,
-                              feeBps: deployer.data.feeBps,
+                              bpsFee: deployer.data.bpsFee,
+                              flatFee: deployer.data.flatFee,
                               autodeployBalance: deployer.autodeployBalance,
                             }
                           : undefined
                       }
                       miner={miner}
                       currentBoardRoundId={board?.roundId}
-                      onCreateDeployer={(deployAuthority, feeBps) =>
-                        createDeployer(manager.address, deployAuthority, feeBps)
+                      onCreateDeployer={(deployAuthority, bpsFee, flatFee) =>
+                        createDeployer(manager.address, deployAuthority, bpsFee, flatFee)
                       }
-                      onUpdateDeployer={(newDeployAuthority, newFeeBps) =>
-                        updateDeployer(manager.address, newDeployAuthority, newFeeBps)
+                      onUpdateDeployer={(newDeployAuthority, newBpsFee, newFlatFee) =>
+                        updateDeployer(manager.address, newDeployAuthority, newBpsFee, newFlatFee)
                       }
                       onDeposit={(amount) =>
                         depositAutodeployBalance(manager.address, amount)

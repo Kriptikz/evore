@@ -82,7 +82,7 @@ impl TxSender {
                 tx_base64,
                 {
                     "encoding": "base64",
-                    "skipPreflight": false,
+                    "skipPreflight": true,
                     "maxRetries": 0
                 }
             ]

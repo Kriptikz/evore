@@ -13,7 +13,8 @@ export interface Manager {
 export interface Deployer {
   managerKey: PublicKey;
   deployAuthority: PublicKey;
-  feeBps: bigint;
+  bpsFee: bigint;  // Percentage fee in basis points (1000 = 10%)
+  flatFee: bigint; // Flat fee in lamports (added on top of bpsFee)
 }
 
 /**
@@ -32,8 +33,9 @@ export function decodeDeployer(data: Buffer): Deployer {
   // Skip 8-byte discriminator
   const managerKey = new PublicKey(data.subarray(8, 40));
   const deployAuthority = new PublicKey(data.subarray(40, 72));
-  const feeBps = data.readBigUInt64LE(72);
-  return { managerKey, deployAuthority, feeBps };
+  const bpsFee = data.readBigUInt64LE(72);
+  const flatFee = data.readBigUInt64LE(80);
+  return { managerKey, deployAuthority, bpsFee, flatFee };
 }
 
 /**
@@ -66,6 +68,29 @@ export function parseSolToLamports(sol: string): bigint {
  */
 export function formatBps(bps: bigint | number): string {
   return `${Number(bps) / 100}%`;
+}
+
+/**
+ * Formats deployer fees (both bps and flat are additive)
+ * @param bpsFee Percentage fee in basis points
+ * @param flatFee Flat fee in lamports
+ */
+export function formatFee(bpsFee: bigint | number, flatFee: bigint | number): string {
+  const parts: string[] = [];
+  
+  if (Number(bpsFee) > 0) {
+    parts.push(`${Number(bpsFee) / 100}%`);
+  }
+  
+  if (Number(flatFee) > 0) {
+    parts.push(`${flatFee} lamports`);
+  }
+  
+  if (parts.length === 0) {
+    return "No fee";
+  }
+  
+  return parts.join(" + ");
 }
 
 /**

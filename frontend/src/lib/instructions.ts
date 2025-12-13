@@ -62,25 +62,29 @@ export function createManagerInstruction(
 
 /**
  * Creates a CreateDeployer instruction
+ * @param bpsFee Percentage fee in basis points (1000 = 10%)
+ * @param flatFee Flat fee in lamports (added on top of bpsFee)
  */
 export function createDeployerInstruction(
   signer: PublicKey,
   managerAccount: PublicKey,
   deployAuthority: PublicKey,
-  feeBps: bigint
+  bpsFee: bigint,
+  flatFee: bigint = BigInt(0)
 ): TransactionInstruction {
   const [deployerPda] = getDeployerPda(managerAccount);
   
-  // Build instruction data: 1 byte discriminator + 8 bytes fee_bps
-  // Using writeUInt8 explicitly to ensure correct byte writing
-  const data = Buffer.alloc(9);
+  // Build instruction data: 1 byte discriminator + 8 bytes bps_fee + 8 bytes flat_fee
+  const data = Buffer.alloc(17);
   data.writeUInt8(5, 0);  // CreateDeployer = 5
-  data.writeBigUInt64LE(feeBps, 1);
+  data.writeBigUInt64LE(bpsFee, 1);
+  data.writeBigUInt64LE(flatFee, 9);
 
   // Debug: log the instruction data
   console.log("CreateDeployer instruction data:", {
     discriminator: data[0],
-    feeBps: feeBps.toString(),
+    bpsFee: bpsFee.toString(),
+    flatFee: flatFee.toString(),
     rawBytes: Array.from(data),
     managerAccount: managerAccount.toBase58(),
     deployerPda: deployerPda.toBase58(),
@@ -102,19 +106,23 @@ export function createDeployerInstruction(
 
 /**
  * Creates an UpdateDeployer instruction
+ * @param newBpsFee Percentage fee in basis points (1000 = 10%)
+ * @param newFlatFee Flat fee in lamports (added on top of bpsFee)
  */
 export function updateDeployerInstruction(
   signer: PublicKey,
   managerAccount: PublicKey,
   newDeployAuthority: PublicKey,
-  newFeeBps: bigint
+  newBpsFee: bigint,
+  newFlatFee: bigint = BigInt(0)
 ): TransactionInstruction {
   const [deployerPda] = getDeployerPda(managerAccount);
   
-  // 1 byte discriminator + 8 bytes fee_bps
-  const data = Buffer.alloc(1 + 8);
+  // 1 byte discriminator + 8 bytes bps_fee + 8 bytes flat_fee
+  const data = Buffer.alloc(1 + 8 + 8);
   data[0] = EvoreInstruction.UpdateDeployer;
-  data.writeBigUInt64LE(newFeeBps, 1);
+  data.writeBigUInt64LE(newBpsFee, 1);
+  data.writeBigUInt64LE(newFlatFee, 9);
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,

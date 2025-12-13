@@ -2909,12 +2909,14 @@ pub fn add_deployer_account(
     deployer_address: Pubkey,
     manager_key: Pubkey,
     deploy_authority: Pubkey,
-    fee_bps: u64,
+    bps_fee: u64,
+    flat_fee: u64,
 ) {
     let deployer = Deployer {
         manager_key,
         deploy_authority,
-        fee_bps,
+        bps_fee,
+        flat_fee,
     };
     
     let mut data = Vec::new();
@@ -2967,7 +2969,8 @@ mod create_deployer {
         let manager_keypair = Keypair::new();
         let manager_address = manager_keypair.pubkey();
         let deploy_authority = Keypair::new();
-        let fee_bps = 1000u64; // 10%
+        let bps_fee = 1000u64; // 10% (basis points)
+        let flat_fee = 0u64; // No flat fee
         
         // Pre-create manager
         add_manager_account(&mut program_test, manager_address, manager_authority.pubkey());
@@ -2985,7 +2988,8 @@ mod create_deployer {
             manager_authority.pubkey(),
             manager_address,
             deploy_authority.pubkey(),
-            fee_bps,
+            bps_fee,
+            flat_fee,
         );
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&manager_authority.pubkey()), &[&manager_authority], blockhash);
@@ -2997,7 +3001,8 @@ mod create_deployer {
         let deployer = Deployer::try_from_bytes(&deployer_account.data).unwrap();
         
         assert_eq!(deployer.deploy_authority, deploy_authority.pubkey());
-        assert_eq!(deployer.fee_bps, fee_bps);
+        assert_eq!(deployer.bps_fee, bps_fee);
+        assert_eq!(deployer.flat_fee, flat_fee);
     }
 
     #[tokio::test]
@@ -3027,6 +3032,7 @@ mod create_deployer {
             manager_address,
             deploy_authority.pubkey(),
             1000,
+            0, // flat_fee = 0
         );
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
@@ -3054,6 +3060,7 @@ mod create_deployer {
             manager_address,
             deploy_authority.pubkey(),
             500,
+            0, // flat_fee = 0
         );
         
         let context = program_test.start_with_context().await;
@@ -3070,6 +3077,7 @@ mod create_deployer {
             manager_address,
             deploy_authority.pubkey(),
             1000,
+            0, // flat_fee = 0
         );
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&manager_authority.pubkey()), &[&manager_authority], blockhash);
@@ -3091,6 +3099,7 @@ mod update_deployer {
         let deploy_authority = Keypair::new();
         let initial_fee = 500u64; // 5%
         let new_fee = 1000u64; // 10%
+        let flat_fee = 0u64; // No flat fee
         
         // Pre-create manager
         add_manager_account(&mut program_test, manager_address, manager_authority.pubkey());
@@ -3103,6 +3112,7 @@ mod update_deployer {
             manager_address,
             deploy_authority.pubkey(),
             initial_fee,
+            flat_fee,
         );
         
         let context = program_test.start_with_context().await;
@@ -3119,6 +3129,7 @@ mod update_deployer {
             manager_address,
             deploy_authority.pubkey(), // keep same
             new_fee,
+            flat_fee,
         );
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&manager_authority.pubkey()), &[&manager_authority], blockhash);
@@ -3127,7 +3138,8 @@ mod update_deployer {
         // Verify fee was updated
         let deployer_account = context.banks_client.get_account(deployer_address).await.unwrap().unwrap();
         let deployer = Deployer::try_from_bytes(&deployer_account.data).unwrap();
-        assert_eq!(deployer.fee_bps, new_fee);
+        assert_eq!(deployer.bps_fee, new_fee);
+        assert_eq!(deployer.flat_fee, flat_fee);
         assert_eq!(deployer.deploy_authority, deploy_authority.pubkey());
     }
 
@@ -3152,6 +3164,7 @@ mod update_deployer {
             manager_address,
             deploy_authority.pubkey(),
             500,
+            0, // flat_fee = 0
         );
         
         let context = program_test.start_with_context().await;
@@ -3168,6 +3181,7 @@ mod update_deployer {
             manager_address,
             deploy_authority.pubkey(),
             1000,
+            0, // flat_fee = 0
         );
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
         let tx = Transaction::new_signed_with_payer(&[ix], Some(&wrong_signer.pubkey()), &[&wrong_signer], blockhash);
@@ -3189,7 +3203,8 @@ mod mm_autodeploy {
         let manager_keypair = Keypair::new();
         let manager_address = manager_keypair.pubkey();
         let auth_id = 1u64;
-        let fee_bps = 1000u64; // 10%
+        let bps_fee = 1000u64; // 10%
+        let flat_fee = 0u64; // No flat fee (basis points)
         
         let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
         let (deployer_address, _) = deployer_pda(manager_address);
@@ -3204,7 +3219,8 @@ mod mm_autodeploy {
             deployer_address,
             manager_address,
             deploy_authority.pubkey(),
-            fee_bps,
+            bps_fee,
+            flat_fee,
         );
         
         // Pre-fund autodeploy_balance PDA with enough SOL
@@ -3244,7 +3260,6 @@ mod mm_autodeploy {
         // Deploy 0.01 SOL to squares 0, 1, 2 (3 squares total = 0.03 SOL, 10% fee = 0.003 SOL)
         let amount = 10_000_000u64; // 0.01 SOL per square
         let squares_mask = 0b111u32; // First 3 squares
-        let expected_fee = fee_bps;
         
         let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
         let ix = evore::instruction::mm_autodeploy(
@@ -3254,7 +3269,8 @@ mod mm_autodeploy {
             TEST_ROUND_ID,
             amount,
             squares_mask,
-            expected_fee,
+            bps_fee,
+            flat_fee,
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -3273,7 +3289,7 @@ mod mm_autodeploy {
         
         // Calculate expected fees
         let total_deployed = amount * 3; // 3 squares
-        let expected_deployer_fee = total_deployed * fee_bps / 10_000; // 10% = 3_000_000 lamports
+        let expected_deployer_fee = total_deployed * bps_fee / 10_000; // 10% = 3_000_000 lamports
         
         // Verify deploy_authority received the deployer fee (10% of 0.03 SOL = 0.003 SOL)
         // Note: balance might decrease slightly due to tx fees, but the fee should be received
@@ -3325,6 +3341,7 @@ mod mm_autodeploy {
             manager_address,
             deploy_authority.pubkey(),
             1000,
+            0, // flat_fee = 0
         );
         
         // Pre-fund autodeploy_balance
@@ -3354,6 +3371,7 @@ mod mm_autodeploy {
             10_000_000,
             0b111,
             1000,
+            0, // flat_fee
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -3372,6 +3390,7 @@ mod mm_autodeploy {
         let manager_address = manager_keypair.pubkey();
         let auth_id = 1u64;
         let actual_fee = 1000u64; // 10%
+        let flat_fee = 0u64; // No flat fee
         
         let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
         let (deployer_address, _) = deployer_pda(manager_address);
@@ -3387,6 +3406,7 @@ mod mm_autodeploy {
             manager_address,
             deploy_authority.pubkey(),
             actual_fee,
+            flat_fee,
         );
         
         // Pre-fund autodeploy_balance
@@ -3407,7 +3427,7 @@ mod mm_autodeploy {
         context.banks_client.process_transaction(tx).await.unwrap();
         
         // Try to autodeploy with wrong expected_fee (5% instead of 10%)
-        let wrong_expected_fee = 500u64; // 5%
+        let wrong_expected_bps_fee = 500u64; // 5% - different from deployer's 10%
         let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
         let ix = evore::instruction::mm_autodeploy(
             deploy_authority.pubkey(),
@@ -3416,7 +3436,8 @@ mod mm_autodeploy {
             TEST_ROUND_ID,
             10_000_000,
             0b111,
-            wrong_expected_fee, // Wrong fee!
+            wrong_expected_bps_fee, // Wrong bps_fee!
+            0, // flat_fee
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -3435,6 +3456,7 @@ mod mm_autodeploy {
         let manager_address = manager_keypair.pubkey();
         let auth_id = 1u64;
         let actual_fee = 1000u64; // 10%
+        let flat_fee = 0u64; // No flat fee
         
         let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
         let (deployer_address, _) = deployer_pda(manager_address);
@@ -3450,6 +3472,7 @@ mod mm_autodeploy {
             manager_address,
             deploy_authority.pubkey(),
             actual_fee,
+            flat_fee,
         );
         
         // Pre-fund autodeploy_balance
@@ -3470,7 +3493,7 @@ mod mm_autodeploy {
         let tx = Transaction::new_signed_with_payer(&[ix0, ix1], Some(&context.payer.pubkey()), &[&context.payer], blockhash);
         context.banks_client.process_transaction(tx).await.unwrap();
         
-        // Autodeploy with expected_fee = 0 (skips fee check)
+        // Autodeploy with expected fees = 0 (skips fee check)
         let cu_limit_ix = ComputeBudgetInstruction::set_compute_unit_limit(1_400_000);
         let ix = evore::instruction::mm_autodeploy(
             deploy_authority.pubkey(),
@@ -3479,7 +3502,8 @@ mod mm_autodeploy {
             TEST_ROUND_ID,
             10_000_000,
             0b111,
-            0, // Zero expected_fee - skips check
+            0, // expected_bps_fee = 0 skips check
+            0, // expected_flat_fee = 0 skips check
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -3528,6 +3552,7 @@ mod mm_autodeploy {
             10_000_000,
             0b111,
             1000,
+            0, // flat_fee
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -3560,6 +3585,7 @@ mod mm_autodeploy {
             manager_address,
             deploy_authority.pubkey(),
             1000,
+            0, // flat_fee = 0
         );
         
         // Pre-fund autodeploy_balance
@@ -3596,6 +3622,7 @@ mod mm_autodeploy {
             10_000_000,
             0b111,
             1000,
+            0, // flat_fee
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -3628,6 +3655,7 @@ mod mm_autodeploy {
             manager_address,
             deploy_authority.pubkey(),
             1000,
+            0, // flat_fee = 0
         );
         
         // Pre-fund autodeploy_balance
@@ -3657,6 +3685,7 @@ mod mm_autodeploy {
             10_000_000,
             0, // No squares selected!
             1000,
+            0, // flat_fee
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();
@@ -3674,7 +3703,8 @@ mod mm_autodeploy {
         let manager_keypair = Keypair::new();
         let manager_address = manager_keypair.pubkey();
         let auth_id = 1u64;
-        let fee_bps = 1000u64; // 10%
+        let bps_fee = 1000u64; // 10%
+        let flat_fee = 0u64; // No flat fee
         
         let managed_miner_auth = managed_miner_auth_pda(manager_address, auth_id);
         let (deployer_address, _) = deployer_pda(manager_address);
@@ -3689,7 +3719,8 @@ mod mm_autodeploy {
             deployer_address,
             manager_address,
             deploy_authority.pubkey(),
-            fee_bps,
+            bps_fee,
+            flat_fee,
         );
         
         // Pre-fund autodeploy_balance with very little SOL (not enough)
@@ -3718,7 +3749,8 @@ mod mm_autodeploy {
             TEST_ROUND_ID,
             10_000_000, // 0.01 SOL - way more than available
             0b111,
-            fee_bps,
+            bps_fee,
+            flat_fee,
         );
         
         let blockhash = context.banks_client.get_latest_blockhash().await.unwrap();

@@ -3,7 +3,7 @@
 import { useState } from "react";
 import { PublicKey } from "@solana/web3.js";
 import { useWallet } from "@solana/wallet-adapter-react";
-import { shortenPubkey, formatSol, formatOre, formatBps, parseSolToLamports, parsePercentToBps } from "@/lib/accounts";
+import { shortenPubkey, formatSol, formatOre, formatFee, parseSolToLamports, parsePercentToBps } from "@/lib/accounts";
 import { getDeployerPda, getAutodeployBalancePda, getManagedMinerAuthPda, getOreMinerPda } from "@/lib/pda";
 
 interface MinerData {
@@ -21,13 +21,14 @@ interface ManagerCardProps {
   deployer?: {
     address: PublicKey;
     deployAuthority: PublicKey;
-    feeBps: bigint;
+    bpsFee: bigint;  // Percentage fee in basis points (1000 = 10%)
+    flatFee: bigint; // Flat fee in lamports (added on top of bpsFee)
     autodeployBalance: bigint;
   };
   miner?: MinerData;
   currentBoardRoundId?: bigint;
-  onCreateDeployer: (deployAuthority: PublicKey, feeBps: bigint) => Promise<string>;
-  onUpdateDeployer: (newDeployAuthority: PublicKey, newFeeBps: bigint) => Promise<string>;
+  onCreateDeployer: (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint) => Promise<string>;
+  onUpdateDeployer: (newDeployAuthority: PublicKey, newBpsFee: bigint, newFlatFee: bigint) => Promise<string>;
   onDeposit: (amount: bigint) => Promise<string>;
   onWithdraw: (amount: bigint) => Promise<string>;
   onCheckpoint: (roundId: bigint) => Promise<string>;
@@ -94,7 +95,8 @@ export function ManagerCard({
 
   // Form states
   const [deployAuthority, setDeployAuthority] = useState("");
-  const [feeBps, setFeeBps] = useState("5"); // Default 5%
+  const [bpsFeeAmount, setBpsFeeAmount] = useState("5"); // Default 5%
+  const [flatFeeAmount, setFlatFeeAmount] = useState("0"); // Default 0 lamports
   const [depositAmount, setDepositAmount] = useState("");
   const [withdrawAmount, setWithdrawAmount] = useState("");
 
@@ -119,8 +121,9 @@ export function ManagerCard({
       setLoading(true);
       setError(null);
       const authority = new PublicKey(deployAuthority);
-      const bps = parsePercentToBps(feeBps);
-      await onCreateDeployer(authority, bps);
+      const bpsFee = parsePercentToBps(bpsFeeAmount);
+      const flatFee = BigInt(Math.floor(parseFloat(flatFeeAmount) || 0));
+      await onCreateDeployer(authority, bpsFee, flatFee);
       setShowCreateDeployer(false);
       setDeployAuthority("");
     } catch (err: any) {
@@ -140,8 +143,9 @@ export function ManagerCard({
       setLoading(true);
       setError(null);
       const authority = new PublicKey(deployAuthority);
-      const bps = parsePercentToBps(feeBps);
-      await onUpdateDeployer(authority, bps);
+      const bpsFee = parsePercentToBps(bpsFeeAmount);
+      const flatFee = BigInt(Math.floor(parseFloat(flatFeeAmount) || 0));
+      await onUpdateDeployer(authority, bpsFee, flatFee);
       setShowUpdateDeployer(false);
     } catch (err: any) {
       setError(err.message);
@@ -350,7 +354,7 @@ export function ManagerCard({
             <CopyablePubkey pubkey={deployer.deployAuthority} label="Deploy Authority:" />
             <div className="flex justify-between">
               <span className="text-zinc-400">Fee:</span>
-              <span>{formatBps(deployer.feeBps)}</span>
+              <span>{formatFee(deployer.bpsFee, deployer.flatFee)}</span>
             </div>
             <div className="flex justify-between">
               <span className="text-zinc-400">Autodeploy Balance:</span>
@@ -362,7 +366,8 @@ export function ManagerCard({
             <button
               onClick={() => {
                 setDeployAuthority(deployer.deployAuthority.toBase58());
-                setFeeBps((Number(deployer.feeBps) / 100).toString());
+                setBpsFeeAmount((Number(deployer.bpsFee) / 100).toString());
+                setFlatFeeAmount(deployer.flatFee.toString());
                 setShowUpdateDeployer(true);
               }}
               className="flex-1 px-3 py-1.5 text-sm bg-zinc-700 hover:bg-zinc-600 rounded"
@@ -426,17 +431,35 @@ export function ManagerCard({
                 />
               </div>
               <div>
-                <label className="block text-sm text-zinc-400 mb-1">Fee (%)</label>
+                <label className="block text-sm text-zinc-400 mb-1">Percentage Fee (%)</label>
                 <input
                   type="number"
-                  value={feeBps}
-                  onChange={(e) => setFeeBps(e.target.value)}
+                  value={bpsFeeAmount}
+                  onChange={(e) => setBpsFeeAmount(e.target.value)}
                   placeholder="5"
                   min="0"
                   max="100"
                   step="0.01"
                   className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
                 />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Enter percentage (e.g., 5 for 5%). Set to 0 to disable.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">Flat Fee (lamports)</label>
+                <input
+                  type="number"
+                  value={flatFeeAmount}
+                  onChange={(e) => setFlatFeeAmount(e.target.value)}
+                  placeholder="0"
+                  min="0"
+                  step="1"
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
+                />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Additional flat fee in lamports. Set to 0 to disable.
+                </p>
               </div>
               <div className="flex gap-2">
                 <button
@@ -476,17 +499,35 @@ export function ManagerCard({
                 />
               </div>
               <div>
-                <label className="block text-sm text-zinc-400 mb-1">New Fee (%)</label>
+                <label className="block text-sm text-zinc-400 mb-1">Percentage Fee (%)</label>
                 <input
                   type="number"
-                  value={feeBps}
-                  onChange={(e) => setFeeBps(e.target.value)}
+                  value={bpsFeeAmount}
+                  onChange={(e) => setBpsFeeAmount(e.target.value)}
                   placeholder="5"
                   min="0"
                   max="100"
                   step="0.01"
                   className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
                 />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Enter percentage (e.g., 5 for 5%). Set to 0 to disable.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">Flat Fee (lamports)</label>
+                <input
+                  type="number"
+                  value={flatFeeAmount}
+                  onChange={(e) => setFlatFeeAmount(e.target.value)}
+                  placeholder="0"
+                  min="0"
+                  step="1"
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
+                />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Additional flat fee in lamports. Set to 0 to disable.
+                </p>
               </div>
               <div className="flex gap-2">
                 <button

@@ -90,6 +90,10 @@ pub enum EvoreError {
     /// Invalid batch size for batched autodeploy
     #[error("Invalid batch size: must be 1-10 deployments")]
     InvalidBatchSize = 16,
+    
+    /// The deployer account has already been migrated to the new format
+    #[error("Deployer already migrated: account is already in new format")]
+    DeployerAlreadyMigrated = 17,
 }
 
 error!(EvoreError);

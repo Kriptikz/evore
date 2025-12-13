@@ -23,7 +23,7 @@ account!(EvoreAccount, Manager);
 /// Deployer account - allows a deploy_authority to execute deploys on behalf of a manager
 /// PDA seeds: ["deployer", manager_key]
 /// Stores manager_key for easy lookup when scanning by deploy_authority
-/// The deployer charges a fee (in basis points) on each deployment
+/// The deployer charges fees on each deployment (both fees are applied if > 0)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct Deployer {
@@ -31,8 +31,10 @@ pub struct Deployer {
     pub manager_key: Pubkey,
     /// The authority that can execute deploys via this deployer
     pub deploy_authority: Pubkey,
-    /// Fee in basis points (1000 = 10%, 500 = 5%, etc.)
-    pub fee_bps: u64,
+    /// Percentage fee in basis points (1000 = 10%, 500 = 5%, etc.)
+    pub bps_fee: u64,
+    /// Flat fee in lamports (added on top of bps_fee if > 0)
+    pub flat_fee: u64,
 }
 
 account!(EvoreAccount, Deployer);

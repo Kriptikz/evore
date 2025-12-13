@@ -107,9 +107,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Managing {} deployers:", deployers.len());
                 for d in &deployers {
                     let balance = crank.get_autodeploy_balance(d).unwrap_or(0);
+                    let fee_str = if d.fee_type == 0 {
+                        format!("{} bps", d.fee)
+                    } else {
+                        format!("{} lamports (flat)", d.fee)
+                    };
                     info!("  Manager: {}", d.manager_address);
                     info!("    Deployer: {}", d.deployer_address);
-                    info!("    Fee: {} bps", d.fee_bps);
+                    info!("    Fee: {}", fee_str);
                     info!("    Balance: {} lamports ({:.6} SOL)", balance, balance as f64 / 1_000_000_000.0);
                 }
             }
@@ -207,7 +212,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     
     info!("Managing {} deployers", deployers.len());
     for d in &deployers {
-        info!("  - Manager: {} (fee: {} bps)", d.manager_address, d.fee_bps);
+        let fee_str = if d.fee_type == 0 {
+            format!("{} bps", d.fee)
+        } else {
+            format!("{} lamports (flat)", d.fee)
+        };
+        info!("  - Manager: {} (fee: {})", d.manager_address, fee_str);
     }
     
     // Main loop

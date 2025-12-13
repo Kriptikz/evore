@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { PublicKey } from "@solana/web3.js";
-import { shortenPubkey, formatSol, formatOre, formatBps, parseSolToLamports } from "@/lib/accounts";
+import { shortenPubkey, formatSol, formatOre, formatFee, parseSolToLamports } from "@/lib/accounts";
 import { getManagedMinerAuthPda } from "@/lib/pda";
 import { MIN_AUTODEPLOY_BALANCE, MIN_AUTODEPLOY_BALANCE_FIRST } from "@/lib/constants";
 
@@ -19,7 +19,8 @@ interface MinerData {
 
 interface DeployerData {
   deployAuthority: PublicKey;
-  feeBps: bigint;
+  bpsFee: bigint;  // Percentage fee in basis points (1000 = 10%)
+  flatFee: bigint; // Flat fee in lamports (added on top of bpsFee)
   autodeployBalance: bigint;
 }
 
@@ -255,7 +256,7 @@ export function AutoMinerCard({
           </div>
           <div className="flex justify-between mt-1">
             <span>Fee:</span>
-            <span>{formatBps(deployer.feeBps)}</span>
+            <span>{formatFee(deployer.bpsFee, deployer.flatFee)}</span>
           </div>
         </div>
       )}

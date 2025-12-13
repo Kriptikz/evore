@@ -8,7 +8,7 @@ import { Header } from "@/components/Header";
 import { AutoMinerCard } from "@/components/AutoMinerCard";
 import { useEvore } from "@/hooks/useEvore";
 import { formatSol, formatOre } from "@/lib/accounts";
-import { DEFAULT_DEPLOYER_PUBKEY, DEFAULT_DEPLOYER_FEE } from "@/lib/constants";
+import { DEFAULT_DEPLOYER_PUBKEY, DEFAULT_DEPLOYER_BPS_FEE, DEFAULT_DEPLOYER_FLAT_FEE } from "@/lib/constants";
 
 export default function Home() {
   const { connected } = useWallet();
@@ -59,7 +59,7 @@ export default function Home() {
       setCreating(true);
       setCreateError(null);
       const deployAuthority = new PublicKey(DEFAULT_DEPLOYER_PUBKEY);
-      await createAutoMiner(deployAuthority, BigInt(DEFAULT_DEPLOYER_FEE));
+      await createAutoMiner(deployAuthority, BigInt(DEFAULT_DEPLOYER_BPS_FEE), BigInt(DEFAULT_DEPLOYER_FLAT_FEE));
     } catch (err: any) {
       setCreateError(err.message);
     } finally {
@@ -144,7 +144,8 @@ export default function Home() {
                       managerAddress={manager.address}
                       deployer={{
                         deployAuthority: deployer.data.deployAuthority,
-                        feeBps: deployer.data.feeBps,
+                        bpsFee: deployer.data.bpsFee,
+                        flatFee: deployer.data.flatFee,
                         autodeployBalance: deployer.autodeployBalance,
                       }}
                       miner={miner}

@@ -20,7 +20,8 @@ pub fn process_mm_autodeploy(
     let auth_id = u64::from_le_bytes(args.auth_id);
     let amount = u64::from_le_bytes(args.amount);
     let squares_mask = u32::from_le_bytes(args.squares_mask);
-    let expected_fee = u64::from_le_bytes(args.expected_fee);
+    let expected_bps_fee = u64::from_le_bytes(args.expected_bps_fee);
+    let expected_flat_fee = u64::from_le_bytes(args.expected_flat_fee);
 
     let [
         signer,                            // 0: deploy_authority (signer)
@@ -97,8 +98,12 @@ pub fn process_mm_autodeploy(
         return Err(EvoreError::InvalidDeployAuthority.into());
     }
 
-    // Verify expected fee matches (if expected_fee > 0)
-    if expected_fee > 0 && deployer.fee_bps != expected_fee {
+    // Verify expected fees match deployer configuration (if expected values > 0)
+    // This ensures the user hasn't changed the fee settings since the crank read them
+    if expected_bps_fee > 0 && deployer.bps_fee != expected_bps_fee {
+        return Err(EvoreError::UnexpectedFee.into());
+    }
+    if expected_flat_fee > 0 && deployer.flat_fee != expected_flat_fee {
         return Err(EvoreError::UnexpectedFee.into());
     }
 
@@ -160,14 +165,18 @@ pub fn process_mm_autodeploy(
         return Err(EvoreError::NoDeployments.into());
     }
 
-    // Calculate deployer fee (fee_bps is in basis points: 1000 = 10%)
-    let deployer_fee = if deployer.fee_bps > 0 {
+    // Calculate deployer fee (both bps_fee and flat_fee are additive)
+    // bps_fee: percentage of total deployed (1000 = 10%)
+    // flat_fee: fixed lamports amount
+    let bps_fee_amount = if deployer.bps_fee > 0 {
         total_deployed
-            .saturating_mul(deployer.fee_bps)
+            .saturating_mul(deployer.bps_fee)
             .saturating_div(10_000)
     } else {
         0
     };
+    
+    let deployer_fee = bps_fee_amount.saturating_add(deployer.flat_fee);
 
     // Protocol fee (same as regular deploy)
     let protocol_fee = DEPLOY_FEE;

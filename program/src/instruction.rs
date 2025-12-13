@@ -456,8 +456,10 @@ pub fn mm_claim_ore(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instructio
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CreateDeployer {
-    /// Fee in basis points (1000 = 10%)
-    pub fee_bps: [u8; 8],
+    /// Percentage fee in basis points (1000 = 10%, 500 = 5%)
+    pub bps_fee: [u8; 8],
+    /// Flat fee in lamports (added on top of bps_fee)
+    pub flat_fee: [u8; 8],
 }
 
 instruction!(Instructions, CreateDeployer);
@@ -465,11 +467,14 @@ instruction!(Instructions, CreateDeployer);
 /// Create a deployer account for a manager
 /// The manager authority signs to authorize the deployer creation
 /// deploy_authority is the key that will be allowed to execute autodeploys
+/// bps_fee: Percentage fee in basis points (1000 = 10%)
+/// flat_fee: Flat fee in lamports (added on top of bps_fee)
 pub fn create_deployer(
     signer: Pubkey,
     manager: Pubkey,
     deploy_authority: Pubkey,
-    fee_bps: u64,
+    bps_fee: u64,
+    flat_fee: u64,
 ) -> Instruction {
     let (deployer_address, _bump) = deployer_pda(manager);
 
@@ -483,7 +488,8 @@ pub fn create_deployer(
             AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: CreateDeployer {
-            fee_bps: fee_bps.to_le_bytes(),
+            bps_fee: bps_fee.to_le_bytes(),
+            flat_fee: flat_fee.to_le_bytes(),
         }.to_bytes(),
     }
 }
@@ -494,19 +500,24 @@ pub fn create_deployer(
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct UpdateDeployer {
-    /// New fee in basis points (1000 = 10%)
-    pub fee_bps: [u8; 8],
+    /// New percentage fee in basis points (1000 = 10%, 500 = 5%)
+    pub bps_fee: [u8; 8],
+    /// New flat fee in lamports (added on top of bps_fee)
+    pub flat_fee: [u8; 8],
 }
 
 instruction!(Instructions, UpdateDeployer);
 
 /// Update deployer configuration (manager authority only)
 /// Pass current values for fields you don't want to change
+/// new_bps_fee: Percentage fee in basis points (1000 = 10%)
+/// new_flat_fee: Flat fee in lamports (added on top of bps_fee)
 pub fn update_deployer(
     signer: Pubkey,
     manager: Pubkey,
     new_deploy_authority: Pubkey,
-    new_fee_bps: u64,
+    new_bps_fee: u64,
+    new_flat_fee: u64,
 ) -> Instruction {
     let (deployer_address, _bump) = deployer_pda(manager);
 
@@ -519,7 +530,8 @@ pub fn update_deployer(
             AccountMeta::new_readonly(new_deploy_authority, false),
         ],
         data: UpdateDeployer {
-            fee_bps: new_fee_bps.to_le_bytes(),
+            bps_fee: new_bps_fee.to_le_bytes(),
+            flat_fee: new_flat_fee.to_le_bytes(),
         }.to_bytes(),
     }
 }
@@ -536,7 +548,8 @@ pub fn update_deployer(
 /// - _pad: [u8; 5] - Padding for alignment
 /// - amount: [u8; 8] - Amount to deploy per square
 /// - squares_mask: [u8; 4] - Bitmask of squares to deploy to
-/// - expected_fee: [u8; 8] - Expected deployer fee (in basis points), 0 to skip check
+/// - expected_bps_fee: [u8; 8] - Expected bps_fee from deployer (0 to skip check)
+/// - expected_flat_fee: [u8; 8] - Expected flat_fee from deployer (0 to skip check)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct MMAutodeploy {
@@ -547,7 +560,9 @@ pub struct MMAutodeploy {
     pub _pad: [u8; 5],
     pub amount: [u8; 8],
     pub squares_mask: [u8; 4],
-    pub expected_fee: [u8; 8],
+    pub _pad2: [u8; 4],
+    pub expected_bps_fee: [u8; 8],
+    pub expected_flat_fee: [u8; 8],
 }
 
 instruction!(Instructions, MMAutodeploy);
@@ -601,7 +616,8 @@ fn build_autodeploy_accounts(
 /// - round_id: The current round ID
 /// - amount: Amount to deploy per selected square
 /// - squares: Bitmask of squares to deploy to (each bit = one square, 25 bits used)
-/// - expected_fee: The fee in basis points expected (0 to skip fee validation)
+/// - expected_bps_fee: Expected bps_fee from deployer (0 to skip validation)
+/// - expected_flat_fee: Expected flat_fee from deployer (0 to skip validation)
 pub fn mm_autodeploy(
     signer: Pubkey,
     manager: Pubkey,
@@ -609,7 +625,8 @@ pub fn mm_autodeploy(
     round_id: u64,
     amount: u64,
     squares_mask: u32,
-    expected_fee: u64,
+    expected_bps_fee: u64,
+    expected_flat_fee: u64,
 ) -> Instruction {
     let (accounts, bump, deployer_bump, autodeploy_balance_bump) = build_autodeploy_accounts(signer, manager, auth_id, round_id);
 
@@ -624,7 +641,9 @@ pub fn mm_autodeploy(
             _pad: [0; 5],
             amount: amount.to_le_bytes(),
             squares_mask: squares_mask.to_le_bytes(),
-            expected_fee: expected_fee.to_le_bytes(),
+            _pad2: [0; 4],
+            expected_bps_fee: expected_bps_fee.to_le_bytes(),
+            expected_flat_fee: expected_flat_fee.to_le_bytes(),
         }.to_bytes(),
     }
 }

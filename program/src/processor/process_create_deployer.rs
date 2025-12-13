@@ -15,7 +15,8 @@ pub fn process_create_deployer(
     instruction_data: &[u8],
 ) -> Result<(), ProgramError> {
     let args = CreateDeployer::try_from_bytes(instruction_data)?;
-    let fee_bps = u64::from_le_bytes(args.fee_bps);
+    let bps_fee = u64::from_le_bytes(args.bps_fee);
+    let flat_fee = u64::from_le_bytes(args.flat_fee);
 
     let [
         signer,
@@ -86,7 +87,8 @@ pub fn process_create_deployer(
     let deployer = Deployer {
         manager_key: *manager_account_info.key,
         deploy_authority: *deploy_authority_info.key,
-        fee_bps,
+        bps_fee,
+        flat_fee,
     };
 
     // Write discriminator and data

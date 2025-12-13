@@ -279,11 +279,12 @@ export function useEvore() {
   const createDeployer = useCallback(async (
     managerAccount: PublicKey,
     deployAuthority: PublicKey,
-    feeBps: bigint
+    bpsFee: bigint,
+    flatFee: bigint = BigInt(0)
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
-    const ix = createDeployerInstruction(publicKey, managerAccount, deployAuthority, feeBps);
+    const ix = createDeployerInstruction(publicKey, managerAccount, deployAuthority, bpsFee, flatFee);
     const tx = new Transaction().add(ix);
     
     const { blockhash } = await connection.getLatestBlockhash();
@@ -300,7 +301,8 @@ export function useEvore() {
   // Create an AutoMiner (manager + deployer in one transaction)
   const createAutoMiner = useCallback(async (
     deployAuthority: PublicKey,
-    feeBps: bigint
+    bpsFee: bigint,
+    flatFee: bigint = BigInt(0)
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
@@ -309,7 +311,7 @@ export function useEvore() {
 
     // Create both instructions
     const createManagerIx = createManagerInstruction(publicKey, managerKeypair.publicKey);
-    const createDeployerIx = createDeployerInstruction(publicKey, managerKeypair.publicKey, deployAuthority, feeBps);
+    const createDeployerIx = createDeployerInstruction(publicKey, managerKeypair.publicKey, deployAuthority, bpsFee, flatFee);
 
     const tx = new Transaction().add(createManagerIx).add(createDeployerIx);
     
@@ -332,11 +334,12 @@ export function useEvore() {
   const updateDeployer = useCallback(async (
     managerAccount: PublicKey,
     newDeployAuthority: PublicKey,
-    newFeeBps: bigint
+    newBpsFee: bigint,
+    newFlatFee: bigint = BigInt(0)
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
-    const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newFeeBps);
+    const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee);
     const tx = new Transaction().add(ix);
     
     const { blockhash } = await connection.getLatestBlockhash();

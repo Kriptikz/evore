@@ -15,7 +15,8 @@ pub fn process_update_deployer(
     instruction_data: &[u8],
 ) -> Result<(), ProgramError> {
     let args = UpdateDeployer::try_from_bytes(instruction_data)?;
-    let new_fee_bps = u64::from_le_bytes(args.fee_bps);
+    let new_bps_fee = u64::from_le_bytes(args.bps_fee);
+    let new_flat_fee = u64::from_le_bytes(args.flat_fee);
 
     let [
         signer,
@@ -67,9 +68,13 @@ pub fn process_update_deployer(
     let authority_offset = 8 + 32;
     data[authority_offset..authority_offset + 32].copy_from_slice(new_deploy_authority_info.key.as_ref());
     
-    // Update fee_bps field (offset: 8 discriminator + 32 manager_key + 32 deploy_authority = 72)
-    let fee_offset = 8 + 32 + 32;
-    data[fee_offset..fee_offset + 8].copy_from_slice(&new_fee_bps.to_le_bytes());
+    // Update bps_fee field (offset: 8 discriminator + 32 manager_key + 32 deploy_authority = 72)
+    let bps_fee_offset = 8 + 32 + 32;
+    data[bps_fee_offset..bps_fee_offset + 8].copy_from_slice(&new_bps_fee.to_le_bytes());
+    
+    // Update flat_fee field (offset: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee = 80)
+    let flat_fee_offset = 8 + 32 + 32 + 8;
+    data[flat_fee_offset..flat_fee_offset + 8].copy_from_slice(&new_flat_fee.to_le_bytes());
 
     Ok(())
 }

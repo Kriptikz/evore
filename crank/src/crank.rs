@@ -6,7 +6,7 @@ use evore::{
     consts::DEPLOY_FEE,
     instruction::{mm_autodeploy, mm_autocheckpoint, recycle_sol},
     ore_api::{board_pda, miner_pda, round_pda, Board, Miner, Round},
-    state::{autodeploy_balance_pda, deployer_pda, managed_miner_auth_pda, Deployer},
+    state::{autodeploy_balance_pda, managed_miner_auth_pda, Deployer},
 };
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
@@ -110,6 +110,7 @@ impl Crank {
     }
     
     /// Find all deployer accounts where we are the deploy_authority
+    /// This also handles migration from old deployer format to new format
     pub async fn find_deployers(&self) -> Result<Vec<DeployerInfo>, CrankError> {
         let deploy_authority_pubkey = self.deploy_authority.pubkey();
         
@@ -145,26 +146,39 @@ impl Crank {
         
         let mut deployers = Vec::new();
         
+        // Old deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 fee_bps = 80
+        const OLD_DEPLOYER_SIZE: usize = 80;
+        // New deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 fee + 8 fee_type = 88
+        const NEW_DEPLOYER_SIZE: usize = 88;
+        
         for (deployer_address, account) in accounts {
+            // First try to parse as new Deployer
             match Deployer::try_from_bytes(&account.data) {
                 Ok(deployer) => {
                     let manager_address = deployer.manager_key;
                     let (autodeploy_balance_address, _) = autodeploy_balance_pda(deployer_address);
                     
+                    let fee_str = format!("{} bps + {} lamports flat", deployer.bps_fee, deployer.flat_fee);
+                    
                     deployers.push(DeployerInfo {
                         deployer_address,
                         manager_address,
                         autodeploy_balance_address,
-                        fee_bps: deployer.fee_bps,
+                        bps_fee: deployer.bps_fee,
+                        flat_fee: deployer.flat_fee,
                     });
                     
                     info!(
-                        "Found deployer: {} for manager: {} (fee: {} bps)",
-                        deployer_address, manager_address, deployer.fee_bps
+                        "Found deployer: {} for manager: {} (fee: {})",
+                        deployer_address, manager_address, fee_str
                     );
                 }
-                Err(e) => {
-                    warn!("Failed to deserialize deployer account {}: {:?}", deployer_address, e);
+                Err(_) => {
+                    // Check if this is an old format deployer that needs migration
+                      warn!(
+                          "Deployer account {} has unexpected size {} (expected {} or {})",
+                          deployer_address, account.data.len(), NEW_DEPLOYER_SIZE, OLD_DEPLOYER_SIZE
+                      );
                 }
             }
         }
@@ -226,7 +240,11 @@ impl Crank {
     ) -> Result<u64, CrankError> {
         let num_squares = squares_mask.count_ones() as u64;
         let total_deployed = amount_per_square * num_squares;
-        let deployer_fee = total_deployed * deployer.fee_bps / 10_000;
+        
+        // Calculate deployer fee (bps_fee + flat_fee are additive)
+        let bps_fee_amount = total_deployed * deployer.bps_fee / 10_000;
+        let deployer_fee = bps_fee_amount + deployer.flat_fee;
+        
         let protocol_fee = DEPLOY_FEE;
         
         // Check managed_miner_auth balance
@@ -271,10 +289,17 @@ impl Crank {
     }
     
     /// Simple calculation without RPC calls (conservative estimate)
-    pub fn calculate_required_balance_simple(amount_per_square: u64, squares_mask: u32, fee_bps: u64) -> u64 {
+    /// fee_type: 0 = percentage (basis points), 1 = flat (lamports)
+    pub fn calculate_required_balance_simple(amount_per_square: u64, squares_mask: u32, fee: u64, fee_type: u64) -> u64 {
         let num_squares = squares_mask.count_ones() as u64;
         let total_deployed = amount_per_square * num_squares;
-        let deployer_fee = total_deployed * fee_bps / 10_000;
+        let deployer_fee = if fee_type == 0 {
+            // Percentage (basis points)
+            total_deployed * fee / 10_000
+        } else {
+            // Flat fee (lamports)
+            fee
+        };
         let protocol_fee = DEPLOY_FEE;
         
         // Conservative overhead for first-time deploy:
@@ -474,7 +499,8 @@ impl Crank {
             round_id,
             amount,
             squares_mask,
-            deployer.fee_bps,
+            deployer.bps_fee,
+            deployer.flat_fee,
         ));
         
         let mut tx = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
@@ -524,7 +550,8 @@ impl Crank {
                 *round_id,
                 *amount,
                 *squares_mask,
-                deployer.fee_bps,
+                deployer.bps_fee,
+                deployer.flat_fee,
             ));
         }
         
@@ -598,7 +625,8 @@ impl Crank {
                 *round_id,
                 *amount,
                 *squares_mask,
-                deployer.fee_bps,
+                deployer.bps_fee,
+                deployer.flat_fee,
             ));
         }
         
@@ -616,7 +644,8 @@ impl Crank {
         for (deployer, auth_id, round_id, amount, squares_mask, _) in &deploys {
             let num_squares = squares_mask.count_ones();
             let total_deployed = amount * num_squares as u64;
-            let deployer_fee = total_deployed * deployer.fee_bps / 10_000;
+            let bps_fee_amount = total_deployed * deployer.bps_fee / 10_000;
+            let deployer_fee = bps_fee_amount + deployer.flat_fee;
             
             db::insert_tx(
                 &self.db_pool,
@@ -666,7 +695,8 @@ impl Crank {
     ) -> Result<String, CrankError> {
         let num_squares = squares_mask.count_ones();
         let total_deployed = amount * num_squares as u64;
-        let deployer_fee = total_deployed * deployer.fee_bps / 10_000;
+        let bps_fee_amount = total_deployed * deployer.bps_fee / 10_000;
+        let deployer_fee = bps_fee_amount + deployer.flat_fee;
         let protocol_fee = DEPLOY_FEE;
         
         // Check if checkpoint is needed
@@ -694,7 +724,6 @@ impl Crank {
             round_id,
             amount,
             squares_mask,
-            deployer.fee_bps,
             recent_blockhash,
             checkpoint_round,
         )?;
@@ -751,7 +780,6 @@ impl Crank {
         round_id: u64,
         amount: u64,
         squares_mask: u32,
-        expected_fee: u64,
         recent_blockhash: Hash,
         checkpoint_round: Option<u64>,
     ) -> Result<Transaction, CrankError> {
@@ -797,7 +825,8 @@ impl Crank {
             round_id,
             amount,
             squares_mask,
-            expected_fee,
+            deployer.bps_fee,
+            deployer.flat_fee,
         ));
         
         let mut tx = Transaction::new_with_payer(
@@ -1107,7 +1136,8 @@ impl Crank {
                 *round_id,
                 *amount,
                 *squares_mask,
-                deployer.fee_bps,
+                deployer.bps_fee,
+                deployer.flat_fee,
             ));
         }
         
@@ -1126,7 +1156,8 @@ impl Crank {
         for (deployer, auth_id, round_id, amount, squares_mask, _) in &deploys {
             let num_squares = squares_mask.count_ones();
             let total_deployed = amount * num_squares as u64;
-            let deployer_fee = total_deployed * deployer.fee_bps / 10_000;
+            let bps_fee_amount = total_deployed * deployer.bps_fee / 10_000;
+            let deployer_fee = bps_fee_amount + deployer.flat_fee;
             
             db::insert_tx(
                 &self.db_pool,

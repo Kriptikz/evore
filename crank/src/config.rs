@@ -85,6 +85,8 @@ pub struct DeployerInfo {
     pub manager_address: Pubkey,
     /// The autodeploy_balance PDA address
     pub autodeploy_balance_address: Pubkey,
-    /// Fee in basis points
-    pub fee_bps: u64,
+    /// Percentage fee in basis points (1000 = 10%, 500 = 5%)
+    pub bps_fee: u64,
+    /// Flat fee in lamports (added on top of bps_fee)
+    pub flat_fee: u64,
 }
