@@ -2,43 +2,42 @@
   "name": "evore-sdk",
   "version": "0.1.0",
   "description": "JavaScript SDK for the Evore automining program - the cheapest and most secure managed miner solution on Solana",
-  "main": "./src/index.js",
-  "types": "./src/index.d.ts",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "exports": {
     ".": {
-      "types": "./src/index.d.ts",
-      "default": "./src/index.js"
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     },
     "./constants": {
-      "types": "./src/constants.d.ts",
-      "default": "./src/constants.js"
+      "types": "./dist/constants.d.ts",
+      "default": "./dist/constants.js"
     },
     "./pda": {
-      "types": "./src/pda.d.ts",
-      "default": "./src/pda.js"
+      "types": "./dist/pda.d.ts",
+      "default": "./dist/pda.js"
     },
     "./accounts": {
-      "types": "./src/accounts.d.ts",
-      "default": "./src/accounts.js"
+      "types": "./dist/accounts.d.ts",
+      "default": "./dist/accounts.js"
     },
     "./instructions": {
-      "types": "./src/instructions.d.ts",
-      "default": "./src/instructions.js"
+      "types": "./dist/instructions.d.ts",
+      "default": "./dist/instructions.js"
     },
     "./transactions": {
-      "types": "./src/transactions.d.ts",
-      "default": "./src/transactions.js"
+      "types": "./dist/transactions.d.ts",
+      "default": "./dist/transactions.js"
     }
   },
   "scripts": {
-    "build": "echo 'No build step required - pure JavaScript with .d.ts type definitions'",
-    "test": "node test/index.js",
-    "lint": "echo 'Add eslint if needed'",
-    "prepublishOnly": "npm run build && npm run test"
+    "clean": "rm -rf dist",
+    "build": "npm run clean && mkdir -p dist && cp src/*.js src/*.d.ts dist/",
+    "prepublishOnly": "npm run build"
   },
   "files": [
-    "src/**/*.js",
-    "src/**/*.d.ts",
+    "dist/**/*.js",
+    "dist/**/*.d.ts",
     "README.md",
     "LICENSE"
   ],
