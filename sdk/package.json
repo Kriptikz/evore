@@ -1,0 +1,75 @@
+{
+  "name": "evore-sdk",
+  "version": "0.1.0",
+  "description": "JavaScript SDK for the Evore automining program - the cheapest and most secure managed miner solution on Solana",
+  "main": "./src/index.js",
+  "types": "./src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.d.ts",
+      "default": "./src/index.js"
+    },
+    "./constants": {
+      "types": "./src/constants.d.ts",
+      "default": "./src/constants.js"
+    },
+    "./pda": {
+      "types": "./src/pda.d.ts",
+      "default": "./src/pda.js"
+    },
+    "./accounts": {
+      "types": "./src/accounts.d.ts",
+      "default": "./src/accounts.js"
+    },
+    "./instructions": {
+      "types": "./src/instructions.d.ts",
+      "default": "./src/instructions.js"
+    },
+    "./transactions": {
+      "types": "./src/transactions.d.ts",
+      "default": "./src/transactions.js"
+    }
+  },
+  "scripts": {
+    "build": "echo 'No build step required - pure JavaScript with .d.ts type definitions'",
+    "test": "node test/index.js",
+    "lint": "echo 'Add eslint if needed'",
+    "prepublishOnly": "npm run build && npm run test"
+  },
+  "files": [
+    "src/**/*.js",
+    "src/**/*.d.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "solana",
+    "ore",
+    "mining",
+    "automining",
+    "evore",
+    "sdk",
+    "web3",
+    "blockchain",
+    "crypto"
+  ],
+  "author": "kriptikz",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kriptikz/evore.git"
+  },
+  "homepage": "https://github.com/kriptikz/evore/tree/master/sdk#readme",
+  "bugs": {
+    "url": "https://github.com/kriptikz/evore/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "peerDependencies": {
+    "@solana/web3.js": "^1.98.0"
+  },
+  "devDependencies": {
+    "@solana/web3.js": "^1.98.0"
+  }
+}
