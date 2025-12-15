@@ -14,7 +14,6 @@ const {
 const {
   getManagedMinerAuthPda,
   getDeployerPda,
-  getAutodeployBalancePda,
   getOreMinerPda,
   getOreBoardPda,
   getOreRoundPda,
@@ -391,21 +390,34 @@ function createDeployerInstruction(signer, manager, deployAuthority, bpsFee, fla
 
 /**
  * Creates an UpdateDeployer instruction
- * Updates deployer configuration (manager authority only)
- * @param {PublicKey} signer - Manager authority
+ * - Manager authority: can update deploy_authority, bps_fee, flat_fee
+ * - Deploy authority: can update deploy_authority, expected_bps_fee, expected_flat_fee
+ * @param {PublicKey} signer - Manager authority or deploy authority
  * @param {PublicKey} manager - Manager account
  * @param {PublicKey} newDeployAuthority - New deploy authority
- * @param {bigint} newBpsFee - New percentage fee in basis points
- * @param {bigint} newFlatFee - New flat fee in lamports
+ * @param {bigint} newBpsFee - New percentage fee in basis points (manager only)
+ * @param {bigint} newFlatFee - New flat fee in lamports (manager only)
+ * @param {bigint} newExpectedBpsFee - Expected bps_fee (deploy authority only, 0 = accept any)
+ * @param {bigint} newExpectedFlatFee - Expected flat_fee (deploy authority only, 0 = accept any)
  * @returns {TransactionInstruction}
  */
-function updateDeployerInstruction(signer, manager, newDeployAuthority, newBpsFee, newFlatFee = 0n) {
+function updateDeployerInstruction(
+  signer,
+  manager,
+  newDeployAuthority,
+  newBpsFee,
+  newFlatFee = 0n,
+  newExpectedBpsFee = 0n,
+  newExpectedFlatFee = 0n
+) {
   const [deployerPda] = getDeployerPda(manager);
-  
-  const data = Buffer.alloc(17);
+
+  const data = Buffer.alloc(33);
   data[0] = EvoreInstruction.UpdateDeployer;
   data.writeBigUInt64LE(newBpsFee, 1);
   data.writeBigUInt64LE(newFlatFee, 9);
+  data.writeBigUInt64LE(newExpectedBpsFee, 17);
+  data.writeBigUInt64LE(newExpectedFlatFee, 25);
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,
@@ -414,6 +426,7 @@ function updateDeployerInstruction(signer, manager, newDeployAuthority, newBpsFe
       { pubkey: manager, isSigner: false, isWritable: true },
       { pubkey: deployerPda, isSigner: false, isWritable: true },
       { pubkey: newDeployAuthority, isSigner: false, isWritable: false },
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     data,
   });
@@ -425,27 +438,27 @@ function updateDeployerInstruction(signer, manager, newDeployAuthority, newBpsFe
 
 /**
  * Creates a DepositAutodeployBalance instruction
- * Deposits SOL into the autodeploy balance PDA
+ * Deposits SOL into the managed_miner_auth PDA for a specific miner
  * @param {PublicKey} signer - Manager authority
  * @param {PublicKey} manager - Manager account
+ * @param {bigint} authId - Auth ID of the managed miner
  * @param {bigint} amount - Amount to deposit in lamports
  * @returns {TransactionInstruction}
  */
-function depositAutodeployBalanceInstruction(signer, manager, amount) {
-  const [deployerPda] = getDeployerPda(manager);
-  const [autodeployBalancePda] = getAutodeployBalancePda(deployerPda);
+function depositAutodeployBalanceInstruction(signer, manager, authId, amount) {
+  const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
   
-  const data = Buffer.alloc(9);
+  const data = Buffer.alloc(17);
   data[0] = EvoreInstruction.DepositAutodeployBalance;
-  data.writeBigUInt64LE(amount, 1);
+  data.writeBigUInt64LE(authId, 1);
+  data.writeBigUInt64LE(amount, 9);
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,
     keys: [
       { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: manager, isSigner: false, isWritable: true },
-      { pubkey: deployerPda, isSigner: false, isWritable: true },
-      { pubkey: autodeployBalancePda, isSigner: false, isWritable: true },
+      { pubkey: managedMinerAuth, isSigner: false, isWritable: true },
       { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     data,
@@ -454,27 +467,27 @@ function depositAutodeployBalanceInstruction(signer, manager, amount) {
 
 /**
  * Creates a WithdrawAutodeployBalance instruction
- * Withdraws SOL from the autodeploy balance PDA
+ * Withdraws SOL from the managed_miner_auth PDA
  * @param {PublicKey} signer - Manager authority
  * @param {PublicKey} manager - Manager account
+ * @param {bigint} authId - Auth ID of the managed miner
  * @param {bigint} amount - Amount to withdraw in lamports
  * @returns {TransactionInstruction}
  */
-function withdrawAutodeployBalanceInstruction(signer, manager, amount) {
-  const [deployerPda] = getDeployerPda(manager);
-  const [autodeployBalancePda] = getAutodeployBalancePda(deployerPda);
+function withdrawAutodeployBalanceInstruction(signer, manager, authId, amount) {
+  const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
   
-  const data = Buffer.alloc(9);
+  const data = Buffer.alloc(17);
   data[0] = EvoreInstruction.WithdrawAutodeployBalance;
-  data.writeBigUInt64LE(amount, 1);
+  data.writeBigUInt64LE(authId, 1);
+  data.writeBigUInt64LE(amount, 9);
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,
     keys: [
       { pubkey: signer, isSigner: true, isWritable: true },
       { pubkey: manager, isSigner: false, isWritable: true },
-      { pubkey: deployerPda, isSigner: false, isWritable: true },
-      { pubkey: autodeployBalancePda, isSigner: false, isWritable: true },
+      { pubkey: managedMinerAuth, isSigner: false, isWritable: true },
       { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
     ],
     data,
@@ -487,15 +500,14 @@ function withdrawAutodeployBalanceInstruction(signer, manager, amount) {
 
 /**
  * Creates an MMAutodeploy instruction
- * Deploys from autodeploy balance (deploy_authority signs, NOT manager authority)
+ * Deploys from managed_miner_auth balance (deploy_authority signs, NOT manager authority)
+ * Fees are read from the Deployer account and validated against expected_fees stored there
  * @param {PublicKey} signer - Deploy authority (executor)
  * @param {PublicKey} manager - Manager account
  * @param {bigint} authId - Auth ID for the managed miner
  * @param {bigint} roundId - Current round ID
  * @param {bigint} amount - Amount to deploy per selected square
  * @param {number} squaresMask - Bitmask of squares to deploy to (bits 0-24)
- * @param {bigint} expectedBpsFee - Expected bps_fee from deployer (0 to skip check)
- * @param {bigint} expectedFlatFee - Expected flat_fee from deployer (0 to skip check)
  * @returns {TransactionInstruction}
  */
 function mmAutodeployInstruction(
@@ -504,13 +516,10 @@ function mmAutodeployInstruction(
   authId,
   roundId,
   amount,
-  squaresMask,
-  expectedBpsFee = 0n,
-  expectedFlatFee = 0n
+  squaresMask
 ) {
-  const [managedMinerAuth, bump] = getManagedMinerAuthPda(manager, authId);
-  const [deployerPda, deployerBump] = getDeployerPda(manager);
-  const [autodeployBalancePda, autodeployBalanceBump] = getAutodeployBalancePda(deployerPda);
+  const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
+  const [deployerPda] = getDeployerPda(manager);
   const [oreMiner] = getOreMinerPda(managedMinerAuth);
   const [oreBoard] = getOreBoardPda();
   const [oreConfig] = getOreConfigPda();
@@ -518,20 +527,14 @@ function mmAutodeployInstruction(
   const [oreAutomation] = getOreAutomationPda(managedMinerAuth);
   const [entropyVar] = getEntropyVarPda(oreBoard, 0n);
 
-  // Build instruction data (49 bytes total based on MMAutodeploy struct)
-  const data = Buffer.alloc(49);
+  // Build instruction data (25 bytes total: 1 discriminator + 8 auth_id + 8 amount + 4 squares_mask + 4 pad)
+  const data = Buffer.alloc(25);
   
   data[0] = EvoreInstruction.MMAutodeploy;
-  data.writeBigUInt64LE(authId, 1);          // auth_id: [u8; 8]
-  data[9] = bump;                             // bump: u8
-  data[10] = deployerBump;                    // deployer_bump: u8
-  data[11] = autodeployBalanceBump;           // autodeploy_balance_bump: u8
-  // _pad: [u8; 5] at bytes 12-16 (already zeros)
-  data.writeBigUInt64LE(amount, 17);          // amount: [u8; 8]
-  data.writeUInt32LE(squaresMask, 25);        // squares_mask: [u8; 4]
-  // _pad2: [u8; 4] at bytes 29-32 (already zeros)
-  data.writeBigUInt64LE(expectedBpsFee, 33);  // expected_bps_fee: [u8; 8]
-  data.writeBigUInt64LE(expectedFlatFee, 41); // expected_flat_fee: [u8; 8]
+  data.writeBigUInt64LE(authId, 1);           // auth_id: [u8; 8]
+  data.writeBigUInt64LE(amount, 9);           // amount: [u8; 8]
+  data.writeUInt32LE(squaresMask, 17);        // squares_mask: [u8; 4]
+  // _pad: [u8; 4] at bytes 21-24 (already zeros)
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,
@@ -539,18 +542,17 @@ function mmAutodeployInstruction(
       { pubkey: signer, isSigner: true, isWritable: true },           // 0: deploy_authority
       { pubkey: manager, isSigner: false, isWritable: true },         // 1: manager
       { pubkey: deployerPda, isSigner: false, isWritable: true },     // 2: deployer PDA
-      { pubkey: autodeployBalancePda, isSigner: false, isWritable: true }, // 3: autodeploy_balance
-      { pubkey: managedMinerAuth, isSigner: false, isWritable: true }, // 4: managed_miner_auth
-      { pubkey: oreMiner, isSigner: false, isWritable: true },        // 5: ore_miner
-      { pubkey: FEE_COLLECTOR, isSigner: false, isWritable: true },   // 6: fee_collector
-      { pubkey: oreAutomation, isSigner: false, isWritable: true },   // 7: automation
-      { pubkey: oreConfig, isSigner: false, isWritable: true },       // 8: config
-      { pubkey: oreBoard, isSigner: false, isWritable: true },        // 9: board
-      { pubkey: oreRound, isSigner: false, isWritable: true },        // 10: round
-      { pubkey: entropyVar, isSigner: false, isWritable: true },      // 11: entropy_var
-      { pubkey: ORE_PROGRAM_ID, isSigner: false, isWritable: false }, // 12: ore_program
-      { pubkey: ENTROPY_PROGRAM_ID, isSigner: false, isWritable: false }, // 13: entropy_program
-      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false }, // 14: system_program
+      { pubkey: managedMinerAuth, isSigner: false, isWritable: true }, // 3: managed_miner_auth (funds source)
+      { pubkey: oreMiner, isSigner: false, isWritable: true },        // 4: ore_miner
+      { pubkey: FEE_COLLECTOR, isSigner: false, isWritable: true },   // 5: fee_collector
+      { pubkey: oreAutomation, isSigner: false, isWritable: true },   // 6: automation
+      { pubkey: oreConfig, isSigner: false, isWritable: true },       // 7: config
+      { pubkey: oreBoard, isSigner: false, isWritable: true },        // 8: board
+      { pubkey: oreRound, isSigner: false, isWritable: true },        // 9: round
+      { pubkey: entropyVar, isSigner: false, isWritable: true },      // 10: entropy_var
+      { pubkey: ORE_PROGRAM_ID, isSigner: false, isWritable: false }, // 11: ore_program
+      { pubkey: ENTROPY_PROGRAM_ID, isSigner: false, isWritable: false }, // 12: entropy_program
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false }, // 13: system_program
     ],
     data,
   });
@@ -597,34 +599,94 @@ function mmAutocheckpointInstruction(signer, manager, roundId, authId) {
 
 /**
  * Creates a RecycleSol instruction
- * Recycles SOL from miner account back to autodeploy balance
+ * Claims SOL rewards from miner account (stays in managed_miner_auth)
  * @param {PublicKey} signer - Deploy authority (executor)
  * @param {PublicKey} manager - Manager account
  * @param {bigint} authId - Auth ID for the managed miner
  * @returns {TransactionInstruction}
  */
 function recycleSolInstruction(signer, manager, authId) {
-  const [managedMinerAuth, bump] = getManagedMinerAuthPda(manager, authId);
+  const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
   const [oreMiner] = getOreMinerPda(managedMinerAuth);
   const [deployerPda] = getDeployerPda(manager);
-  const [autodeployBalancePda] = getAutodeployBalancePda(deployerPda);
 
-  const data = Buffer.alloc(10);
+  const data = Buffer.alloc(9);
   data[0] = EvoreInstruction.RecycleSol;
   data.writeBigUInt64LE(authId, 1);
-  data[9] = bump;
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,
     keys: [
-      { pubkey: signer, isSigner: true, isWritable: true },
-      { pubkey: manager, isSigner: false, isWritable: true },
-      { pubkey: deployerPda, isSigner: false, isWritable: true },
-      { pubkey: autodeployBalancePda, isSigner: false, isWritable: true },
-      { pubkey: managedMinerAuth, isSigner: false, isWritable: true },
-      { pubkey: oreMiner, isSigner: false, isWritable: true },
-      { pubkey: ORE_PROGRAM_ID, isSigner: false, isWritable: false },
-      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: signer, isSigner: true, isWritable: true },           // 0: deploy_authority
+      { pubkey: manager, isSigner: false, isWritable: true },         // 1: manager
+      { pubkey: deployerPda, isSigner: false, isWritable: true },     // 2: deployer PDA
+      { pubkey: managedMinerAuth, isSigner: false, isWritable: true }, // 3: managed_miner_auth
+      { pubkey: oreMiner, isSigner: false, isWritable: true },        // 4: ore_miner
+      { pubkey: ORE_PROGRAM_ID, isSigner: false, isWritable: false }, // 5: ore_program
+    ],
+    data,
+  });
+}
+
+/**
+ * Creates an MMFullAutodeploy instruction
+ * Combined checkpoint + recycle + deploy in one instruction
+ * @param {PublicKey} signer - Deploy authority (executor)
+ * @param {PublicKey} manager - Manager account
+ * @param {bigint} authId - Auth ID for the managed miner
+ * @param {bigint} roundId - Current round ID for deploying
+ * @param {bigint} checkpointRoundId - Round ID that needs checkpointing (usually roundId - 1, or same as roundId if no checkpoint needed)
+ * @param {bigint} amount - Amount to deploy per selected square
+ * @param {number} squaresMask - Bitmask of squares to deploy to (bits 0-24)
+ * @returns {TransactionInstruction}
+ */
+function mmFullAutodeployInstruction(
+  signer,
+  manager,
+  authId,
+  roundId,
+  checkpointRoundId,
+  amount,
+  squaresMask
+) {
+  const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
+  const [deployerPda] = getDeployerPda(manager);
+  const [oreMiner] = getOreMinerPda(managedMinerAuth);
+  const [oreBoard] = getOreBoardPda();
+  const [oreConfig] = getOreConfigPda();
+  const [oreRound] = getOreRoundPda(roundId);
+  const [checkpointRound] = getOreRoundPda(checkpointRoundId);
+  const [oreAutomation] = getOreAutomationPda(managedMinerAuth);
+  const [entropyVar] = getEntropyVarPda(oreBoard, 0n);
+
+  // Build instruction data (25 bytes total: 1 discriminator + 8 auth_id + 8 amount + 4 squares_mask + 4 pad)
+  const data = Buffer.alloc(25);
+  
+  data[0] = EvoreInstruction.MMFullAutodeploy;
+  data.writeBigUInt64LE(authId, 1);           // auth_id: [u8; 8]
+  data.writeBigUInt64LE(amount, 9);           // amount: [u8; 8]
+  data.writeUInt32LE(squaresMask, 17);        // squares_mask: [u8; 4]
+  // _pad: [u8; 4] at bytes 21-24 (already zeros)
+
+  return new TransactionInstruction({
+    programId: EVORE_PROGRAM_ID,
+    keys: [
+      { pubkey: signer, isSigner: true, isWritable: true },           // 0: deploy_authority
+      { pubkey: manager, isSigner: false, isWritable: true },         // 1: manager
+      { pubkey: deployerPda, isSigner: false, isWritable: true },     // 2: deployer PDA
+      { pubkey: managedMinerAuth, isSigner: false, isWritable: true }, // 3: managed_miner_auth (funds source)
+      { pubkey: oreMiner, isSigner: false, isWritable: true },        // 4: ore_miner
+      { pubkey: FEE_COLLECTOR, isSigner: false, isWritable: true },   // 5: fee_collector
+      { pubkey: oreAutomation, isSigner: false, isWritable: true },   // 6: automation
+      { pubkey: oreConfig, isSigner: false, isWritable: true },       // 7: config
+      { pubkey: oreBoard, isSigner: false, isWritable: true },        // 8: board
+      { pubkey: oreRound, isSigner: false, isWritable: true },        // 9: round (current round for deploy)
+      { pubkey: checkpointRound, isSigner: false, isWritable: true }, // 10: checkpoint_round (for checkpoint CPI)
+      { pubkey: ORE_TREASURY_ADDRESS, isSigner: false, isWritable: true }, // 11: treasury (for checkpoint)
+      { pubkey: entropyVar, isSigner: false, isWritable: true },      // 12: entropy_var
+      { pubkey: ORE_PROGRAM_ID, isSigner: false, isWritable: false }, // 13: ore_program
+      { pubkey: ENTROPY_PROGRAM_ID, isSigner: false, isWritable: false }, // 14: entropy_program
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false }, // 15: system_program
     ],
     data,
   });
@@ -724,6 +786,7 @@ module.exports = {
   mmAutodeployInstruction,
   mmAutocheckpointInstruction,
   recycleSolInstruction,
+  mmFullAutodeployInstruction,
   
   // Helpers
   squaresToMask,

@@ -94,6 +94,10 @@ pub enum EvoreError {
     /// The deployer account has already been migrated to the new format
     #[error("Deployer already migrated: account is already in new format")]
     DeployerAlreadyMigrated = 17,
+    
+    /// The account is already initialized
+    #[error("Already initialized: account already exists")]
+    AlreadyInitialized = 18,
 }
 
 error!(EvoreError);

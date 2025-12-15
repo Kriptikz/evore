@@ -6,7 +6,6 @@ export declare const FEE_COLLECTOR: PublicKey;
 export declare const DEPLOY_FEE: bigint;
 export declare const MANAGED_MINER_AUTH_SEED: string;
 export declare const DEPLOYER_SEED: string;
-export declare const AUTODEPLOY_BALANCE_SEED: string;
 
 // ORE Program
 export declare const ORE_PROGRAM_ID: PublicKey;

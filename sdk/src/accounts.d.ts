@@ -10,6 +10,8 @@ export interface Deployer {
   deployAuthority: PublicKey;
   bpsFee: bigint;
   flatFee: bigint;
+  expectedBpsFee: bigint;
+  expectedFlatFee: bigint;
 }
 
 // Account Decoders

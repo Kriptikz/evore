@@ -8,7 +8,6 @@ const {
   ORE_MINT_ADDRESS,
   MANAGED_MINER_AUTH_SEED,
   DEPLOYER_SEED,
-  AUTODEPLOY_BALANCE_SEED,
   ORE_MINER_SEED,
   ORE_BOARD_SEED,
   ORE_ROUND_SEED,
@@ -60,22 +59,6 @@ function getDeployerPda(manager) {
     [
       Buffer.from(DEPLOYER_SEED),
       manager.toBuffer(),
-    ],
-    EVORE_PROGRAM_ID
-  );
-}
-
-/**
- * Derives the autodeploy balance PDA for a deployer
- * This PDA holds the SOL that can be used for autodeploys
- * @param {PublicKey} deployer - The deployer PDA address
- * @returns {[PublicKey, number]} - [PDA address, bump seed]
- */
-function getAutodeployBalancePda(deployer) {
-  return PublicKey.findProgramAddressSync(
-    [
-      Buffer.from(AUTODEPLOY_BALANCE_SEED),
-      deployer.toBuffer(),
     ],
     EVORE_PROGRAM_ID
   );
@@ -219,7 +202,6 @@ module.exports = {
   // Evore PDAs
   getManagedMinerAuthPda,
   getDeployerPda,
-  getAutodeployBalancePda,
   
   // ORE PDAs
   getOreMinerPda,

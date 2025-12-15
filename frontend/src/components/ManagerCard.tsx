@@ -4,7 +4,7 @@ import { useState } from "react";
 import { PublicKey } from "@solana/web3.js";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { shortenPubkey, formatSol, formatOre, formatFee, parseSolToLamports, parsePercentToBps } from "@/lib/accounts";
-import { getDeployerPda, getAutodeployBalancePda, getManagedMinerAuthPda, getOreMinerPda } from "@/lib/pda";
+import { getManagedMinerAuthPda } from "@/lib/pda";
 
 interface MinerData {
   address: PublicKey;
@@ -24,13 +24,16 @@ interface ManagerCardProps {
     bpsFee: bigint;  // Percentage fee in basis points (1000 = 10%)
     flatFee: bigint; // Flat fee in lamports (added on top of bpsFee)
     autodeployBalance: bigint;
+    authPdaAddress: PublicKey;  // The managed_miner_auth PDA where funds are held
   };
   miner?: MinerData;
   currentBoardRoundId?: bigint;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
   onCreateDeployer: (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint) => Promise<string>;
   onUpdateDeployer: (newDeployAuthority: PublicKey, newBpsFee: bigint, newFlatFee: bigint) => Promise<string>;
-  onDeposit: (amount: bigint) => Promise<string>;
-  onWithdraw: (amount: bigint) => Promise<string>;
+  onDeposit: (authId: bigint, amount: bigint) => Promise<string>;
+  onWithdraw: (authId: bigint, amount: bigint) => Promise<string>;
   onCheckpoint: (roundId: bigint) => Promise<string>;
   onClaimSol: () => Promise<string>;
   onClaimOre: () => Promise<string>;
@@ -76,6 +79,8 @@ export function ManagerCard({
   deployer,
   miner,
   currentBoardRoundId,
+  isSelected = false,
+  onToggleSelect,
   onCreateDeployer,
   onUpdateDeployer,
   onDeposit,
@@ -164,7 +169,8 @@ export function ManagerCard({
       setLoading(true);
       setError(null);
       const lamports = parseSolToLamports(depositAmount);
-      await onDeposit(lamports);
+      // Use auth_id 0 for legacy deployers
+      await onDeposit(BigInt(0), lamports);
       setShowDeposit(false);
       setDepositAmount("");
     } catch (err: any) {
@@ -184,7 +190,8 @@ export function ManagerCard({
       setLoading(true);
       setError(null);
       const lamports = parseSolToLamports(withdrawAmount);
-      await onWithdraw(lamports);
+      // Use auth_id 0 for legacy deployers
+      await onWithdraw(BigInt(0), lamports);
       setShowWithdraw(false);
       setWithdrawAmount("");
     } catch (err: any) {
@@ -237,9 +244,21 @@ export function ManagerCard({
   const totalDeployed = miner?.deployed.reduce((sum, val) => sum + val, BigInt(0)) || BigInt(0);
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+    <div className={`bg-zinc-900 border rounded-lg p-4 transition-colors ${
+      isSelected ? 'border-purple-500 bg-purple-900/10' : 'border-zinc-800'
+    }`}>
       <div className="flex items-center justify-between mb-4">
-        <h3 className="text-lg font-semibold">Manager Account</h3>
+        <div className="flex items-center gap-3">
+          {onToggleSelect && (
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={onToggleSelect}
+              className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-purple-500 focus:ring-purple-500 focus:ring-offset-zinc-900 cursor-pointer"
+            />
+          )}
+          <h3 className="text-lg font-semibold">Manager Account</h3>
+        </div>
         <CopyablePubkey pubkey={managerAddress} />
       </div>
 
@@ -352,6 +371,7 @@ export function ManagerCard({
           <h4 className="font-medium mb-2 text-green-400">✓ Deployer Active</h4>
           <div className="space-y-1 text-sm">
             <CopyablePubkey pubkey={deployer.deployAuthority} label="Deploy Authority:" />
+            <CopyablePubkey pubkey={deployer.authPdaAddress} label="Auth PDA (deposit here):" />
             <div className="flex justify-between">
               <span className="text-zinc-400">Fee:</span>
               <span>{formatFee(deployer.bpsFee, deployer.flatFee)}</span>

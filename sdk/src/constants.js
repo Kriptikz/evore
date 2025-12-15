@@ -19,7 +19,6 @@ const DEPLOY_FEE = 1000n;
 // Evore PDA seeds
 const MANAGED_MINER_AUTH_SEED = "managed-miner-auth";
 const DEPLOYER_SEED = "deployer";
-const AUTODEPLOY_BALANCE_SEED = "autodeploy-balance";
 
 // =============================================================================
 // ORE Program (v3)
@@ -99,6 +98,7 @@ const EvoreInstruction = {
   RecycleSol: 9,
   WithdrawAutodeployBalance: 10,
   MMAutocheckpoint: 11,
+  MMFullAutodeploy: 12,
 };
 
 // =============================================================================
@@ -121,7 +121,6 @@ module.exports = {
   DEPLOY_FEE,
   MANAGED_MINER_AUTH_SEED,
   DEPLOYER_SEED,
-  AUTODEPLOY_BALANCE_SEED,
   
   // ORE
   ORE_PROGRAM_ID,

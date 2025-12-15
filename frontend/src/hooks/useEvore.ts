@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
-import { getDeployerPda, getAutodeployBalancePda, getManagedMinerAuthPda, getOreMinerPda, getOreBoardPda } from "@/lib/pda";
+import { getDeployerPda, getManagedMinerAuthPda, getOreMinerPda, getOreBoardPda } from "@/lib/pda";
 import { Manager, Deployer, decodeManager, decodeDeployer } from "@/lib/accounts";
 import {
   createManagerInstruction,
@@ -25,7 +25,8 @@ interface ManagerAccount {
 interface DeployerAccount {
   address: PublicKey;
   data: Deployer;
-  autodeployBalance: bigint;
+  autodeployBalance: bigint;  // Balance in managed_miner_auth PDA (auth_id 0)
+  authPdaAddress: PublicKey;  // The managed_miner_auth PDA address
 }
 
 interface MinerAccount {
@@ -129,7 +130,8 @@ export function useEvore() {
     try {
       const deployerPromises = managers.map(async (manager) => {
         const [deployerPda] = getDeployerPda(manager.address);
-        const [autodeployBalancePda] = getAutodeployBalancePda(deployerPda);
+        // Funds are now held in managed_miner_auth PDA (auth_id 0)
+        const [authPda] = getManagedMinerAuthPda(manager.address, BigInt(0));
 
         try {
           const accountInfo = await connection.getAccountInfo(deployerPda);
@@ -137,13 +139,14 @@ export function useEvore() {
 
           const data = decodeDeployer(Buffer.from(accountInfo.data));
           
-          // Get autodeploy balance
-          const balance = await connection.getBalance(autodeployBalancePda);
+          // Get balance from managed_miner_auth PDA
+          const balance = await connection.getBalance(authPda);
 
           return {
             address: deployerPda,
             data,
             autodeployBalance: BigInt(balance),
+            authPdaAddress: authPda,
           };
         } catch {
           return null;
@@ -353,14 +356,15 @@ export function useEvore() {
     return signature;
   }, [connection, publicKey, sendTransaction, fetchDeployers]);
 
-  // Deposit to autodeploy balance
+  // Deposit to autodeploy balance (to managed_miner_auth PDA)
   const depositAutodeployBalance = useCallback(async (
     managerAccount: PublicKey,
+    authId: bigint,
     amount: bigint
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
-    const ix = depositAutodeployBalanceInstruction(publicKey, managerAccount, amount);
+    const ix = depositAutodeployBalanceInstruction(publicKey, managerAccount, authId, amount);
     const tx = new Transaction().add(ix);
     
     const { blockhash } = await connection.getLatestBlockhash();
@@ -374,14 +378,15 @@ export function useEvore() {
     return signature;
   }, [connection, publicKey, sendTransaction, fetchDeployers]);
 
-  // Withdraw from autodeploy balance
+  // Withdraw from autodeploy balance (from managed_miner_auth PDA)
   const withdrawAutodeployBalance = useCallback(async (
     managerAccount: PublicKey,
+    authId: bigint,
     amount: bigint
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
-    const ix = withdrawAutodeployBalanceInstruction(publicKey, managerAccount, amount);
+    const ix = withdrawAutodeployBalanceInstruction(publicKey, managerAccount, authId, amount);
     const tx = new Transaction().add(ix);
     
     const { blockhash } = await connection.getLatestBlockhash();
@@ -398,6 +403,7 @@ export function useEvore() {
   // Withdraw all: claim SOL (if available) + withdraw autodeploy balance
   const withdrawAll = useCallback(async (
     managerAccount: PublicKey,
+    authId: bigint,
     rewardsSol: bigint,
     autodeployBalance: bigint
   ) => {
@@ -407,13 +413,13 @@ export function useEvore() {
     
     // Add claim SOL instruction if there are rewards
     if (rewardsSol > BigInt(0)) {
-      const claimSolIx = mmClaimSolInstruction(publicKey, managerAccount, BigInt(0));
+      const claimSolIx = mmClaimSolInstruction(publicKey, managerAccount, authId);
       tx.add(claimSolIx);
     }
     
     // Add withdraw instruction if there's balance to withdraw
     if (autodeployBalance > BigInt(0)) {
-      const withdrawIx = withdrawAutodeployBalanceInstruction(publicKey, managerAccount, autodeployBalance);
+      const withdrawIx = withdrawAutodeployBalanceInstruction(publicKey, managerAccount, authId, autodeployBalance);
       tx.add(withdrawIx);
     }
     

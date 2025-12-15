@@ -29,8 +29,10 @@ interface AutoMinerCardProps {
   deployer?: DeployerData;
   miner?: MinerData;
   currentBoardRoundId?: bigint;
-  onDeposit: (amount: bigint) => Promise<string>;
-  onWithdraw: (rewardsSol: bigint, autodeployBalance: bigint) => Promise<string>;
+  isSelected?: boolean;
+  onToggleSelect?: () => void;
+  onDeposit: (authId: bigint, amount: bigint) => Promise<string>;
+  onWithdraw: (authId: bigint, rewardsSol: bigint, autodeployBalance: bigint) => Promise<string>;
   onCheckpoint: (roundId: bigint) => Promise<string>;
   onClaimOre: () => Promise<string>;
 }
@@ -72,6 +74,8 @@ export function AutoMinerCard({
   deployer,
   miner,
   currentBoardRoundId,
+  isSelected = false,
+  onToggleSelect,
   onDeposit,
   onWithdraw,
   onCheckpoint,
@@ -111,7 +115,8 @@ export function AutoMinerCard({
     try {
       setLoading("deposit");
       setError(null);
-      await onDeposit(parseSolToLamports(depositAmount));
+      // Use auth_id 0 for legacy deployers
+      await onDeposit(BigInt(0), parseSolToLamports(depositAmount));
       setShowDeposit(false);
       setDepositAmount("");
     } catch (err: any) {
@@ -126,7 +131,8 @@ export function AutoMinerCard({
     try {
       setLoading("withdraw");
       setError(null);
-      await onWithdraw(miner?.rewardsSol || BigInt(0), deployer.autodeployBalance);
+      // Use auth_id 0 for legacy deployers
+      await onWithdraw(BigInt(0), miner?.rewardsSol || BigInt(0), deployer.autodeployBalance);
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -160,12 +166,24 @@ export function AutoMinerCard({
   };
 
   return (
-    <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
+    <div className={`bg-zinc-900 border rounded-lg p-4 transition-colors ${
+      isSelected ? 'border-purple-500 bg-purple-900/10' : 'border-zinc-800'
+    }`}>
       {/* Header */}
       <div className="flex items-center justify-between mb-4">
-        <div>
-          <p className="text-xs text-zinc-500">AutoMiner</p>
-          <CopyablePubkey pubkey={minerPubkey} />
+        <div className="flex items-center gap-3">
+          {onToggleSelect && (
+            <input
+              type="checkbox"
+              checked={isSelected}
+              onChange={onToggleSelect}
+              className="w-4 h-4 rounded border-zinc-600 bg-zinc-800 text-purple-500 focus:ring-purple-500 focus:ring-offset-zinc-900 cursor-pointer"
+            />
+          )}
+          <div>
+            <p className="text-xs text-zinc-500">AutoMiner</p>
+            <CopyablePubkey pubkey={minerPubkey} />
+          </div>
         </div>
         {deployer && (
           <div className="text-right">

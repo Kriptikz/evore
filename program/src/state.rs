@@ -1,7 +1,7 @@
 use steel::*;
 use serde::{Serialize, Deserialize};
 
-use crate::consts::{MANAGED_MINER_AUTH, DEPLOYER, AUTODEPLOY_BALANCE};
+use crate::consts::{MANAGED_MINER_AUTH, DEPLOYER};
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, IntoPrimitive, TryFromPrimitive)]
@@ -24,6 +24,10 @@ account!(EvoreAccount, Manager);
 /// PDA seeds: ["deployer", manager_key]
 /// Stores manager_key for easy lookup when scanning by deploy_authority
 /// The deployer charges fees on each deployment (both fees are applied if > 0)
+/// 
+/// expected_bps_fee and expected_flat_fee provide deploy_authority protection.
+/// If expected fee > 0, the actual fee must match for the deploy to succeed.
+/// Size: 32 + 32 + 8 + 8 + 8 + 8 = 96 bytes (+ 8 discriminator = 104)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct Deployer {
@@ -31,10 +35,14 @@ pub struct Deployer {
     pub manager_key: Pubkey,
     /// The authority that can execute deploys via this deployer
     pub deploy_authority: Pubkey,
-    /// Percentage fee in basis points (1000 = 10%, 500 = 5%, etc.)
+    /// Percentage fee in basis points (1000 = 10%, 500 = 5%, etc.) - set by manager
     pub bps_fee: u64,
-    /// Flat fee in lamports (added on top of bps_fee if > 0)
+    /// Flat fee in lamports (added on top of bps_fee if > 0) - set by manager
     pub flat_fee: u64,
+    /// Expected bps_fee set by deploy_authority (0 = accept any, >0 = must match bps_fee)
+    pub expected_bps_fee: u64,
+    /// Expected flat_fee set by deploy_authority (0 = accept any, >0 = must match flat_fee)
+    pub expected_flat_fee: u64,
 }
 
 account!(EvoreAccount, Deployer);
@@ -47,11 +55,4 @@ pub fn managed_miner_auth_pda(manager: Pubkey, auth_id: u64) -> (Pubkey, u8) {
 /// Seeds: ["deployer", manager_key]
 pub fn deployer_pda(manager_key: Pubkey) -> (Pubkey, u8) {
     Pubkey::find_program_address(&[DEPLOYER, &manager_key.to_bytes()], &crate::ID)
-}
-
-/// Derives the autodeploy balance PDA for a given deployer
-/// This is a 0-byte PDA that holds SOL for autodeploys
-/// Seeds: ["autodeploy-balance", deployer_key]
-pub fn autodeploy_balance_pda(deployer_key: Pubkey) -> (Pubkey, u8) {
-    Pubkey::find_program_address(&[AUTODEPLOY_BALANCE, &deployer_key.to_bytes()], &crate::ID)
 }

@@ -6,6 +6,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { Header } from "@/components/Header";
 import { AutoMinerCard } from "@/components/AutoMinerCard";
+import { BulkActionBar } from "@/components/BulkActionBar";
 import { useEvore } from "@/hooks/useEvore";
 import { formatSol, formatOre } from "@/lib/accounts";
 import { DEFAULT_DEPLOYER_PUBKEY, DEFAULT_DEPLOYER_BPS_FEE, DEFAULT_DEPLOYER_FLAT_FEE } from "@/lib/constants";
@@ -28,6 +29,7 @@ export default function Home() {
 
   const [creating, setCreating] = useState(false);
   const [createError, setCreateError] = useState<string | null>(null);
+  const [selectedManagers, setSelectedManagers] = useState<Set<string>>(new Set());
 
   // Find deployer for a manager
   const getDeployerForManager = (managerAddress: PublicKey) => {
@@ -47,6 +49,76 @@ export default function Home() {
     (sum, m) => sum + m.rewardsOre + m.refinedOre,
     BigInt(0)
   );
+
+  // Get managers with deployers (for selection)
+  const managersWithDeployers = managers.filter(m => 
+    deployers.some(d => d.data.managerKey.toBase58() === m.address.toBase58())
+  );
+
+  // Selection helpers
+  const toggleSelection = (managerKey: string) => {
+    setSelectedManagers(prev => {
+      const next = new Set(prev);
+      if (next.has(managerKey)) {
+        next.delete(managerKey);
+      } else {
+        next.add(managerKey);
+      }
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    setSelectedManagers(new Set(managersWithDeployers.map(m => m.address.toBase58())));
+  };
+
+  const deselectAll = () => {
+    setSelectedManagers(new Set());
+  };
+
+  // Bulk action handlers
+  const handleBulkDeposit = async (authId: bigint, amount: bigint) => {
+    const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      await depositAutodeployBalance(manager.address, authId, amount);
+    }
+  };
+
+  const handleBulkWithdraw = async () => {
+    const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const deployer = getDeployerForManager(manager.address);
+      const miner = getMinerForManager(manager.address);
+      if (deployer) {
+        await withdrawAll(
+          manager.address, 
+          BigInt(0), 
+          miner?.rewardsSol || BigInt(0), 
+          deployer.autodeployBalance
+        );
+      }
+    }
+  };
+
+  const handleBulkCheckpoint = async () => {
+    const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const miner = getMinerForManager(manager.address);
+      if (miner && board?.roundId && miner.checkpointId < miner.roundId && miner.roundId < board.roundId) {
+        await checkpoint(manager.address, miner.roundId);
+      }
+    }
+  };
+
+  const handleBulkClaimOre = async () => {
+    const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const miner = getMinerForManager(manager.address);
+      if (miner && (miner.rewardsOre > BigInt(0) || miner.refinedOre > BigInt(0))) {
+        await claimOre(manager.address);
+      }
+    }
+  };
 
   // Handle create autominer
   const handleCreateAutoMiner = async () => {
@@ -130,17 +202,33 @@ export default function Home() {
                 </Link>
               </div>
 
+              {/* Bulk Action Bar */}
+              {managersWithDeployers.length > 0 && (
+                <BulkActionBar
+                  selectedCount={selectedManagers.size}
+                  totalCount={managersWithDeployers.length}
+                  onSelectAll={selectAll}
+                  onDeselectAll={deselectAll}
+                  onBulkDeposit={handleBulkDeposit}
+                  onBulkWithdraw={handleBulkWithdraw}
+                  onBulkCheckpoint={handleBulkCheckpoint}
+                  onBulkClaimOre={handleBulkClaimOre}
+                  totalAutodeployBalance={totalAutodeployBalance}
+                />
+              )}
+
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {managers.map((manager) => {
                   const deployer = getDeployerForManager(manager.address);
                   const miner = getMinerForManager(manager.address);
+                  const managerKey = manager.address.toBase58();
                   
                   // Only show managers that have deployers (fully set up)
                   if (!deployer) return null;
 
                   return (
                     <AutoMinerCard
-                      key={manager.address.toBase58()}
+                      key={managerKey}
                       managerAddress={manager.address}
                       deployer={{
                         deployAuthority: deployer.data.deployAuthority,
@@ -150,9 +238,11 @@ export default function Home() {
                       }}
                       miner={miner}
                       currentBoardRoundId={board?.roundId}
-                      onDeposit={(amount) => depositAutodeployBalance(manager.address, amount)}
-                      onWithdraw={(rewardsSol, autodeployBalance) => 
-                        withdrawAll(manager.address, rewardsSol, autodeployBalance)
+                      isSelected={selectedManagers.has(managerKey)}
+                      onToggleSelect={() => toggleSelection(managerKey)}
+                      onDeposit={(authId, amount) => depositAutodeployBalance(manager.address, authId, amount)}
+                      onWithdraw={(authId, rewardsSol, autodeployBalance) => 
+                        withdrawAll(manager.address, authId, rewardsSol, autodeployBalance)
                       }
                       onCheckpoint={(roundId) => checkpoint(manager.address, roundId)}
                       onClaimOre={() => claimOre(manager.address)}

@@ -65,42 +65,37 @@ node src/index.js show-lut
 
 ## Address Lookup Tables (LUTs)
 
-LUTs are required for efficiently batching multiple deployers in a single transaction. Without a LUT, transactions are limited to ~2 deployers. With a LUT, you can batch up to 5 deployers per transaction.
+The js-crank uses the same LUT architecture as the Rust crank:
+
+- **One shared LUT** for static accounts (10 accounts that never change)
+- **One LUT per miner** for miner-specific accounts (5 accounts each)
+- **Round addresses NOT in LUT** (they change each round)
+
+This enables batching up to **7 deployers per transaction** with LUTs (vs ~2 without).
 
 ### LUT Compatibility with Rust Crank
 
-The js-crank uses the same LUT format and account structure as the Rust crank. This means:
+The js-crank is fully compatible with the Rust crank's LUT setup:
 
-- **Shared LUT**: You can use the same `LUT_ADDRESS` in both the Rust crank's `.env` and the js-crank's `.env`
-- **Cross-compatibility**: A LUT created by the Rust crank works with the js-crank, and vice versa
-- **Same authority**: Both cranks must use the same deploy authority keypair for the same LUT
+- **Shared LUT**: Both cranks recognize and use the same shared LUT
+- **Miner LUTs**: Per-miner LUTs created by either crank work with both
+- **Same authority**: Both cranks must use the same deploy authority keypair
 
-### Setting Up a LUT
+### Setting Up LUTs
 
-**Option 1: Create with js-crank**
 ```bash
-node src/index.js create-lut
-# Copy the output address to your .env: LUT_ADDRESS=<address>
-node src/index.js extend-lut
+# Create shared LUT and per-miner LUTs automatically
+node src/index.js setup-luts
 ```
 
-**Option 2: Use existing Rust crank LUT**
-```bash
-# Just copy the LUT_ADDRESS from your Rust crank's .env to the js-crank's .env
-```
+This will:
+1. Create a shared LUT with static accounts (if not exists)
+2. Create individual LUTs for each miner (if not exists)
 
-**Option 3: Create with Rust crank**
-```bash
-cargo run -- create-lut
-# Use the same LUT_ADDRESS in the js-crank's .env
-```
-
-### Adding New Deployers to LUT
-
-After adding new deployers, run `extend-lut` to add their accounts to the LUT:
+### Viewing LUTs
 
 ```bash
-node src/index.js extend-lut
+node src/index.js show-luts
 ```
 
 ## Customizing the Deployment Strategy
@@ -123,9 +118,9 @@ const DEPLOY_SLOTS_BEFORE_END = 150n;
 // Don't deploy if fewer slots remaining than this
 const MIN_SLOTS_TO_DEPLOY = 10n;
 
-// Max deploys per transaction (without/with LUT)
+// Max deploys per transaction (without/with LUTs)
 const MAX_BATCH_SIZE_NO_LUT = 2;
-const MAX_BATCH_SIZE_WITH_LUT = 5;
+const MAX_BATCH_SIZE_WITH_LUT = 7;  // With shared + per-miner LUTs
 ```
 
 ## Workflow
@@ -134,15 +129,15 @@ const MAX_BATCH_SIZE_WITH_LUT = 5;
 2. **LUT Loading**: If configured, loads the Address Lookup Table for efficient batching
 3. **Monitoring**: Polls the ORE board state every `POLL_INTERVAL_MS` milliseconds
 4. **Deployment Window**: When `DEPLOY_SLOTS_BEFORE_END` slots remain, triggers deployments
-5. **Checkpointing**: Automatically checkpoints previous rounds if needed
-6. **Batching**: Groups multiple deployers using versioned transactions with LUT
+5. **Full Autodeploy**: Uses `mmFullAutodeploy` which combines checkpoint + recycle + deploy in one instruction
+6. **Batching**: Groups up to 7 deployers per tx using shared + per-miner LUTs
 
 ## Requirements
 
 - Node.js 18+
 - Funded deploy authority keypair (for transaction fees)
 - Users must have funded autodeploy balances
-- LUT for batching more than 2 deployers
+- Run `setup-luts` for batching more than 2 deployers
 
 ## Dependencies
 
@@ -151,14 +146,17 @@ const MAX_BATCH_SIZE_WITH_LUT = 5;
 
 ## Differences from Rust Crank
 
-This is a simplified reference implementation. The Rust crank includes:
+This is a simplified reference implementation with the same core features:
+
+- Same LUT architecture (shared + per-miner)
+- Same `mmFullAutodeploy` instruction (checkpoint + recycle + deploy)
+- Same batching limits (7 deployers/tx with LUTs)
+
+The Rust crank additionally includes:
 
 - SQLite database for state persistence
-- Jito bundle support
-- Helius API integration
 - More robust error handling and retries
-
-For production use with many deployers, consider the Rust crank.
+- Automatic LUT creation/discovery
 
 ## License
 

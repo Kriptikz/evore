@@ -29,42 +29,47 @@ pub struct Config {
     #[arg(long, env = "PRIORITY_FEE", default_value = "100000")]
     pub priority_fee: u64,
     
-    /// Jito tip in lamports
-    #[arg(long, env = "JITO_TIP", default_value = "200000")]
-    pub jito_tip: u64,
-    
-    /// Enable Jito bundle sending
-    #[arg(long, env = "USE_JITO", default_value = "true")]
-    pub use_jito: bool,
-    
-    /// Helius API key (for fast sender)
-    #[arg(long, env = "HELIUS_API_KEY")]
-    pub helius_api_key: Option<String>,
-    
     /// Poll interval in milliseconds
     #[arg(long, env = "POLL_INTERVAL_MS", default_value = "400")]
     pub poll_interval_ms: u64,
     
-    /// Address Lookup Table (LUT) address for versioned transactions
-    /// If not set, a new LUT will be created on first run
+    /// [LEGACY] Address Lookup Table for manual LUT commands (show-lut, deactivate-lut, close-lut)
+    /// Not needed for 'run' - the crank auto-discovers and creates LUTs as needed
     #[arg(long, env = "LUT_ADDRESS")]
     pub lut_address: Option<Pubkey>,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum Command {
-    /// Run the main crank loop (default)
+    /// Run the main crank loop (auto-discovers/creates LUTs)
     Run,
     /// Send a test transaction to verify connectivity
     Test,
-    /// Show deployer accounts we manage
+    /// Show deployer accounts we manage and their LUT status
     List,
-    /// Create a new Address Lookup Table (LUT)
+    /// Update expected fees for all deployers (as deploy_authority)
+    SetExpectedFees {
+        /// Expected BPS fee (0 = accept any)
+        #[arg(long, default_value = "0")]
+        expected_bps_fee: u64,
+        /// Expected flat fee in lamports (0 = accept any)
+        #[arg(long, default_value = "5000")]
+        expected_flat_fee: u64,
+    },
+    /// [LEGACY] Create a new Address Lookup Table (LUT) manually
     CreateLut,
-    /// Extend LUT with deployer accounts
+    /// [LEGACY] Extend LUT with static shared accounts manually
     ExtendLut,
-    /// Show LUT contents
+    /// [LEGACY] Show LUT contents (requires LUT_ADDRESS)
     ShowLut,
+    /// [LEGACY] Deactivate LUT (requires LUT_ADDRESS, ~512 slot cooldown)
+    DeactivateLut,
+    /// [LEGACY] Close LUT and reclaim rent (requires LUT_ADDRESS)
+    CloseLut,
+    /// Deactivate LUTs that don't match current required accounts (wrong automation address, etc)
+    DeactivateUnused,
+    /// Show deactivating LUTs status and close any that are ready
+    CleanupDeactivated,
 }
 
 impl Config {
@@ -83,8 +88,6 @@ pub struct DeployerInfo {
     pub deployer_address: Pubkey,
     /// The manager account address
     pub manager_address: Pubkey,
-    /// The autodeploy_balance PDA address
-    pub autodeploy_balance_address: Pubkey,
     /// Percentage fee in basis points (1000 = 10%, 500 = 5%)
     pub bps_fee: u64,
     /// Flat fee in lamports (added on top of bps_fee)

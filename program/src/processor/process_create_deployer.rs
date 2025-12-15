@@ -84,11 +84,14 @@ pub fn process_create_deployer(
     )?;
 
     // Initialize the deployer data
+    // Expected fees initialized to actual fees (deploy_authority can update via update_deployer)
     let deployer = Deployer {
         manager_key: *manager_account_info.key,
         deploy_authority: *deploy_authority_info.key,
         bps_fee,
         flat_fee,
+        expected_bps_fee: bps_fee,
+        expected_flat_fee: flat_fee,
     };
 
     // Write discriminator and data

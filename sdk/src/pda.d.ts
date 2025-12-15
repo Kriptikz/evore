@@ -6,7 +6,6 @@ export declare function bigintToLeBytes(value: bigint): Buffer;
 // Evore PDAs
 export declare function getManagedMinerAuthPda(manager: PublicKey, authId: bigint): [PublicKey, number];
 export declare function getDeployerPda(manager: PublicKey): [PublicKey, number];
-export declare function getAutodeployBalancePda(deployer: PublicKey): [PublicKey, number];
 
 // ORE PDAs
 export declare function getOreMinerPda(authority: PublicKey): [PublicKey, number];

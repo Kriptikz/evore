@@ -4,9 +4,13 @@
 
 use evore::{
     consts::DEPLOY_FEE,
-    instruction::{mm_autodeploy, mm_autocheckpoint, recycle_sol},
+    instruction::{
+        mm_full_autodeploy,
+        // Legacy instructions (kept for backward compatibility)
+        mm_autodeploy, mm_autocheckpoint, recycle_sol,
+    },
     ore_api::{board_pda, miner_pda, round_pda, Board, Miner, Round},
-    state::{autodeploy_balance_pda, managed_miner_auth_pda, Deployer},
+    state::{managed_miner_auth_pda, Deployer},
 };
 use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
@@ -26,8 +30,8 @@ use tracing::{debug, error, info, warn};
 use crate::{
     config::{Config, DeployerInfo},
     db,
-    lut::LutManager,
-    sender::{get_random_jito_tip_account, TxSender},
+    lut::{LutManager, LutRegistry, get_miner_accounts, get_miner_auth_pda},
+    sender::TxSender,
 };
 
 /// The crank runner
@@ -49,11 +53,7 @@ impl Crank {
             CommitmentConfig::confirmed(),
         );
         
-        let sender = TxSender::new(
-            config.helius_api_key.clone(), 
-            config.rpc_url.clone(),
-            config.use_jito,
-        );
+        let sender = TxSender::new(config.rpc_url.clone());
         
         Ok(Self {
             config,
@@ -110,7 +110,6 @@ impl Crank {
     }
     
     /// Find all deployer accounts where we are the deploy_authority
-    /// This also handles migration from old deployer format to new format
     pub async fn find_deployers(&self) -> Result<Vec<DeployerInfo>, CrankError> {
         let deploy_authority_pubkey = self.deploy_authority.pubkey();
         
@@ -146,40 +145,42 @@ impl Crank {
         
         let mut deployers = Vec::new();
         
-        // Old deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 fee_bps = 80
-        const OLD_DEPLOYER_SIZE: usize = 80;
-        // New deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 fee + 8 fee_type = 88
-        const NEW_DEPLOYER_SIZE: usize = 88;
+        // Deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee + 8 flat_fee + 8 expected_bps_fee + 8 expected_flat_fee = 104
+        const DEPLOYER_SIZE: usize = 104;
         
         for (deployer_address, account) in accounts {
-            // First try to parse as new Deployer
-            match Deployer::try_from_bytes(&account.data) {
-                Ok(deployer) => {
-                    let manager_address = deployer.manager_key;
-                    let (autodeploy_balance_address, _) = autodeploy_balance_pda(deployer_address);
-                    
-                    let fee_str = format!("{} bps + {} lamports flat", deployer.bps_fee, deployer.flat_fee);
-                    
-                    deployers.push(DeployerInfo {
-                        deployer_address,
-                        manager_address,
-                        autodeploy_balance_address,
-                        bps_fee: deployer.bps_fee,
-                        flat_fee: deployer.flat_fee,
-                    });
-                    
-                    info!(
-                        "Found deployer: {} for manager: {} (fee: {})",
-                        deployer_address, manager_address, fee_str
-                    );
+            let data_len = account.data.len();
+            
+            if data_len == DEPLOYER_SIZE {
+                match Deployer::try_from_bytes(&account.data) {
+                    Ok(deployer) => {
+                        let manager_address = deployer.manager_key;
+                        let fee_str = format!("{} bps + {} lamports flat", deployer.bps_fee, deployer.flat_fee);
+
+                        deployers.push(DeployerInfo {
+                            deployer_address,
+                            manager_address,
+                            bps_fee: deployer.bps_fee,
+                            flat_fee: deployer.flat_fee,
+                        });
+                        
+                        info!(
+                            "Found deployer: {} for manager: {} (fee: {})",
+                            deployer_address, manager_address, fee_str
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            "Failed to parse deployer {}: {:?}",
+                            deployer_address, e
+                        );
+                    }
                 }
-                Err(_) => {
-                    // Check if this is an old format deployer that needs migration
-                      warn!(
-                          "Deployer account {} has unexpected size {} (expected {} or {})",
-                          deployer_address, account.data.len(), NEW_DEPLOYER_SIZE, OLD_DEPLOYER_SIZE
-                      );
-                }
+            } else {
+                warn!(
+                    "Deployer account {} has unexpected size {} (expected {})",
+                    deployer_address, data_len, DEPLOYER_SIZE
+                );
             }
         }
         
@@ -217,18 +218,17 @@ impl Crank {
         Ok(*round)
     }
     
-    /// Get autodeploy balance for a deployer
-    pub fn get_autodeploy_balance(&self, deployer: &DeployerInfo) -> Result<u64, CrankError> {
-        self.rpc_client.get_balance(&deployer.autodeploy_balance_address)
+    /// Get balance for a managed miner auth PDA
+    pub fn get_miner_balance(&self, deployer: &DeployerInfo, auth_id: u64) -> Result<u64, CrankError> {
+        let (managed_miner_auth, _) = managed_miner_auth_pda(deployer.manager_address, auth_id);
+        self.rpc_client.get_balance(&managed_miner_auth)
             .map_err(|e| CrankError::Rpc(e.to_string()))
     }
-    
+
     // Constants matching the program's process_mm_autodeploy.rs
     const AUTH_PDA_RENT: u64 = 890_880;
     const ORE_CHECKPOINT_FEE: u64 = 10_000;
     const ORE_MINER_SIZE: usize = 8 + 584; // discriminator + Miner struct size
-    // Rent for the autodeploy_balance PDA (0-byte account)
-    const AUTODEPLOY_BALANCE_RENT: u64 = 890_880;
     
     /// Calculate the required balance for a deploy, checking actual account states
     pub fn calculate_required_balance_with_state(
@@ -273,16 +273,15 @@ impl Crank {
         // How much needs to be transferred to the miner auth
         let transfer_to_miner = required_miner_balance.saturating_sub(current_auth_balance);
         
-        // Total funds needed from autodeploy_balance
-        // IMPORTANT: The autodeploy_balance PDA needs to stay rent-exempt after transfers
-        let total_needed = transfer_to_miner
+        // Total funds needed in managed_miner_auth
+        // IMPORTANT: The managed_miner_auth needs to stay rent-exempt after transfers
+        let total_needed = required_miner_balance
             .saturating_add(deployer_fee)
-            .saturating_add(protocol_fee)
-            .saturating_add(Self::AUTODEPLOY_BALANCE_RENT); // Keep PDA rent-exempt
+            .saturating_add(protocol_fee);
         
         info!(
-            "Required balance: deploy={}, deployer_fee={}, protocol_fee={}, transfer_to_miner={} (auth_balance={}, miner_rent={}), autodeploy_rent={}, total={}",
-            total_deployed, deployer_fee, protocol_fee, transfer_to_miner, current_auth_balance, miner_rent, Self::AUTODEPLOY_BALANCE_RENT, total_needed
+            "Required balance: deploy={}, deployer_fee={}, protocol_fee={}, current_auth_balance={}, miner_rent={}, total={}",
+            total_deployed, deployer_fee, protocol_fee, current_auth_balance, miner_rent, total_needed
         );
         
         Ok(total_needed)
@@ -303,8 +302,8 @@ impl Crank {
         let protocol_fee = DEPLOY_FEE;
         
         // Conservative overhead for first-time deploy:
-        // - auth rent + checkpoint fee + miner rent + autodeploy_balance rent
-        const MAX_OVERHEAD: u64 = 890_880 + 10_000 + 2_500_000 + 890_880; // ~0.0043 SOL
+        // - auth rent + checkpoint fee + miner rent
+        const MAX_OVERHEAD: u64 = 890_880 + 10_000 + 2_500_000; // ~0.0034 SOL
         
         total_deployed + deployer_fee + protocol_fee + MAX_OVERHEAD
     }
@@ -372,13 +371,6 @@ impl Crank {
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(200_000));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
-        // Jito tip
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
-        
         // Checkpoint
         instructions.push(mm_autocheckpoint(
             payer.pubkey(),
@@ -433,13 +425,6 @@ impl Crank {
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(cu_limit));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
-        // Jito tip
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
-        
         // Add checkpoint + recycle for each
         for (deployer, auth_id, checkpoint_round) in &checkpoints {
             instructions.push(mm_autocheckpoint(
@@ -484,13 +469,6 @@ impl Crank {
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(1_400_000));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
-        // Jito tip
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
-        
         // Just the deploy (no checkpoint)
         instructions.push(mm_autodeploy(
             payer.pubkey(),
@@ -499,8 +477,6 @@ impl Crank {
             round_id,
             amount,
             squares_mask,
-            deployer.bps_fee,
-            deployer.flat_fee,
         ));
         
         let mut tx = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
@@ -534,13 +510,6 @@ impl Crank {
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(cu_limit));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
-        // Jito tip
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
-        
         // Add all deploys (no checkpoint)
         for (deployer, auth_id, round_id, amount, squares_mask) in &deploys {
             instructions.push(mm_autodeploy(
@@ -550,8 +519,6 @@ impl Crank {
                 *round_id,
                 *amount,
                 *squares_mask,
-                deployer.bps_fee,
-                deployer.flat_fee,
             ));
         }
         
@@ -592,13 +559,6 @@ impl Crank {
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(total_cu.min(1_400_000)));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
-        // Jito tip (once for the whole batch)
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
-        
         // Add checkpoint + recycle for each deployer that needs it, then all deploys
         for (deployer, auth_id, _, _, _, checkpoint_round) in &deploys {
             if let Some(round_to_checkpoint) = checkpoint_round {
@@ -625,8 +585,6 @@ impl Crank {
                 *round_id,
                 *amount,
                 *squares_mask,
-                deployer.bps_fee,
-                deployer.flat_fee,
             ));
         }
         
@@ -661,7 +619,7 @@ impl Crank {
                 deployer_fee,
                 DEPLOY_FEE,
                 self.config.priority_fee,
-                self.config.jito_tip / deploys.len() as u64, // Split tip across deploys
+                0, // No Jito tip
                 last_valid_blockheight,
                 now,
             ).await.ok(); // Ignore duplicate key errors for batched txs
@@ -751,7 +709,7 @@ impl Crank {
             deployer_fee,
             protocol_fee,
             self.config.priority_fee,
-            self.config.jito_tip,
+            0, // No Jito tip
             last_valid_blockheight,
             now,
         ).await.map_err(|e| CrankError::Database(e.to_string()))?;
@@ -793,13 +751,6 @@ impl Crank {
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(cu_limit));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
-        // Jito tip instruction
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
-        
         // Autocheckpoint instruction - checkpoint the round the miner last played in
         if let Some(round_to_checkpoint) = checkpoint_round {
             instructions.push(mm_autocheckpoint(
@@ -825,8 +776,6 @@ impl Crank {
             round_id,
             amount,
             squares_mask,
-            deployer.bps_fee,
-            deployer.flat_fee,
         ));
         
         let mut tx = Transaction::new_with_payer(
@@ -933,6 +882,48 @@ impl Crank {
         self.deploy_authority.pubkey()
     }
     
+    /// Update expected fees for a deployer (as deploy_authority)
+    /// This allows the deploy_authority to protect itself from fee changes by the manager
+    pub async fn update_expected_fees(
+        &self,
+        deployer: &DeployerInfo,
+        expected_bps_fee: u64,
+        expected_flat_fee: u64,
+    ) -> Result<String, CrankError> {
+        let payer = &self.deploy_authority;
+        
+        // Build the update_deployer instruction
+        // As deploy_authority, we can only update expected_* fields
+        // We pass the current fees (they won't change) and set the expected fees
+        let ix = evore::instruction::update_deployer(
+            payer.pubkey(),
+            deployer.manager_address,
+            payer.pubkey(),  // Keep ourselves as deploy_authority
+            deployer.bps_fee,  // Keep current bps_fee
+            deployer.flat_fee,  // Keep current flat_fee
+            expected_bps_fee,
+            expected_flat_fee,
+        );
+        
+        let recent_blockhash = self.rpc_client.get_latest_blockhash()
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+        
+        let instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(100_000),
+            ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee),
+            ix,
+        ];
+        
+        let mut tx = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
+        tx.sign(&[payer], recent_blockhash);
+        
+        // Send and confirm
+        match self.sender.send_and_confirm_rpc(&tx, 60).await {
+            Ok(sig) => Ok(sig.to_string()),
+            Err(e) => Err(CrankError::Send(e.to_string())),
+        }
+    }
+    
     /// Create a new Address Lookup Table
     pub async fn create_lut(&self, lut_manager: &mut LutManager) -> Result<Pubkey, CrankError> {
         let payer = &self.deploy_authority;
@@ -967,21 +958,19 @@ impl Crank {
         }
     }
     
-    /// Extend LUT with deployer accounts
-    pub async fn extend_lut_with_deployers(
+    /// Extend LUT with static shared accounts (one-time setup)
+    /// Does NOT include round accounts - those are added separately per round
+    pub async fn extend_lut_with_static_accounts(
         &self,
         lut_manager: &mut LutManager,
-        deployers: &[DeployerInfo],
-        auth_id: u64,
-        round_id: u64,
     ) -> Result<usize, CrankError> {
-        let missing = lut_manager.get_missing_deployer_addresses(deployers, auth_id, round_id);
+        let missing = lut_manager.get_missing_static_addresses();
         
         if missing.is_empty() {
             return Ok(0);
         }
         
-        info!("Adding {} addresses to LUT", missing.len());
+        info!("Adding {} static shared addresses to LUT", missing.len());
         
         let payer = &self.deploy_authority;
         let mut total_added = 0;
@@ -1026,6 +1015,344 @@ impl Crank {
         Ok(total_added)
     }
     
+    /// Deactivate a LUT (first step before closing)
+    pub async fn deactivate_lut(&self, lut_manager: &LutManager) -> Result<(), CrankError> {
+        let payer = &self.deploy_authority;
+        
+        let deactivate_ix = lut_manager.deactivate_lut_instruction()
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        let recent_blockhash = self.rpc_client.get_latest_blockhash()
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+        
+        let instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(50_000),
+            ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee),
+            deactivate_ix,
+        ];
+        
+        let tx = LutManager::build_versioned_tx_no_lut(payer, instructions, recent_blockhash)
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        self.sender.send_and_confirm_versioned_rpc(&tx, 60).await
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        Ok(())
+    }
+    
+    /// Close a deactivated LUT and reclaim rent
+    /// Returns the amount of lamports reclaimed
+    pub async fn close_lut(&self, lut_manager: &LutManager) -> Result<u64, CrankError> {
+        let payer = &self.deploy_authority;
+        let lut_address = lut_manager.lut_address().ok_or(CrankError::Send("No LUT address".to_string()))?;
+        
+        // Get LUT balance before closing
+        let lut_balance = self.rpc_client.get_balance(&lut_address)
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+        
+        let close_ix = lut_manager.close_lut_instruction(payer.pubkey())
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        let recent_blockhash = self.rpc_client.get_latest_blockhash()
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+        
+        let instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(50_000),
+            ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee),
+            close_ix,
+        ];
+        
+        let tx = LutManager::build_versioned_tx_no_lut(payer, instructions, recent_blockhash)
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        self.sender.send_and_confirm_versioned_rpc(&tx, 60).await
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        Ok(lut_balance)
+    }
+    
+    /// Get the current slot
+    pub fn get_current_slot(&self) -> Result<u64, CrankError> {
+        self.rpc_client.get_slot()
+            .map_err(|e| CrankError::Rpc(e.to_string()))
+    }
+    
+    // =========================================================================
+    // LutRegistry methods (multi-LUT support)
+    // =========================================================================
+    
+    /// Create a new LUT and return its address
+    pub async fn create_lut_for_registry(&self, registry: &LutRegistry) -> Result<Pubkey, CrankError> {
+        let payer = &self.deploy_authority;
+        
+        let recent_slot = self.rpc_client.get_slot()
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+        
+        let (create_ix, lut_address) = registry.create_lut_instruction(recent_slot)
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        let recent_blockhash = self.rpc_client.get_latest_blockhash()
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+        
+        let instructions = vec![
+            ComputeBudgetInstruction::set_compute_unit_limit(50_000),
+            ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee),
+            create_ix,
+        ];
+        
+        let tx = LutRegistry::build_versioned_tx_no_lut(payer, instructions, recent_blockhash)
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        self.sender.send_and_confirm_versioned_rpc(&tx, 60).await
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        info!("Created LUT: {}", lut_address);
+        Ok(lut_address)
+    }
+    
+    /// Extend a LUT with addresses
+    pub async fn extend_lut_for_registry(
+        &self,
+        registry: &LutRegistry,
+        lut_address: Pubkey,
+        addresses: Vec<Pubkey>,
+    ) -> Result<(), CrankError> {
+        if addresses.is_empty() {
+            return Ok(());
+        }
+        
+        let payer = &self.deploy_authority;
+        
+        // Chunk addresses (max ~25 per tx)
+        for chunk in addresses.chunks(25) {
+            let extend_ix = registry.extend_lut_instruction(lut_address, chunk.to_vec())
+                .map_err(|e| CrankError::Send(e.to_string()))?;
+            
+            let recent_blockhash = self.rpc_client.get_latest_blockhash()
+                .map_err(|e| CrankError::Rpc(e.to_string()))?;
+            
+            let instructions = vec![
+                ComputeBudgetInstruction::set_compute_unit_limit(100_000),
+                ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee),
+                extend_ix,
+            ];
+            
+            let tx = LutRegistry::build_versioned_tx_no_lut(payer, instructions, recent_blockhash)
+                .map_err(|e| CrankError::Send(e.to_string()))?;
+            
+            self.sender.send_and_confirm_versioned_rpc(&tx, 60).await
+                .map_err(|e| CrankError::Send(e.to_string()))?;
+            
+            debug!("Extended LUT {} with {} addresses", lut_address, chunk.len());
+            
+            // Small delay between extensions
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        
+        Ok(())
+    }
+    
+    /// Ensure the shared LUT exists and has all static accounts
+    pub async fn ensure_shared_lut(&self, registry: &mut LutRegistry) -> Result<Pubkey, CrankError> {
+        // If no shared LUT, create one
+        let shared_lut = if let Some(addr) = registry.shared_lut() {
+            addr
+        } else {
+            let addr = self.create_lut_for_registry(registry).await?;
+            registry.set_shared_lut(addr);
+            
+            // Wait for LUT to be active
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            addr
+        };
+        
+        // Check for missing static addresses
+        let missing = registry.get_missing_shared_addresses();
+        if !missing.is_empty() {
+            info!("Adding {} static accounts to shared LUT", missing.len());
+            self.extend_lut_for_registry(registry, shared_lut, missing).await?;
+            
+            // Refresh cache
+            registry.refresh_lut_cache(shared_lut)
+                .map_err(|e| CrankError::Send(e.to_string()))?;
+        }
+        
+        Ok(shared_lut)
+    }
+    
+    /// Ensure a miner has a LUT with their accounts
+    /// Returns the LUT address
+    /// Ensure all deployers have their miner accounts in consolidated LUTs
+    /// Uses consolidated LUTs with up to 30 miners each
+    /// Returns count of miners added to LUTs
+    /// Create a LUT for a specific miner
+    pub async fn ensure_miner_lut(
+        &self,
+        registry: &mut LutRegistry,
+        deployer: &DeployerInfo,
+        auth_id: u64,
+    ) -> Result<Pubkey, CrankError> {
+        let miner_auth = get_miner_auth_pda(deployer.manager_address, auth_id);
+
+        // Check if miner already has a LUT
+        if let Some(lut_addr) = registry.get_miner_lut(&miner_auth) {
+            return Ok(*lut_addr);
+        }
+
+        // Create new LUT for this miner
+        info!("Creating LUT for miner {} (manager: {})", miner_auth, deployer.manager_address);
+        let lut_address = self.create_lut_for_registry(registry).await?;
+
+        // Wait for LUT to be active
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+        // Get miner accounts and extend LUT
+        let miner_accounts = get_miner_accounts(deployer.manager_address, auth_id);
+        self.extend_lut_for_registry(registry, lut_address, miner_accounts.clone()).await?;
+
+        // Register in registry
+        registry.register_miner_lut(miner_auth, lut_address, miner_accounts);
+
+        info!("Created miner LUT {} for {}", lut_address, miner_auth);
+        Ok(lut_address)
+    }
+
+    /// Ensure all deployers have miner LUTs
+    /// Returns count of new LUTs created
+    pub async fn ensure_all_miner_luts(
+        &self,
+        registry: &mut LutRegistry,
+        deployers: &[DeployerInfo],
+        auth_id: u64,
+    ) -> Result<usize, CrankError> {
+        let mut created = 0;
+
+        for deployer in deployers {
+            let miner_auth = get_miner_auth_pda(deployer.manager_address, auth_id);
+
+            if !registry.has_miner_lut(&miner_auth) {
+                self.ensure_miner_lut(registry, deployer, auth_id).await?;
+                created += 1;
+            }
+        }
+
+        Ok(created)
+    }
+
+    /// Execute batched autodeploys using LutRegistry (multiple LUTs)
+    /// Uses individual mm_full_autodeploy instructions for each deploy
+    pub async fn execute_batched_autodeploys_multi_lut(
+        &self,
+        registry: &LutRegistry,
+        deploys: Vec<(&DeployerInfo, u64, u64, u64, u32, Option<u64>)>, // (deployer, auth_id, round_id, amount, mask, checkpoint_round)
+    ) -> Result<String, CrankError> {
+        if deploys.is_empty() {
+            return Err(CrankError::Send("No deploys to batch".to_string()));
+        }
+
+        let payer = &self.deploy_authority;
+
+        let (recent_blockhash, last_valid_blockheight) = self.rpc_client
+            .get_latest_blockhash_with_commitment(CommitmentConfig::confirmed())
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+
+        // Collect miner_auths for LUT lookup
+        let miner_auths: Vec<Pubkey> = deploys.iter()
+            .map(|(d, auth_id, _, _, _, _)| get_miner_auth_pda(d.manager_address, *auth_id))
+            .collect();
+
+        // Get all relevant LUTs
+        let lut_accounts = registry.get_luts_for_miners(&miner_auths);
+
+        let mut instructions = Vec::new();
+
+        instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(1_400_000));
+        instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
+
+        // Add mm_full_autodeploy instructions for each deploy
+        for (deployer, auth_id, round_id, amount, squares_mask, checkpoint_round) in &deploys {
+            // checkpoint_round_id: if checkpoint needed, use that round; otherwise use current round
+            let checkpoint_round_id = checkpoint_round.unwrap_or(*round_id);
+            
+            instructions.push(mm_full_autodeploy(
+                payer.pubkey(),
+                deployer.manager_address,
+                *auth_id,
+                *round_id,
+                checkpoint_round_id,
+                *amount,
+                *squares_mask,
+            ));
+        }
+        
+        // Build versioned transaction with multiple LUTs
+        let tx = registry.build_versioned_tx(payer, instructions, lut_accounts, recent_blockhash)
+            .map_err(|e| CrankError::Send(e.to_string()))?;
+        
+        // Log transaction size and account count
+        let tx_bytes = bincode::serialize(&tx).unwrap_or_default();
+        let account_count = match &tx.message {
+            solana_sdk::message::VersionedMessage::V0(msg) => {
+                msg.account_keys.len() + 
+                msg.address_table_lookups.iter().map(|l| l.writable_indexes.len() + l.readonly_indexes.len()).sum::<usize>()
+            }
+            solana_sdk::message::VersionedMessage::Legacy(msg) => msg.account_keys.len(),
+        };
+        info!("Sending versioned tx: {} bytes (limit 1232), {} accounts (limit 64)", tx_bytes.len(), account_count);
+        
+        let signature = tx.signatures[0].to_string();
+        
+        // Record in database
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        
+        for (deployer, auth_id, round_id, amount, squares_mask, _) in &deploys {
+            let num_squares = squares_mask.count_ones();
+            let total_deployed = amount * num_squares as u64;
+            let bps_fee_amount = total_deployed * deployer.bps_fee / 10_000;
+            let deployer_fee = bps_fee_amount + deployer.flat_fee;
+            
+            db::insert_tx(
+                &self.db_pool,
+                &signature,
+                &deployer.manager_address.to_string(),
+                &deployer.deployer_address.to_string(),
+                *auth_id,
+                *round_id,
+                *amount,
+                *squares_mask,
+                num_squares,
+                total_deployed,
+                deployer_fee,
+                DEPLOY_FEE,
+                self.config.priority_fee,
+                0, // No Jito tip
+                last_valid_blockheight,
+                now,
+            ).await.ok();
+        }
+        
+        // Send transaction
+        match self.sender.send_and_confirm_versioned_rpc(&tx, 60).await {
+            Ok(sig) => {
+                info!("✓ Multi-LUT autodeploy ({} deploys, {} LUTs) confirmed: {}", 
+                    deploys.len(), registry.get_luts_for_miners(&miner_auths).len(), sig);
+                Ok(sig.to_string())
+            }
+            Err(e) => {
+                error!("✗ Multi-LUT autodeploy failed: {}", e);
+                for _ in &deploys {
+                    db::update_tx_failed(&self.db_pool, &signature, &e.to_string())
+                        .await
+                        .ok();
+                }
+                Err(CrankError::Send(e.to_string()))
+            }
+        }
+    }
+    
     /// Execute batched checkpoint+recycle using versioned transaction with LUT
     pub async fn execute_batched_checkpoint_recycle_versioned(
         &self,
@@ -1048,13 +1375,6 @@ impl Crank {
         let cu_limit = (checkpoints.len() as u32 * 150_000).min(1_400_000);
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(cu_limit));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
-        
-        // Jito tip
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
         
         // Add checkpoint + recycle for each
         for (deployer, auth_id, checkpoint_round) in &checkpoints {
@@ -1103,13 +1423,6 @@ impl Crank {
         instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(1_400_000));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
-        // Jito tip
-        instructions.push(system_instruction::transfer(
-            &payer.pubkey(),
-            &get_random_jito_tip_account(),
-            self.config.jito_tip,
-        ));
-        
         // Add checkpoint + recycle instructions for deployers that need it
         for (deployer, auth_id, _, _, _, checkpoint_round) in &deploys {
             if let Some(cp_round) = checkpoint_round {
@@ -1136,8 +1449,6 @@ impl Crank {
                 *round_id,
                 *amount,
                 *squares_mask,
-                deployer.bps_fee,
-                deployer.flat_fee,
             ));
         }
         
@@ -1173,7 +1484,7 @@ impl Crank {
                 deployer_fee,
                 DEPLOY_FEE,
                 self.config.priority_fee,
-                self.config.jito_tip / deploys.len() as u64,
+                0, // No Jito tip
                 last_valid_blockheight,
                 now,
             ).await.ok();

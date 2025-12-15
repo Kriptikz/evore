@@ -1,5 +1,5 @@
 use solana_program::{
-    account_info::AccountInfo, program_error::ProgramError,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, system_program,
 };
 use steel::*;
 
@@ -17,12 +17,15 @@ pub fn process_update_deployer(
     let args = UpdateDeployer::try_from_bytes(instruction_data)?;
     let new_bps_fee = u64::from_le_bytes(args.bps_fee);
     let new_flat_fee = u64::from_le_bytes(args.flat_fee);
+    let new_expected_bps_fee = u64::from_le_bytes(args.expected_bps_fee);
+    let new_expected_flat_fee = u64::from_le_bytes(args.expected_flat_fee);
 
     let [
         signer,
         manager_account_info,
         deployer_account_info,
         new_deploy_authority_info,
+        _system_program_info,
     ] = accounts else {
         return Err(ProgramError::NotEnoughAccountKeys);
     };
@@ -32,16 +35,12 @@ pub fn process_update_deployer(
         return Err(ProgramError::MissingRequiredSignature);
     }
 
-    // Verify manager is initialized and signer is the authority
+    // Verify manager is initialized
     if manager_account_info.data_is_empty() {
         return Err(EvoreError::ManagerNotInitialized.into());
     }
 
     let manager = manager_account_info.as_account::<Manager>(&crate::id())?;
-
-    if manager.authority != *signer.key {
-        return Err(EvoreError::NotAuthorized.into());
-    }
 
     // Verify deployer is initialized
     if deployer_account_info.data_is_empty() {
@@ -58,23 +57,42 @@ pub fn process_update_deployer(
         return Err(EvoreError::InvalidPDA.into());
     }
 
-    // Load deployer (PDA derivation already verifies it belongs to this manager)
-    let _deployer = deployer_account_info.as_account::<Deployer>(&crate::id())?;
+    // Load existing deployer data
+    let data = deployer_account_info.try_borrow_data()?;
+    let deployer = Deployer::try_from_bytes(&data[8..])?;
+    let current_deploy_authority = deployer.deploy_authority;
+    drop(data);
 
-    // Update the deployer data
+    // Determine who is signing and what they can update
+    let is_manager_authority = manager.authority == *signer.key;
+    let is_deploy_authority = current_deploy_authority == *signer.key;
+
+    if !is_manager_authority && !is_deploy_authority {
+        return Err(EvoreError::NotAuthorized.into());
+    }
+
+    // Update deployer data
     let mut data = deployer_account_info.try_borrow_mut_data()?;
     
-    // Update deploy_authority field (offset: 8 discriminator + 32 manager_key = 40)
-    let authority_offset = 8 + 32;
-    data[authority_offset..authority_offset + 32].copy_from_slice(new_deploy_authority_info.key.as_ref());
+    if is_manager_authority {
+        // Manager can update deploy_authority, bps_fee, flat_fee
+        // deploy_authority at offset 40
+        data[40..72].copy_from_slice(new_deploy_authority_info.key.as_ref());
+        // bps_fee at offset 72
+        data[72..80].copy_from_slice(&new_bps_fee.to_le_bytes());
+        // flat_fee at offset 80
+        data[80..88].copy_from_slice(&new_flat_fee.to_le_bytes());
+    }
     
-    // Update bps_fee field (offset: 8 discriminator + 32 manager_key + 32 deploy_authority = 72)
-    let bps_fee_offset = 8 + 32 + 32;
-    data[bps_fee_offset..bps_fee_offset + 8].copy_from_slice(&new_bps_fee.to_le_bytes());
-    
-    // Update flat_fee field (offset: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee = 80)
-    let flat_fee_offset = 8 + 32 + 32 + 8;
-    data[flat_fee_offset..flat_fee_offset + 8].copy_from_slice(&new_flat_fee.to_le_bytes());
+    if is_deploy_authority {
+        // Deploy authority can update deploy_authority, expected_bps_fee, expected_flat_fee
+        // deploy_authority at offset 40
+        data[40..72].copy_from_slice(new_deploy_authority_info.key.as_ref());
+        // expected_bps_fee at offset 88
+        data[88..96].copy_from_slice(&new_expected_bps_fee.to_le_bytes());
+        // expected_flat_fee at offset 96
+        data[96..104].copy_from_slice(&new_expected_flat_fee.to_le_bytes());
+    }
 
     Ok(())
 }

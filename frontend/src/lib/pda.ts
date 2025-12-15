@@ -2,7 +2,6 @@
 export {
   getManagedMinerAuthPda,
   getDeployerPda,
-  getAutodeployBalancePda,
   getOreMinerPda,
   getOreBoardPda,
   getOreRoundPda,

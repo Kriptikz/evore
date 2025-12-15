@@ -72,6 +72,9 @@ pub fn process_instruction(
         Instructions::MMAutocheckpoint => {
             process_mm_autocheckpoint::process_mm_autocheckpoint(accounts, data)?;
         }
+        Instructions::MMFullAutodeploy => {
+            process_mm_full_autodeploy::process_mm_full_autodeploy(accounts, data)?;
+        }
     }
 
     Ok(())

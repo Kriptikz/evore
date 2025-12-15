@@ -283,7 +283,7 @@ function buildRecycleSolInstructions(executor, manager, authId) {
 /**
  * Builds batched autodeploy instructions for multiple users (for executors)
  * 
- * Batch up to 5 autodeploys for efficiency.
+ * Batch up to 7 autodeploys for efficiency (with Address Lookup Table).
  * Each deploy can have its own amount and squares mask.
  * 
  * @param {import("@solana/web3.js").PublicKey} executor - Executor's wallet (deploy_authority)
@@ -292,8 +292,8 @@ function buildRecycleSolInstructions(executor, manager, authId) {
  * @returns {import("@solana/web3.js").TransactionInstruction[]}
  */
 function buildBatchedAutodeployInstructions(executor, deploys, roundId) {
-  if (deploys.length > 5) {
-    throw new Error("Maximum 5 deploys per batch");
+  if (deploys.length > 7) {
+    throw new Error("Maximum 7 deploys per batch");
   }
   
   const instructions = [];

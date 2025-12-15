@@ -5,8 +5,10 @@
  * Reference implementation for automated deploying via the Evore program.
  * Built with @solana/web3.js v1.x
  * 
- * Users should customize the DEPLOYMENT STRATEGY constants based on their
- * specific requirements.
+ * LUT Architecture:
+ * - One shared LUT for static accounts (10 accounts including deploy authority)
+ * - One LUT per miner for their 5 specific accounts
+ * - Round addresses are NOT in any LUT (changes each round)
  */
 
 require('dotenv').config();
@@ -29,24 +31,23 @@ const {
   ORE_PROGRAM_ID,
   ENTROPY_PROGRAM_ID,
   FEE_COLLECTOR,
+  ORE_TREASURY_ADDRESS,
   SYSTEM_PROGRAM_ID,
   DEPLOYER_DISCRIMINATOR,
   DEPLOY_FEE,
   ORE_CHECKPOINT_FEE,
   getDeployerPda,
-  getAutodeployBalancePda,
   getManagedMinerAuthPda,
   getOreMinerPda,
   getOreBoardPda,
   getOreRoundPda,
   getOreConfigPda,
   getOreAutomationPda,
+  getEntropyVarPda,
   decodeDeployer,
   decodeOreBoard,
   decodeOreMiner,
-  mmAutodeployInstruction,
-  mmAutocheckpointInstruction,
-  recycleSolInstruction,
+  mmFullAutodeployInstruction,
   formatSol,
   formatFee,
 } = require('evore-sdk');
@@ -74,108 +75,199 @@ const MIN_SLOTS_TO_DEPLOY = 10n;
 const MAX_BATCH_SIZE_NO_LUT = 2;
 
 /** Maximum deployers to batch in one transaction with LUT */
-const MAX_BATCH_SIZE_WITH_LUT = 5;
+const MAX_BATCH_SIZE_WITH_LUT = 7;
 
 // =============================================================================
 // RENT CONSTANTS
 // =============================================================================
 const AUTH_PDA_RENT = 890_880n;
-const AUTODEPLOY_BALANCE_RENT = 890_880n;
 const MINER_RENT_ESTIMATE = 2_500_000n;
 
 // =============================================================================
-// LUT MANAGER
+// LUT HELPERS
 // =============================================================================
 
-class LutManager {
+/**
+ * Get static shared accounts (accounts that don't change between rounds)
+ * Total: 10 fixed accounts (including deploy authority)
+ */
+function getStaticSharedAccounts(deployAuthority) {
+  const [boardAddress] = getOreBoardPda();
+  const [configAddress] = getOreConfigPda();
+  const [entropyVarAddress] = getEntropyVarPda(boardAddress, 0n);
+
+  return [
+    deployAuthority,        // The crank's signer
+    EVORE_PROGRAM_ID,       // Evore program
+    SYSTEM_PROGRAM_ID,
+    ORE_PROGRAM_ID,
+    ENTROPY_PROGRAM_ID,
+    FEE_COLLECTOR,
+    boardAddress,
+    configAddress,
+    ORE_TREASURY_ADDRESS,
+    entropyVarAddress,
+  ];
+}
+
+/**
+ * Get the 5 accounts specific to a miner (for per-miner LUT)
+ */
+function getMinerAccounts(manager, authId) {
+  const [deployerAddr] = getDeployerPda(manager);
+  const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
+  const [oreMiner] = getOreMinerPda(managedMinerAuth);
+  const [automation] = getOreAutomationPda(managedMinerAuth);
+
+  return [
+    manager,
+    deployerAddr,
+    managedMinerAuth,
+    oreMiner,
+    automation,
+  ];
+}
+
+/**
+ * Get the miner_auth PDA for a manager/authId
+ */
+function getMinerAuthPda(manager, authId) {
+  const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
+  return managedMinerAuth;
+}
+
+// =============================================================================
+// LUT REGISTRY
+// =============================================================================
+
+/**
+ * Registry that manages multiple LUTs:
+ * - One shared LUT for static accounts
+ * - Per-miner LUTs for miner-specific accounts
+ */
+class LutRegistry {
   constructor(connection, authority) {
     this.connection = connection;
     this.authority = authority;
-    this.lutAddress = null;
-    this.cachedAddresses = new Set();
-    this.lutAccount = null;
+    this.sharedLut = null;
+    this.sharedLutAccounts = new Set();
+    this.minerLuts = new Map(); // miner_auth -> lut_address
+    this.lutCache = new Map();  // lut_address -> AddressLookupTableAccount
   }
 
   /**
-   * Get shared accounts that are always included in the LUT
+   * Load all LUTs owned by our authority
    */
-  static getSharedAccounts(roundId) {
-    const [boardAddress] = getOreBoardPda();
-    const [roundAddress] = getOreRoundPda(roundId);
-    const [configAddress] = getOreConfigPda();
+  async loadAllLuts() {
+    console.log(`Scanning for LUTs owned by authority ${this.authority.toBase58()}...`);
 
-    return [
-      SYSTEM_PROGRAM_ID,
-      ORE_PROGRAM_ID,
-      ENTROPY_PROGRAM_ID,
-      FEE_COLLECTOR,
-      boardAddress,
-      roundAddress,
-      configAddress,
-      EVORE_PROGRAM_ID,
-    ];
-  }
+    const lutProgramId = new PublicKey('AddressLookupTab1e1111111111111111111111111');
+    
+    // Get all accounts owned by the LUT program with our authority
+    const accounts = await this.connection.getProgramAccounts(lutProgramId, {
+      filters: [
+        {
+          memcmp: {
+            offset: 22, // Authority offset in AddressLookupTable
+            bytes: this.authority.toBase58(),
+          },
+        },
+      ],
+    });
 
-  /**
-   * Get all accounts needed for a single deployer
-   */
-  static getDeployerAccounts(manager, authId) {
-    const [deployerAddr] = getDeployerPda(manager);
-    const [autodeployBalanceAddr] = getAutodeployBalancePda(deployerAddr);
-    const [managedMinerAuth] = getManagedMinerAuthPda(manager, authId);
-    const [oreMiner] = getOreMinerPda(managedMinerAuth);
-    const [automation] = getOreAutomationPda(oreMiner);
+    console.log(`Found ${accounts.length} LUTs owned by authority`);
 
-    return [
-      manager,
-      deployerAddr,
-      autodeployBalanceAddr,
-      managedMinerAuth,
-      oreMiner,
-      automation,
-    ];
-  }
+    for (const { pubkey: lutAddress, account } of accounts) {
+      try {
+        const state = AddressLookupTableAccount.deserialize(account.data);
+        const addresses = state.addresses;
 
-  /**
-   * Load an existing LUT from address
-   */
-  async loadLut(lutAddress) {
-    this.lutAddress = lutAddress;
+        // Cache the LUT
+        this.lutCache.set(lutAddress.toBase58(), {
+          key: lutAddress,
+          state: state,
+        });
 
-    try {
-      const accountInfo = await this.connection.getAccountInfo(lutAddress);
-      if (!accountInfo) {
-        throw new Error('LUT account not found');
+        // Determine if this is the shared LUT or a miner LUT
+        const staticAccounts = getStaticSharedAccounts(this.authority);
+        const addressStrings = addresses.map(a => a.toBase58());
+        const hasAllStatic = staticAccounts.every(acc => addressStrings.includes(acc.toBase58()));
+
+        if (hasAllStatic && !this.sharedLut) {
+          // This looks like the shared LUT
+          this.sharedLut = lutAddress;
+          this.sharedLutAccounts.clear();
+          for (const addr of addresses) {
+            this.sharedLutAccounts.add(addr.toBase58());
+          }
+          console.log(`  Identified shared LUT: ${lutAddress.toBase58()} (${addresses.length} addresses)`);
+        } else if (addresses.length === 5) {
+          // This looks like a miner LUT (5 accounts per miner)
+          // miner_auth is at index 2 (after manager, deployer)
+          const minerAuth = addresses[2];
+          this.minerLuts.set(minerAuth.toBase58(), lutAddress);
+          console.log(`  Identified miner LUT: ${lutAddress.toBase58()} for miner_auth ${minerAuth.toBase58()}`);
+        } else {
+          console.log(`  Unknown LUT: ${lutAddress.toBase58()} (${addresses.length} addresses)`);
+        }
+      } catch (err) {
+        console.warn(`  Failed to deserialize LUT ${lutAddress.toBase58()}: ${err.message}`);
       }
-
-      // Deserialize the lookup table state
-      const state = AddressLookupTableAccount.deserialize(accountInfo.data);
-
-      const lutAccount = {
-        key: lutAddress,
-        state: state,
-      };
-
-      // Cache the addresses
-      this.cachedAddresses.clear();
-      for (const addr of state.addresses) {
-        this.cachedAddresses.add(addr.toBase58());
-      }
-
-      this.lutAccount = lutAccount;
-      console.log(`Loaded LUT ${lutAddress.toBase58()} with ${state.addresses.length} addresses`);
-
-      return lutAccount;
-    } catch (err) {
-      throw new Error(`Failed to load LUT: ${err.message}`);
     }
+
+    console.log(`Loaded ${this.minerLuts.size} miner LUTs`);
+    return accounts.length;
   }
 
   /**
-   * Get the current LUT account
+   * Get the shared LUT address
    */
-  getLutAccount() {
-    return this.lutAccount;
+  getSharedLut() {
+    return this.sharedLut;
+  }
+
+  /**
+   * Check if a miner has a LUT
+   */
+  hasMinerLut(minerAuth) {
+    return this.minerLuts.has(minerAuth.toBase58());
+  }
+
+  /**
+   * Get missing static addresses from the shared LUT
+   */
+  getMissingSharedAddresses() {
+    const staticAccounts = getStaticSharedAccounts(this.authority);
+    return staticAccounts.filter(addr => !this.sharedLutAccounts.has(addr.toBase58()));
+  }
+
+  /**
+   * Get LUT accounts for a list of miner_auth PDAs
+   * Returns shared LUT + all relevant miner LUTs
+   */
+  getLutsForMiners(minerAuths) {
+    const luts = [];
+
+    // Always include shared LUT if available
+    if (this.sharedLut) {
+      const lutAccount = this.lutCache.get(this.sharedLut.toBase58());
+      if (lutAccount) {
+        luts.push(lutAccount);
+      }
+    }
+
+    // Add miner-specific LUTs
+    for (const minerAuth of minerAuths) {
+      const lutAddress = this.minerLuts.get(minerAuth.toBase58());
+      if (lutAddress) {
+        const lutAccount = this.lutCache.get(lutAddress.toBase58());
+        if (lutAccount) {
+          luts.push(lutAccount);
+        }
+      }
+    }
+
+    return luts;
   }
 
   /**
@@ -196,11 +288,8 @@ class LutManager {
 
     tx.sign(keypair);
     const signature = await this.connection.sendRawTransaction(tx.serialize());
-    
-    // Wait for confirmation
     await this.connection.confirmTransaction(signature);
 
-    this.lutAddress = lutAddress;
     console.log(`Created LUT: ${lutAddress.toBase58()}`);
     console.log(`Transaction: ${signature}`);
 
@@ -210,11 +299,7 @@ class LutManager {
   /**
    * Extend LUT with new addresses
    */
-  async extendLut(keypair, newAddresses) {
-    if (!this.lutAddress) {
-      throw new Error('No LUT address set');
-    }
-
+  async extendLut(keypair, lutAddress, newAddresses) {
     if (newAddresses.length === 0) {
       console.log('No new addresses to add');
       return null;
@@ -229,7 +314,7 @@ class LutManager {
     const signatures = [];
     for (const chunk of chunks) {
       const extendIx = AddressLookupTableProgram.extendLookupTable({
-        lookupTable: this.lutAddress,
+        lookupTable: lutAddress,
         authority: this.authority,
         payer: this.authority,
         addresses: chunk,
@@ -243,14 +328,7 @@ class LutManager {
       const signature = await this.connection.sendRawTransaction(tx.serialize());
       signatures.push(signature);
 
-      // Add to cache
-      for (const addr of chunk) {
-        this.cachedAddresses.add(addr.toBase58());
-      }
-
       console.log(`Extended LUT with ${chunk.length} addresses: ${signature}`);
-      
-      // Wait for confirmation
       await this.connection.confirmTransaction(signature);
     }
 
@@ -258,54 +336,77 @@ class LutManager {
   }
 
   /**
-   * Get addresses that are missing from the LUT
+   * Create and extend shared LUT if needed
    */
-  getMissingAddresses(addresses) {
-    return addresses.filter(addr => !this.cachedAddresses.has(addr.toBase58()));
-  }
+  async ensureSharedLut(keypair) {
+    if (!this.sharedLut) {
+      console.log('Creating shared LUT...');
+      const lutAddress = await this.createLut(keypair);
+      this.sharedLut = lutAddress;
+      
+      // Wait for LUT to be active
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
 
-  /**
-   * Get missing deployer addresses for a list of deployers
-   */
-  getMissingDeployerAddresses(deployers, authId, roundId) {
-    const needed = [];
-    const seen = new Set();
-
-    // Add shared accounts
-    const shared = LutManager.getSharedAccounts(roundId);
-    for (const addr of shared) {
-      const key = addr.toBase58();
-      if (!this.cachedAddresses.has(key) && !seen.has(key)) {
-        needed.push(addr);
-        seen.add(key);
+    const missing = this.getMissingSharedAddresses();
+    if (missing.length > 0) {
+      console.log(`Adding ${missing.length} static accounts to shared LUT...`);
+      await this.extendLut(keypair, this.sharedLut, missing);
+      
+      // Update cache
+      for (const addr of missing) {
+        this.sharedLutAccounts.add(addr.toBase58());
       }
     }
 
-    // Add deployer-specific accounts
-    for (const deployer of deployers) {
-      const accounts = LutManager.getDeployerAccounts(deployer.managerAddress, authId);
-      for (const addr of accounts) {
-        const key = addr.toBase58();
-        if (!this.cachedAddresses.has(key) && !seen.has(key)) {
-          needed.push(addr);
-          seen.add(key);
-        }
-      }
-    }
-
-    return needed;
+    return this.sharedLut;
   }
 
   /**
-   * Get the LUT for use in VersionedTransaction
+   * Create LUT for a miner if they don't have one
    */
-  getAddressLookupTableAccount() {
-    if (!this.lutAccount) return null;
+  async ensureMinerLut(keypair, manager, authId) {
+    const minerAuth = getMinerAuthPda(manager, authId);
     
-    return {
-      key: this.lutAddress,
-      state: this.lutAccount.state,
-    };
+    if (this.hasMinerLut(minerAuth)) {
+      return this.minerLuts.get(minerAuth.toBase58());
+    }
+
+    console.log(`Creating LUT for miner ${minerAuth.toBase58()}...`);
+    const lutAddress = await this.createLut(keypair);
+    
+    // Wait for LUT to be active
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    // Add miner accounts
+    const minerAccounts = getMinerAccounts(manager, authId);
+    await this.extendLut(keypair, lutAddress, minerAccounts);
+    
+    // Register in registry
+    this.minerLuts.set(minerAuth.toBase58(), lutAddress);
+    
+    // Cache
+    const state = AddressLookupTableAccount.deserialize(
+      (await this.connection.getAccountInfo(lutAddress)).data
+    );
+    this.lutCache.set(lutAddress.toBase58(), { key: lutAddress, state });
+    
+    return lutAddress;
+  }
+
+  /**
+   * Build a versioned transaction with LUTs
+   */
+  buildVersionedTx(keypair, instructions, lutAccounts, recentBlockhash) {
+    const messageV0 = new TransactionMessage({
+      payerKey: this.authority,
+      recentBlockhash,
+      instructions,
+    }).compileToV0Message(lutAccounts);
+
+    const tx = new VersionedTransaction(messageV0);
+    tx.sign([keypair]);
+    return tx;
   }
 }
 
@@ -319,20 +420,16 @@ class Crank {
     this.keypair = keypair;
     this.pubkey = pubkey;
     this.config = config;
-    this.lutManager = null;
+    this.registry = null;
   }
 
   /**
-   * Initialize LUT manager and optionally load existing LUT
+   * Initialize LUT registry and load existing LUTs
    */
-  async initLut(lutAddress = null) {
-    this.lutManager = new LutManager(this.connection, this.pubkey);
-    
-    if (lutAddress) {
-      await this.lutManager.loadLut(lutAddress);
-    }
-    
-    return this.lutManager;
+  async initRegistry() {
+    this.registry = new LutRegistry(this.connection, this.pubkey);
+    await this.registry.loadAllLuts();
+    return this.registry;
   }
 
   /**
@@ -358,17 +455,13 @@ class Crank {
       try {
         const deployer = decodeDeployer(account.data);
         
-        // Check if we are the deploy authority
         if (deployer.deployAuthority.toBase58() !== this.pubkey.toBase58()) {
           continue;
         }
 
-        const [autodeployBalanceAddress] = getAutodeployBalancePda(deployerAddress);
-
         deployers.push({
           deployerAddress,
           managerAddress: deployer.managerKey,
-          autodeployBalanceAddress,
           bpsFee: deployer.bpsFee,
           flatFee: deployer.flatFee,
         });
@@ -401,10 +494,11 @@ class Crank {
   }
 
   /**
-   * Get autodeploy balance for a deployer
+   * Get autodeploy balance (managed_miner_auth balance)
    */
   async getAutodeployBalance(deployer) {
-    const balance = await this.connection.getBalance(deployer.autodeployBalanceAddress);
+    const [managedMinerAuth] = getManagedMinerAuthPda(deployer.managerAddress, AUTH_ID);
+    const balance = await this.connection.getBalance(managedMinerAuth);
     return BigInt(balance);
   }
 
@@ -469,13 +563,9 @@ class Crank {
       minerRent = MINER_RENT_ESTIMATE;
     }
 
-    const requiredMinerBalance = AUTH_PDA_RENT + ORE_CHECKPOINT_FEE + totalDeployed + minerRent;
-    const transferToMiner = requiredMinerBalance > currentAuthBalance 
-      ? requiredMinerBalance - currentAuthBalance 
-      : 0n;
-
-    const totalNeeded = transferToMiner + deployerFee + protocolFee + AUTODEPLOY_BALANCE_RENT;
-    return totalNeeded;
+    const requiredMinerBalance = AUTH_PDA_RENT + ORE_CHECKPOINT_FEE + totalDeployed + minerRent + deployerFee + protocolFee;
+    
+    return requiredMinerBalance;
   }
 
   /**
@@ -498,86 +588,63 @@ class Crank {
 
     tx.sign(this.keypair);
     const signature = await this.connection.sendRawTransaction(tx.serialize());
-    
-    // Wait for confirmation
     await this.connection.confirmTransaction(signature);
     
     return signature;
   }
 
   /**
-   * Build instructions for a batch of autodeploys
+   * Build mmFullAutodeploy instructions for a batch of deploys
    */
-  buildAutodeployInstructions(deploys, roundId) {
+  buildFullAutodeployInstructions(deploys, roundId) {
     const instructions = [];
 
-    // Compute budget
+    // Compute budget - ~400k CU per full autodeploy
     const cuLimit = Math.min(deploys.length * 400_000, 1_400_000);
     instructions.push(ComputeBudgetProgram.setComputeUnitLimit({ units: cuLimit }));
     instructions.push(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: this.config.priorityFee }));
 
     for (const deploy of deploys) {
-      // Checkpoint if needed
-      if (deploy.checkpointRound) {
-        const checkpointIx = mmAutocheckpointInstruction(
-          this.pubkey,
-          deploy.deployer.managerAddress,
-          deploy.checkpointRound,
-          deploy.authId
-        );
-        instructions.push(checkpointIx);
-        
-        // Recycle after checkpoint
-        const recycleIx = recycleSolInstruction(
-          this.pubkey,
-          deploy.deployer.managerAddress,
-          deploy.authId
-        );
-        instructions.push(recycleIx);
-      }
-
-      // Autodeploy
-      const autodeployIx = mmAutodeployInstruction(
+      // Use checkpoint round if needed, otherwise use current round
+      const checkpointRoundId = deploy.checkpointRound || roundId;
+      
+      const ix = mmFullAutodeployInstruction(
         this.pubkey,
         deploy.deployer.managerAddress,
         deploy.authId,
         roundId,
+        checkpointRoundId,
         deploy.amount,
-        deploy.squaresMask,
-        deploy.deployer.bpsFee,
-        deploy.deployer.flatFee
+        deploy.squaresMask
       );
-      instructions.push(autodeployIx);
+      instructions.push(ix);
     }
 
     return instructions;
   }
 
   /**
-   * Execute batched autodeploys using versioned transaction with LUT
+   * Execute batched autodeploys using versioned transaction with LUTs
    */
   async executeBatchedAutoDeploysVersioned(deploys, roundId) {
-    if (!this.lutManager || !this.lutManager.getLutAccount()) {
-      throw new Error('LUT not loaded');
+    if (!this.registry || !this.registry.getSharedLut()) {
+      throw new Error('LUT registry not initialized or shared LUT not available');
     }
 
-    const instructions = this.buildAutodeployInstructions(deploys, roundId);
+    const instructions = this.buildFullAutodeployInstructions(deploys, roundId);
     const { blockhash } = await this.connection.getLatestBlockhash();
 
-    // Build versioned transaction with LUT
-    const lutAccount = this.lutManager.getAddressLookupTableAccount();
+    // Get miner_auths for LUT lookup
+    const minerAuths = deploys.map(d => getMinerAuthPda(d.deployer.managerAddress, d.authId));
+    const lutAccounts = this.registry.getLutsForMiners(minerAuths);
+
+    const tx = this.registry.buildVersionedTx(this.keypair, instructions, lutAccounts, blockhash);
     
-    const messageV0 = new TransactionMessage({
-      payerKey: this.pubkey,
-      recentBlockhash: blockhash,
-      instructions,
-    }).compileToV0Message([lutAccount]);
+    // Log transaction size
+    const txBytes = tx.serialize();
+    console.log(`Sending versioned tx: ${txBytes.length} bytes (limit 1232)`);
 
-    const versionedTx = new VersionedTransaction(messageV0);
-    versionedTx.sign([this.keypair]);
-
-    const signature = await this.connection.sendRawTransaction(versionedTx.serialize());
-
+    const signature = await this.connection.sendRawTransaction(txBytes);
     return signature;
   }
 
@@ -585,28 +652,9 @@ class Crank {
    * Execute batched autodeploys (legacy transaction, no LUT)
    */
   async executeBatchedAutodeploys(deploys, roundId) {
-    const instructions = this.buildAutodeployInstructions(deploys, roundId);
+    const instructions = this.buildFullAutodeployInstructions(deploys, roundId);
     
     const tx = new Transaction().add(...instructions);
-    tx.feePayer = this.pubkey;
-    tx.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
-
-    tx.sign(this.keypair);
-    const signature = await this.connection.sendRawTransaction(tx.serialize());
-
-    return signature;
-  }
-
-  /**
-   * Execute checkpoint + recycle only
-   */
-  async executeCheckpointRecycle(deployer, authId, checkpointRound) {
-    const tx = new Transaction()
-      .add(ComputeBudgetProgram.setComputeUnitLimit({ units: 200_000 }))
-      .add(ComputeBudgetProgram.setComputeUnitPrice({ microLamports: this.config.priorityFee }))
-      .add(mmAutocheckpointInstruction(this.pubkey, deployer.managerAddress, checkpointRound, authId))
-      .add(recycleSolInstruction(this.pubkey, deployer.managerAddress, authId));
-
     tx.feePayer = this.pubkey;
     tx.recentBlockhash = (await this.connection.getLatestBlockhash()).blockhash;
 
@@ -675,14 +723,6 @@ async function runStrategy(crank, deployers, state) {
         squaresMask: SQUARES_MASK,
         checkpointRound,
       });
-    } else if (checkpointRound) {
-      console.log(`  ${deployer.managerAddress.toBase58()} needs checkpoint but insufficient balance for deploy`);
-      try {
-        const sig = await crank.executeCheckpointRecycle(deployer, AUTH_ID, checkpointRound);
-        console.log(`  ✓ Checkpoint+recycle: ${sig}`);
-      } catch (err) {
-        console.error(`  ✗ Checkpoint+recycle failed: ${err.message}`);
-      }
     } else {
       console.log(`  Skipping ${deployer.managerAddress.toBase58()}: insufficient balance (${formatSol(balance)} < ${formatSol(required)})`);
     }
@@ -691,8 +731,8 @@ async function runStrategy(crank, deployers, state) {
   if (toDeploy.length > 0) {
     console.log(`\nDeploying for ${toDeploy.length} managers (round ${board.roundId})`);
 
-    const hasLut = crank.lutManager && crank.lutManager.getLutAccount();
-    const batchSize = hasLut ? MAX_BATCH_SIZE_WITH_LUT : MAX_BATCH_SIZE_NO_LUT;
+    const hasLuts = crank.registry && crank.registry.getSharedLut();
+    const batchSize = hasLuts ? MAX_BATCH_SIZE_WITH_LUT : MAX_BATCH_SIZE_NO_LUT;
 
     for (let i = 0; i < toDeploy.length; i += batchSize) {
       const batch = toDeploy.slice(i, i + batchSize);
@@ -701,12 +741,12 @@ async function runStrategy(crank, deployers, state) {
 
       try {
         let sig;
-        if (hasLut) {
+        if (hasLuts) {
           sig = await crank.executeBatchedAutoDeploysVersioned(batch, board.roundId);
-          console.log(`  ✓ Versioned autodeploy (${batch.length} deployers, ${checkpointsInBatch} checkpoints, with LUT): ${sig}`);
+          console.log(`  ✓ Full autodeploy (${batch.length} deployers, ${checkpointsInBatch} checkpoints, with LUTs): ${sig}`);
         } else {
           sig = await crank.executeBatchedAutodeploys(batch, board.roundId);
-          console.log(`  ✓ Batched autodeploy (${batch.length} deployers): ${sig}`);
+          console.log(`  ✓ Full autodeploy (${batch.length} deployers): ${sig}`);
         }
 
         for (const key of deployerKeys) {
@@ -764,19 +804,14 @@ async function main() {
     .action(testTransaction);
 
   program
-    .command('create-lut')
-    .description('Create a new Address Lookup Table')
-    .action(createLut);
+    .command('setup-luts')
+    .description('Setup shared LUT and per-miner LUTs')
+    .action(setupLuts);
 
   program
-    .command('extend-lut')
-    .description('Extend LUT with deployer accounts')
-    .action(extendLut);
-
-  program
-    .command('show-lut')
-    .description('Show LUT contents')
-    .action(showLut);
+    .command('show-luts')
+    .description('Show all LUTs owned by authority')
+    .action(showLuts);
 
   if (process.argv.length === 2) {
     process.argv.push('run');
@@ -790,7 +825,6 @@ async function createCrank() {
   const keypairPath = process.env.DEPLOY_AUTHORITY_KEYPAIR;
   const priorityFee = parseInt(process.env.PRIORITY_FEE || '100000');
   const pollIntervalMs = parseInt(process.env.POLL_INTERVAL_MS || '400');
-  const lutAddress = process.env.LUT_ADDRESS || null;
 
   if (!keypairPath) {
     console.error('Error: DEPLOY_AUTHORITY_KEYPAIR environment variable is required');
@@ -805,7 +839,7 @@ async function createCrank() {
   console.log(`RPC URL: ${rpcUrl}`);
   console.log(`Deploy authority: ${pubkey.toBase58()}`);
 
-  return new Crank(connection, keypair, pubkey, { priorityFee, pollIntervalMs, lutAddress });
+  return new Crank(connection, keypair, pubkey, { priorityFee, pollIntervalMs });
 }
 
 async function listDeployers() {
@@ -843,32 +877,17 @@ async function testTransaction() {
   }
 }
 
-async function createLut() {
-  const crank = await createCrank();
-  await crank.initLut();
-
-  console.log('\nCreating new Address Lookup Table...');
-  try {
-    const lutAddress = await crank.lutManager.createLut(crank.keypair);
-    console.log(`✓ LUT created: ${lutAddress.toBase58()}`);
-    console.log(`Add to .env: LUT_ADDRESS=${lutAddress.toBase58()}`);
-  } catch (err) {
-    console.error(`✗ Failed to create LUT: ${err.message}`);
-    process.exit(1);
-  }
-}
-
-async function extendLut() {
+async function setupLuts() {
   const crank = await createCrank();
   
-  if (!crank.config.lutAddress) {
-    console.error('Error: LUT_ADDRESS not set in .env');
-    process.exit(1);
-  }
+  console.log('\nInitializing LUT registry...');
+  await crank.initRegistry();
 
-  await crank.initLut(new PublicKey(crank.config.lutAddress));
+  console.log('\nEnsuring shared LUT exists...');
+  await crank.registry.ensureSharedLut(crank.keypair);
+  console.log(`Shared LUT: ${crank.registry.getSharedLut().toBase58()}`);
 
-  console.log('\nFinding deployers to add to LUT...');
+  console.log('\nFinding deployers...');
   const deployers = await crank.findDeployers();
 
   if (deployers.length === 0) {
@@ -876,40 +895,45 @@ async function extendLut() {
     return;
   }
 
-  const board = await crank.getBoard();
-  const missing = crank.lutManager.getMissingDeployerAddresses(deployers, AUTH_ID, board.roundId);
-
-  if (missing.length === 0) {
-    console.log('LUT already contains all deployer addresses');
-    return;
+  console.log(`\nCreating LUTs for ${deployers.length} miners...`);
+  for (const deployer of deployers) {
+    const minerAuth = getMinerAuthPda(deployer.managerAddress, AUTH_ID);
+    
+    if (crank.registry.hasMinerLut(minerAuth)) {
+      console.log(`  ✓ Miner ${minerAuth.toBase58()} already has LUT`);
+    } else {
+      try {
+        const lutAddress = await crank.registry.ensureMinerLut(crank.keypair, deployer.managerAddress, AUTH_ID);
+        console.log(`  ✓ Created LUT for miner ${minerAuth.toBase58()}: ${lutAddress.toBase58()}`);
+      } catch (err) {
+        console.error(`  ✗ Failed to create LUT for miner ${minerAuth.toBase58()}: ${err.message}`);
+      }
+    }
   }
 
-  console.log(`Adding ${missing.length} addresses to LUT...`);
-  try {
-    await crank.lutManager.extendLut(crank.keypair, missing);
-    console.log(`✓ Added ${missing.length} addresses to LUT`);
-  } catch (err) {
-    console.error(`✗ Failed to extend LUT: ${err.message}`);
-    process.exit(1);
-  }
+  console.log('\n✓ LUT setup complete!');
 }
 
-async function showLut() {
+async function showLuts() {
   const crank = await createCrank();
   
-  if (!crank.config.lutAddress) {
-    console.error('Error: LUT_ADDRESS not set in .env');
-    process.exit(1);
+  console.log('\nLoading LUTs...');
+  await crank.initRegistry();
+
+  const sharedLut = crank.registry.getSharedLut();
+  if (sharedLut) {
+    console.log(`\nShared LUT: ${sharedLut.toBase58()}`);
+    const lutAccount = crank.registry.lutCache.get(sharedLut.toBase58());
+    if (lutAccount) {
+      console.log(`  Contains ${lutAccount.state.addresses.length} addresses`);
+    }
+  } else {
+    console.log('\nNo shared LUT found. Run "setup-luts" to create one.');
   }
 
-  await crank.initLut(new PublicKey(crank.config.lutAddress));
-  const lutAccount = crank.lutManager.getLutAccount();
-
-  console.log(`\nLUT Address: ${crank.config.lutAddress}`);
-  console.log(`Contains ${lutAccount.state.addresses.length} addresses:`);
-  
-  for (let i = 0; i < lutAccount.state.addresses.length; i++) {
-    console.log(`  [${i}] ${lutAccount.state.addresses[i].toBase58()}`);
+  console.log(`\nMiner LUTs: ${crank.registry.minerLuts.size}`);
+  for (const [minerAuth, lutAddress] of crank.registry.minerLuts) {
+    console.log(`  ${minerAuth}: ${lutAddress.toBase58()}`);
   }
 }
 
@@ -917,16 +941,18 @@ async function runCrank() {
   const crank = await createCrank();
   const pollIntervalMs = parseInt(process.env.POLL_INTERVAL_MS || '400');
 
-  // Load LUT if configured
-  if (crank.config.lutAddress) {
-    try {
-      await crank.initLut(new PublicKey(crank.config.lutAddress));
-      console.log(`Using LUT: ${crank.config.lutAddress} (enables batching up to ${MAX_BATCH_SIZE_WITH_LUT} deploys/tx)`);
-    } catch (err) {
-      console.warn(`Failed to load LUT: ${err.message}. Running without LUT.`);
-    }
+  // Initialize LUT registry
+  console.log('\nInitializing LUT registry...');
+  await crank.initRegistry();
+
+  const sharedLut = crank.registry.getSharedLut();
+  if (sharedLut) {
+    console.log(`Using shared LUT: ${sharedLut.toBase58()}`);
+    console.log(`Miner LUTs: ${crank.registry.minerLuts.size}`);
+    console.log(`Max batch size: ${MAX_BATCH_SIZE_WITH_LUT} deploys/tx`);
   } else {
-    console.log('No LUT configured. Run \'create-lut\' to create one for better batching.');
+    console.log('No shared LUT found. Run "setup-luts" to create LUTs for better batching.');
+    console.log(`Max batch size: ${MAX_BATCH_SIZE_NO_LUT} deploys/tx`);
   }
 
   const deployers = await crank.findDeployers();

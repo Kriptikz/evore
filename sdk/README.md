@@ -149,7 +149,7 @@ const [deployerPda] = getDeployerPda(userManager);
 const deployerAccount = await connection.getAccountInfo(deployerPda);
 const deployer = decodeDeployer(deployerAccount.data);
 
-// Build autodeploy for multiple users (up to 5 per tx)
+// Build autodeploy for multiple users (up to 7 per tx)
 // Each user can have different amounts and square selections
 const deploys = [
   {
@@ -258,7 +258,7 @@ User (Manager Authority) Controls:       Executor (Deploy Authority) Controls:
 4. **Run Your Crank**
    - Monitor the ORE board for new rounds
    - Fetch all users with autodeploy balance
-   - Build batched autodeploy transactions (up to 5 users per tx)
+   - Build batched autodeploy transactions (up to 7 users per tx)
    - Sign and send with your executor
 
 ### Migration from Privy/Custodial Services

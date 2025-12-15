@@ -74,7 +74,7 @@ JavaScript reference implementation of the crank using Node.js.
 
 **Features:**
 - Full LUT support (shared with Rust crank)
-- Up to 5 deployers per transaction with LUT
+- Up to 7 deployers per transaction with LUT
 - Simple configuration via `.env`
 
 **Run:**

@@ -81,19 +81,23 @@ export declare function updateDeployerInstruction(
   manager: PublicKey,
   newDeployAuthority: PublicKey,
   newBpsFee: bigint,
-  newFlatFee?: bigint
+  newFlatFee?: bigint,
+  newExpectedBpsFee?: bigint,
+  newExpectedFlatFee?: bigint
 ): TransactionInstruction;
 
 // Autodeploy Balance (manager authority)
 export declare function depositAutodeployBalanceInstruction(
   signer: PublicKey,
   manager: PublicKey,
+  authId: bigint,
   amount: bigint
 ): TransactionInstruction;
 
 export declare function withdrawAutodeployBalanceInstruction(
   signer: PublicKey,
   manager: PublicKey,
+  authId: bigint,
   amount: bigint
 ): TransactionInstruction;
 
@@ -104,9 +108,7 @@ export declare function mmAutodeployInstruction(
   authId: bigint,
   roundId: bigint,
   amount: bigint,
-  squaresMask: number,
-  expectedBpsFee?: bigint,
-  expectedFlatFee?: bigint
+  squaresMask: number
 ): TransactionInstruction;
 
 export declare function mmAutocheckpointInstruction(
@@ -120,6 +122,16 @@ export declare function recycleSolInstruction(
   signer: PublicKey,
   manager: PublicKey,
   authId: bigint
+): TransactionInstruction;
+
+export declare function mmFullAutodeployInstruction(
+  signer: PublicKey,
+  manager: PublicKey,
+  authId: bigint,
+  roundId: bigint,
+  checkpointRoundId: bigint,
+  amount: bigint,
+  squaresMask: number
 ): TransactionInstruction;
 
 // Helpers

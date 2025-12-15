@@ -1,10 +1,12 @@
 "use client";
 
+import { useState } from "react";
 import { useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, PublicKey } from "@solana/web3.js";
 import { Header } from "@/components/Header";
 import { ManagerCard } from "@/components/ManagerCard";
 import { CreateManagerForm } from "@/components/CreateManagerForm";
+import { BulkActionBar } from "@/components/BulkActionBar";
 import { useEvore } from "@/hooks/useEvore";
 
 export default function ManagePage() {
@@ -25,6 +27,8 @@ export default function ManagePage() {
     claimOre,
   } = useEvore();
 
+  const [selectedManagers, setSelectedManagers] = useState<Set<string>>(new Set());
+
   // Find deployer for a manager
   const getDeployerForManager = (managerAddress: PublicKey) => {
     return deployers.find(
@@ -35,6 +39,85 @@ export default function ManagePage() {
   // Find miner for a manager
   const getMinerForManager = (managerAddress: PublicKey) => {
     return miners.get(managerAddress.toBase58());
+  };
+
+  // Selection helpers
+  const toggleSelection = (managerKey: string) => {
+    setSelectedManagers(prev => {
+      const next = new Set(prev);
+      if (next.has(managerKey)) {
+        next.delete(managerKey);
+      } else {
+        next.add(managerKey);
+      }
+      return next;
+    });
+  };
+
+  const selectAll = () => {
+    setSelectedManagers(new Set(managers.map(m => m.address.toBase58())));
+  };
+
+  const deselectAll = () => {
+    setSelectedManagers(new Set());
+  };
+
+  // Bulk action handlers
+  const handleBulkDeposit = async (authId: bigint, amount: bigint) => {
+    const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      await depositAutodeployBalance(manager.address, authId, amount);
+    }
+  };
+
+  const handleBulkWithdraw = async () => {
+    const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const deployer = getDeployerForManager(manager.address);
+      if (deployer && deployer.autodeployBalance > BigInt(0)) {
+        await withdrawAutodeployBalance(manager.address, BigInt(0), deployer.autodeployBalance);
+      }
+    }
+  };
+
+  const handleBulkCheckpoint = async () => {
+    const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const miner = getMinerForManager(manager.address);
+      if (miner && board?.roundId && miner.checkpointId < miner.roundId && miner.roundId < board.roundId) {
+        await checkpoint(manager.address, miner.roundId);
+      }
+    }
+  };
+
+  const handleBulkClaimSol = async () => {
+    const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const miner = getMinerForManager(manager.address);
+      if (miner && miner.rewardsSol > BigInt(0)) {
+        await claimSol(manager.address);
+      }
+    }
+  };
+
+  const handleBulkClaimOre = async () => {
+    const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const miner = getMinerForManager(manager.address);
+      if (miner && miner.rewardsOre > BigInt(0)) {
+        await claimOre(manager.address);
+      }
+    }
+  };
+
+  const handleBulkUpdate = async (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint) => {
+    const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    for (const manager of selected) {
+      const deployer = getDeployerForManager(manager.address);
+      if (deployer) {
+        await updateDeployer(manager.address, deployAuthority, bpsFee, flatFee);
+      }
+    }
   };
 
   const handleCreateManager = async (keypair: Keypair): Promise<string> => {
@@ -100,14 +183,31 @@ export default function ManagePage() {
             <div className="space-y-4">
               <h2 className="text-xl font-semibold">Your Managers</h2>
               
+              {/* Bulk Action Bar */}
+              {managers.length > 0 && (
+                <BulkActionBar
+                  selectedCount={selectedManagers.size}
+                  totalCount={managers.length}
+                  onSelectAll={selectAll}
+                  onDeselectAll={deselectAll}
+                  onBulkDeposit={handleBulkDeposit}
+                  onBulkWithdraw={handleBulkWithdraw}
+                  onBulkCheckpoint={handleBulkCheckpoint}
+                  onBulkClaimSol={handleBulkClaimSol}
+                  onBulkClaimOre={handleBulkClaimOre}
+                  onBulkUpdate={handleBulkUpdate}
+                />
+              )}
+              
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
                 {managers.map((manager) => {
                   const deployer = getDeployerForManager(manager.address);
                   const miner = getMinerForManager(manager.address);
+                  const managerKey = manager.address.toBase58();
                   
                   return (
                     <ManagerCard
-                      key={manager.address.toBase58()}
+                      key={managerKey}
                       managerAddress={manager.address}
                       deployer={
                         deployer
@@ -117,22 +217,25 @@ export default function ManagePage() {
                               bpsFee: deployer.data.bpsFee,
                               flatFee: deployer.data.flatFee,
                               autodeployBalance: deployer.autodeployBalance,
+                              authPdaAddress: deployer.authPdaAddress,
                             }
                           : undefined
                       }
                       miner={miner}
                       currentBoardRoundId={board?.roundId}
+                      isSelected={selectedManagers.has(managerKey)}
+                      onToggleSelect={() => toggleSelection(managerKey)}
                       onCreateDeployer={(deployAuthority, bpsFee, flatFee) =>
                         createDeployer(manager.address, deployAuthority, bpsFee, flatFee)
                       }
                       onUpdateDeployer={(newDeployAuthority, newBpsFee, newFlatFee) =>
                         updateDeployer(manager.address, newDeployAuthority, newBpsFee, newFlatFee)
                       }
-                      onDeposit={(amount) =>
-                        depositAutodeployBalance(manager.address, amount)
+                      onDeposit={(authId, amount) =>
+                        depositAutodeployBalance(manager.address, authId, amount)
                       }
-                      onWithdraw={(amount) =>
-                        withdrawAutodeployBalance(manager.address, amount)
+                      onWithdraw={(authId, amount) =>
+                        withdrawAutodeployBalance(manager.address, authId, amount)
                       }
                       onCheckpoint={(roundId) =>
                         checkpoint(manager.address, roundId)
