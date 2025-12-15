@@ -70,6 +70,8 @@ pub enum Command {
     DeactivateUnused,
     /// Show deactivating LUTs status and close any that are ready
     CleanupDeactivated,
+    /// Check all Evore program accounts for legacy V1 deployers
+    CheckAccounts,
 }
 
 impl Config {

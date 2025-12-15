@@ -34,7 +34,7 @@ use tracing_subscriber::FmtSubscriber;
 // =============================================================================
 
 /// Amount to deploy per square in lamports (0.0001 SOL = 100_000 lamports)
-const DEPLOY_AMOUNT_LAMPORTS: u64 = 10_000;
+const DEPLOY_AMOUNT_LAMPORTS: u64 = 2_800;
 
 /// Which auth_id to deploy for (each manager can have multiple managed miners)
 const AUTH_ID: u64 = 0;
@@ -400,6 +400,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("\nNo LUTs ready to close yet.");
             }
             
+            return Ok(());
+        }
+        Some(config::Command::CheckAccounts) => {
+            info!("Checking all Evore program accounts...\n");
+            crank.check_all_accounts()?;
             return Ok(());
         }
         Some(config::Command::Run) | None => {

@@ -189,6 +189,84 @@ impl Crank {
         Ok(deployers)
     }
     
+    /// Check all Evore program accounts for legacy V1 deployers or unexpected sizes
+    pub fn check_all_accounts(&self) -> Result<(), CrankError> {
+        info!("Loading all accounts for Evore program {}...", evore::id());
+        
+        // Account sizes
+        const MANAGER_SIZE: usize = 40;      // 8 discriminator + 32 authority
+        const DEPLOYER_V1_SIZE: usize = 88;  // 8 + 32 + 32 + 8 + 8 (old format)
+        const DEPLOYER_V2_SIZE: usize = 104; // 8 + 32 + 32 + 8 + 8 + 8 + 8 (current)
+        
+        // Discriminators
+        const MANAGER_DISCRIMINATOR: u8 = 100;
+        const DEPLOYER_DISCRIMINATOR: u8 = 101;
+        
+        // Get all accounts owned by the Evore program
+        let accounts = self.rpc_client.get_program_accounts(&evore::id())
+            .map_err(|e| CrankError::Rpc(e.to_string()))?;
+        
+        info!("Found {} total accounts", accounts.len());
+        
+        let mut managers = Vec::new();
+        let mut deployers_v2 = Vec::new();
+        let mut deployers_v1 = Vec::new();
+        let mut unknown = Vec::new();
+        
+        for (address, account) in &accounts {
+            let data = &account.data;
+            let size = data.len();
+            
+            // Check discriminator
+            let discriminator = if size >= 8 { data[0] } else { 255 };
+            
+            match (discriminator, size) {
+                (d, s) if d == MANAGER_DISCRIMINATOR && s == MANAGER_SIZE => {
+                    managers.push(*address);
+                }
+                (d, s) if d == DEPLOYER_DISCRIMINATOR && s == DEPLOYER_V2_SIZE => {
+                    deployers_v2.push(*address);
+                }
+                (d, s) if d == DEPLOYER_DISCRIMINATOR && s == DEPLOYER_V1_SIZE => {
+                    deployers_v1.push(*address);
+                }
+                _ => {
+                    unknown.push((*address, discriminator, size));
+                }
+            }
+        }
+        
+        // Print summary
+        info!("\n=== Evore Program Account Summary ===");
+        info!("Manager accounts (40 bytes): {}", managers.len());
+        info!("Deployer V2 accounts (104 bytes): {}", deployers_v2.len());
+        info!("Deployer V1 accounts (88 bytes): {} {}", 
+            deployers_v1.len(),
+            if deployers_v1.is_empty() { "✓" } else { "⚠ NEEDS MIGRATION" }
+        );
+        
+        if !deployers_v1.is_empty() {
+            warn!("\n⚠ Found {} legacy V1 deployer accounts that need migration:", deployers_v1.len());
+            for addr in &deployers_v1 {
+                warn!("  - {}", addr);
+            }
+            warn!("\nTo migrate, call update_deployer on each account.");
+        }
+        
+        if !unknown.is_empty() {
+            warn!("\n⚠ Found {} unknown/unexpected accounts:", unknown.len());
+            for (addr, disc, size) in &unknown {
+                warn!("  - {} (discriminator: {}, size: {} bytes)", addr, disc, size);
+            }
+        }
+        
+        if deployers_v1.is_empty() && unknown.is_empty() {
+            info!("\n✓ All accounts are in expected format!");
+        }
+        
+        Ok(())
+    }
+    
     /// Get current ORE board state
     pub fn get_board(&self) -> Result<(Board, u64), CrankError> {
         let (board_address, _) = board_pda();
