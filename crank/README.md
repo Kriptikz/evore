@@ -8,8 +8,8 @@ Reference implementation for automated deploying via the Evore program. This cra
 
 - **Automatic Deployer Discovery**: Scans the Evore program for deployer accounts where you are the deploy_authority
 - **Transaction Tracking**: SQLite database tracks all sent transactions with full status history
-- **Multi-endpoint Sending**: Supports both Helius and Jito endpoints for reliable transaction delivery
-- **Fee Tracking**: Records deployer fees, protocol fees, priority fees, and Jito tips
+- **Address Lookup Tables**: Automatic LUT management for batching up to 7 deploys per transaction
+- **Fee Protection**: Uses Deployer account's `expectedBpsFee`/`expectedFlatFee` fields (set once, no instruction args needed)
 
 ## Quick Start
 
@@ -42,10 +42,38 @@ Reference implementation for automated deploying via the Evore program. This cra
 | `DEPLOY_AUTHORITY_KEYPAIR` | Path to deployer keypair JSON | Required |
 | `DATABASE_PATH` | SQLite database path | `crank.db` |
 | `PRIORITY_FEE` | Priority fee in microlamports/CU | `100000` |
-| `JITO_TIP` | Jito tip in lamports | `200000` |
-| `USE_JITO` | Enable Jito sending | `true` |
-| `HELIUS_API_KEY` | Helius API key (optional) | None |
 | `POLL_INTERVAL_MS` | Poll interval in ms | `400` |
+| `LUT_ADDRESS` | (Legacy) Manual LUT address | Auto-discovered |
+
+## Commands
+
+```bash
+# Run the main crank loop (auto-discovers/creates LUTs)
+cargo run -- run
+
+# List deployers where you are deploy_authority
+cargo run -- list
+
+# Set expected fees on all deployers (protects against fee changes)
+cargo run -- set-expected-fees --expected-bps-fee 0 --expected-flat-fee 5000
+
+# Check all Evore accounts for legacy V1 deployers
+cargo run -- check-accounts
+
+# Send test transaction
+cargo run -- test
+```
+
+## Expected Fee Protection
+
+The Deployer account has `expectedBpsFee` and `expectedFlatFee` fields that only the deploy_authority can set. When non-zero, deploys will fail if actual fees don't match. This protects executors without needing instruction arguments.
+
+**Set expected fees once** after users create their deployers:
+```bash
+cargo run -- set-expected-fees --expected-bps-fee 500 --expected-flat-fee 2000
+```
+
+Use `--expected-bps-fee 0 --expected-flat-fee 0` to accept any fees (not recommended).
 
 ## Customizing the Strategy
 

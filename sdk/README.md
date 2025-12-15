@@ -33,14 +33,17 @@ The executor **CANNOT**:
 
 ### User-Controlled Fees
 
-- Only the **user** (manager authority) can change fee settings
+- Only the **user** (manager authority) can set `bpsFee` and `flatFee` on the Deployer
 - Fee changes require the user's signature
-- The executor cannot unilaterally modify fees
+- The executor cannot modify the user's fee settings
 
-### Executor Protection
+### Executor Fee Protection
 
-- Pass expected fee arguments to protect against users changing fees mid-flight
-- If fees don't match, the transaction fails—no surprise fee changes
+- The Deployer account stores `expectedBpsFee` and `expectedFlatFee` fields
+- Only the **executor** (deploy_authority) can set these via `updateDeployer`
+- If expected fee > 0, the actual fee must match for deploys to succeed
+- Using account fields instead of instruction args reduces transaction size
+- Executors should set expected fees once when onboarding, then autodeploys just work
 
 ### Familiar User Experience
 
@@ -151,6 +154,8 @@ const deployer = decodeDeployer(deployerAccount.data);
 
 // Build autodeploy for multiple users (up to 7 per tx)
 // Each user can have different amounts and square selections
+// Note: expectedBpsFee/expectedFlatFee are now stored on the Deployer account,
+// not passed as instruction arguments (reduces transaction size)
 const deploys = [
   {
     manager: user1Manager,
@@ -163,16 +168,12 @@ const deploys = [
       false, false, false, false, false,
       false, false, false, false, false,
     ]),
-    expectedBpsFee: deployer.bpsFee,
-    expectedFlatFee: deployer.flatFee,
   },
   {
     manager: user2Manager,
     authId: 0n,
     amount: 5000000n,
     squaresMask: 0b1111111111111111111111111, // User 2: all 25 squares
-    expectedBpsFee: deployer.bpsFee,
-    expectedFlatFee: deployer.flatFee,
   },
 ];
 
@@ -203,12 +204,16 @@ The Manager is the user's miner container. It stores:
 
 The Deployer links a manager to an executor (deploy_authority). It stores:
 
-| Field | Description |
-|-------|-------------|
-| `managerKey` | The manager this deployer is for |
-| `deployAuthority` | The executor pubkey that can autodeploy |
-| `bpsFee` | Percentage fee in basis points (500 = 5%) |
-| `flatFee` | Fixed lamport fee per deploy |
+| Field | Description | Set By |
+|-------|-------------|--------|
+| `managerKey` | The manager this deployer is for | System |
+| `deployAuthority` | The executor pubkey that can autodeploy | User |
+| `bpsFee` | Percentage fee in basis points (500 = 5%) | User |
+| `flatFee` | Fixed lamport fee per deploy | User |
+| `expectedBpsFee` | Expected bps fee (0 = accept any) | Executor |
+| `expectedFlatFee` | Expected flat fee (0 = accept any) | Executor |
+
+**Expected Fee Protection**: The `expectedBpsFee` and `expectedFlatFee` fields protect executors from fee changes. When set to a non-zero value, deploys will fail if the actual fees don't match. This eliminates the need to pass expected fees as instruction arguments, reducing transaction size.
 
 ### Autodeploy Balance
 
@@ -225,8 +230,8 @@ User (Manager Authority) Controls:       Executor (Deploy Authority) Controls:
 ├── Deposit funds                        └── Deploy from autodeploy balance
 ├── Withdraw funds                           (amount, squares, timing)
 ├── Claim SOL/ORE rewards                └── Checkpoint rounds
-├── Update deployer settings             └── Recycle SOL
-└── Change deploy_authority
+├── Set bpsFee and flatFee               └── Recycle SOL
+└── Change deploy_authority              └── Set expectedBpsFee/expectedFlatFee
 ```
 
 ## For Platform Integrators
@@ -327,7 +332,7 @@ const {
 ```javascript
 const {
   decodeManager,    // (data) => { authority }
-  decodeDeployer,   // (data) => { managerKey, deployAuthority, bpsFee, flatFee }
+  decodeDeployer,   // (data) => { managerKey, deployAuthority, bpsFee, flatFee, expectedBpsFee, expectedFlatFee }
   decodeOreBoard,   // (data) => { roundId, startSlot, endSlot, epochId }
   decodeOreMiner,   // (data) => { authority, deployed, rewardsSol, ... }
 } = require("evore-sdk");
@@ -366,18 +371,19 @@ const {
   mmClaimSolInstruction,
   mmClaimOreInstruction,
   
-  // Deployer management (user signs)
-  createDeployerInstruction,
-  updateDeployerInstruction,
+  // Deployer management
+  createDeployerInstruction,      // (user signs) Create deployer with fees
+  updateDeployerInstruction,      // (user OR executor signs) Update fees or expected fees
   
   // Balance management (user signs)
   depositAutodeployBalanceInstruction,
   withdrawAutodeployBalanceInstruction,
   
   // Autodeploy (executor signs)
-  mmAutodeployInstruction,
-  mmAutocheckpointInstruction,
-  recycleSolInstruction,
+  mmAutodeployInstruction,        // Deploy only
+  mmAutocheckpointInstruction,    // Checkpoint only
+  recycleSolInstruction,          // Recycle SOL only
+  mmFullAutodeployInstruction,    // Combined: checkpoint + recycle + deploy (most efficient)
 } = require("evore-sdk");
 ```
 
@@ -445,6 +451,7 @@ const deployer = decodeDeployer(account.data);
 
 console.log("Deploy Authority:", deployer.deployAuthority.toBase58());
 console.log("Fee:", formatFee(deployer.bpsFee, deployer.flatFee));
+console.log("Expected Fee:", formatFee(deployer.expectedBpsFee, deployer.expectedFlatFee));
 ```
 
 ## TypeScript Support

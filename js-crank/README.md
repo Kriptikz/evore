@@ -126,11 +126,17 @@ const MAX_BATCH_SIZE_WITH_LUT = 7;  // With shared + per-miner LUTs
 ## Workflow
 
 1. **Startup**: Scans for all deployer accounts where your keypair is the `deploy_authority`
-2. **LUT Loading**: If configured, loads the Address Lookup Table for efficient batching
+2. **LUT Loading**: Loads/creates Address Lookup Tables for efficient batching
 3. **Monitoring**: Polls the ORE board state every `POLL_INTERVAL_MS` milliseconds
 4. **Deployment Window**: When `DEPLOY_SLOTS_BEFORE_END` slots remain, triggers deployments
 5. **Full Autodeploy**: Uses `mmFullAutodeploy` which combines checkpoint + recycle + deploy in one instruction
 6. **Batching**: Groups up to 7 deployers per tx using shared + per-miner LUTs
+
+## Expected Fee Protection
+
+The Deployer account has `expectedBpsFee` and `expectedFlatFee` fields stored on-chain. When non-zero, deploys will fail if actual fees don't match. This protects executors without needing to pass expected fees as instruction arguments (reduces tx size).
+
+**Note**: Set expected fees via the Rust crank's `set-expected-fees` command or programmatically via `updateDeployerInstruction`.
 
 ## Requirements
 

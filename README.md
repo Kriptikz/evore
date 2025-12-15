@@ -55,10 +55,10 @@ npm install evore-sdk @solana/web3.js
 
 Production-ready Rust crank for executing autodeploys. Features:
 - SQLite state persistence
-- Address Lookup Table (LUT) support for batching
-- Jito bundle support
-- Helius API integration
+- Address Lookup Table (LUT) support for batching up to 7 deploys/tx
+- Automatic LUT creation and discovery
 - Configurable deployment strategies
+- Expected fee management via `set-expected-fees` command
 
 **Run:**
 ```bash
@@ -124,9 +124,15 @@ The executor **CANNOT**:
 - Change fee settings
 
 ### User-Controlled Fees
-- Only users can modify fee settings
+- Only users (manager authority) can set the `bpsFee` and `flatFee` on the Deployer
 - Fee changes require user signature
-- Executors pass expected fees for protection
+
+### Executor Fee Protection
+- The Deployer stores `expectedBpsFee` and `expectedFlatFee` fields
+- Only the executor (deploy_authority) can set expected fees via `updateDeployer`
+- If expected fee > 0, the actual fee must match for deploys to succeed
+- This protects executors from users changing fees mid-flight
+- Using account fields instead of instruction args reduces transaction size
 
 ## Quick Start
 
