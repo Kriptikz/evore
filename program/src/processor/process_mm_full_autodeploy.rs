@@ -147,11 +147,12 @@ pub fn process_mm_full_autodeploy(
     // ==========================================================================
     let checkpoint_round = checkpoint_round_account_info.as_account::<Round>(&ore_api::id())?;
     
-    let needs_checkpoint = if !ore_miner_account_info.data_is_empty() {
+    // Check miner state only if it exists
+    let (needs_checkpoint, is_already_deployed) = if !ore_miner_account_info.data_is_empty() {
         let miner = ore_miner_account_info.as_account::<Miner>(&ore_api::id())?;
-        miner.checkpoint_id < checkpoint_round.id
+        (miner.checkpoint_id < checkpoint_round.id, miner.round_id == board.round_id)
     } else {
-        false
+        (false, false) // First ever deploy, miner doesn't exist yet
     };
 
     if needs_checkpoint {
@@ -252,38 +253,41 @@ pub fn process_mm_full_autodeploy(
         return Err(EvoreError::InsufficientAutodeployBalance.into());
     }
 
-    // Transfer protocol fee
-    if protocol_fee > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                managed_miner_auth_account_info.key,
-                fee_collector_account_info.key,
-                protocol_fee,
-            ),
-            &[
-                managed_miner_auth_account_info.clone(),
-                fee_collector_account_info.clone(),
-                system_program_info.clone(),
-            ],
-            &[managed_miner_auth_seeds],
-        )?;
-    }
+    // Transfer fees only on first deploy of the round
+    if !is_already_deployed {
+      // Transfer protocol fee
+      if protocol_fee > 0 {
+          solana_program::program::invoke_signed(
+              &solana_program::system_instruction::transfer(
+                  managed_miner_auth_account_info.key,
+                  fee_collector_account_info.key,
+                  protocol_fee,
+              ),
+              &[
+                  managed_miner_auth_account_info.clone(),
+                  fee_collector_account_info.clone(),
+                  system_program_info.clone(),
+              ],
+              &[managed_miner_auth_seeds],
+          )?;
+      }
 
-    // Transfer deployer fee to deploy_authority
-    if deployer_fee > 0 {
-        solana_program::program::invoke_signed(
-            &solana_program::system_instruction::transfer(
-                managed_miner_auth_account_info.key,
-                signer.key,
-                deployer_fee,
-            ),
-            &[
-                managed_miner_auth_account_info.clone(),
-                signer.clone(),
-                system_program_info.clone(),
-            ],
-            &[managed_miner_auth_seeds],
-        )?;
+      // Transfer deployer fee to deploy_authority
+      if deployer_fee > 0 {
+          solana_program::program::invoke_signed(
+              &solana_program::system_instruction::transfer(
+                  managed_miner_auth_account_info.key,
+                  signer.key,
+                  deployer_fee,
+              ),
+              &[
+                  managed_miner_auth_account_info.clone(),
+                  signer.clone(),
+                  system_program_info.clone(),
+              ],
+              &[managed_miner_auth_seeds],
+          )?;
+      }
     }
 
     // Execute ORE deploy CPI

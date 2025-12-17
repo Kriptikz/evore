@@ -136,15 +136,18 @@ pub fn process_mm_deploy(
         return Err(EvoreError::InvalidPDA.into());
     }
 
-    // Check if already deployed this round (unless allow_multi_deploy is true)
+    // Check if already deployed this round (only if miner exists)
+    let is_already_deployed = if !ore_miner_account_info.data_is_empty() {
+        let miner = ore_miner_account_info.as_account::<ore_api::Miner>(&ore_api::id())?;
+        miner.round_id == board.round_id
+    } else {
+        false // First ever deploy, miner doesn't exist yet
+    };
+
     // This applies to all strategies, not just EV
     let allow_multi_deploy = args.get_allow_multi_deploy();
-    if !allow_multi_deploy && !ore_miner_account_info.data_is_empty() {
-        // Load miner to check if already deployed this round
-        let miner = ore_miner_account_info.as_account::<ore_api::Miner>(&ore_api::id())?;
-        if miner.round_id == round.id {
-            return Err(EvoreError::AlreadyDeployedThisRound.into());
-        }
+    if !allow_multi_deploy && is_already_deployed {
+          return Err(EvoreError::AlreadyDeployedThisRound.into());
     }
 
     // Calculate deployments based on strategy - returns batched deployments
@@ -183,22 +186,25 @@ pub fn process_mm_deploy(
             ore_program.clone(),
         ];
 
-    // transfer fee to fee_collector for deployments 10_000 lamports flat fee
-    let fee_amount = DEPLOY_FEE;
-    let transfer_fee_accounts = 
-        vec![
-            signer.clone(),
-            fee_collector_account_info.clone(),
-            system_program.clone(),
-        ];
-    solana_program::program::invoke(
-        &solana_program::system_instruction::transfer(
-            signer.key,
-            fee_collector_account_info.key,
-            fee_amount,
-        ),
-        &transfer_fee_accounts,
-    )?;
+    // transfer fee to fee_collector for deployments 1_000 lamports flat fee
+    // only transfer on first deploymnet of a round
+    if !is_already_deployed {
+      let fee_amount = DEPLOY_FEE;
+      let transfer_fee_accounts = 
+          vec![
+              signer.clone(),
+              fee_collector_account_info.clone(),
+              system_program.clone(),
+          ];
+      solana_program::program::invoke(
+          &solana_program::system_instruction::transfer(
+              signer.key,
+              fee_collector_account_info.key,
+              fee_amount,
+          ),
+          &transfer_fee_accounts,
+      )?;
+    }
 
     // Transfer funds to managed_miner_auth PDA for CPI deployments
     // The PDA must always retain: rent_exempt_minimum + CHECKPOINT_FEE

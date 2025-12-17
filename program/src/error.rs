@@ -79,7 +79,7 @@ pub enum EvoreError {
     #[error("Deployer already initialized")]
     DeployerAlreadyInitialized = 13,
     
-    /// Insufficient balance in autodeploy_balance PDA
+    /// Insufficient balance in managed_miner_auth PDA for autodeploy
     #[error("Insufficient autodeploy balance: deposit more SOL")]
     InsufficientAutodeployBalance = 14,
     

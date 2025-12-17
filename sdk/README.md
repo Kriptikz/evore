@@ -217,11 +217,12 @@ The Deployer links a manager to an executor (deploy_authority). It stores:
 
 ### Autodeploy Balance
 
-A PDA that holds the user's deposited SOL for autodeploys. 
+The **managed_miner_auth PDA** holds the user's deposited SOL for autodeploys. This is the same PDA that acts as the authority for the ORE miner.
 
 - **Only the user** can deposit or withdraw
 - **Only the executor** can deploy from it
 - Funds are completely separated from user's main wallet
+- Derived via `getManagedMinerAuthPda(manager, authId)`
 
 ### Security Model
 
@@ -318,9 +319,8 @@ const {
 
 ```javascript
 const {
-  getManagedMinerAuthPda,   // (manager, authId) => [pda, bump]
+  getManagedMinerAuthPda,   // (manager, authId) => [pda, bump] - holds autodeploy balance
   getDeployerPda,           // (manager) => [pda, bump]
-  getAutodeployBalancePda,  // (deployer) => [pda, bump]
   getOreMinerPda,           // (authority) => [pda, bump]
   getOreBoardPda,           // () => [pda, bump]
   getOreRoundPda,           // (roundId) => [pda, bump]

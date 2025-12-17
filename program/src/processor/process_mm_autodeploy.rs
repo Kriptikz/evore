@@ -83,15 +83,13 @@ pub fn process_mm_autodeploy(
         return Err(EvoreError::InvalidPDA.into());
     }
 
-    // Load deployer data
-    let data = deployer_account_info.try_borrow_data()?;
-    let deployer = Deployer::try_from_bytes(&data[8..])?;
+    // Load deployer data using as_account (handles discriminator + alignment)
+    let deployer = deployer_account_info.as_account::<Deployer>(&crate::id())?;
     let deploy_authority = deployer.deploy_authority;
     let bps_fee = deployer.bps_fee;
     let flat_fee = deployer.flat_fee;
     let expected_bps_fee = deployer.expected_bps_fee;
     let expected_flat_fee = deployer.expected_flat_fee;
-    drop(data);
 
     // Verify signer is the deploy_authority
     if deploy_authority != *signer.key {
@@ -185,8 +183,16 @@ pub fn process_mm_autodeploy(
         &[managed_miner_auth_bump],
     ];
 
-    // Transfer protocol fee from managed_miner_auth to FEE_COLLECTOR
-    if protocol_fee > 0 {
+    // Check if already deployed this round (only if miner exists)
+    let is_already_deployed = if !ore_miner_account_info.data_is_empty() {
+        let miner = ore_miner_account_info.as_account::<ore_api::Miner>(&ore_api::id())?;
+        miner.round_id == board.round_id
+    } else {
+        false // First ever deploy, miner doesn't exist yet
+    };
+
+    // Transfer protocol fee from managed_miner_auth to FEE_COLLECTOR (only on first deploy of round)
+    if protocol_fee > 0 && !is_already_deployed {
         solana_program::program::invoke_signed(
             &solana_program::system_instruction::transfer(
                 managed_miner_auth_account_info.key,
@@ -203,7 +209,7 @@ pub fn process_mm_autodeploy(
     }
 
     // Transfer deployer fee from managed_miner_auth to deploy_authority (signer)
-    if deployer_fee > 0 {
+    if deployer_fee > 0  && !is_already_deployed {
         solana_program::program::invoke_signed(
             &solana_program::system_instruction::transfer(
                 managed_miner_auth_account_info.key,
