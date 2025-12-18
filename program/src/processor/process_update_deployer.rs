@@ -1,5 +1,5 @@
 use solana_program::{
-    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey, system_program,
+    account_info::AccountInfo, program_error::ProgramError, pubkey::Pubkey,
 };
 use steel::*;
 
@@ -58,10 +58,8 @@ pub fn process_update_deployer(
     }
 
     // Load existing deployer data
-    let data = deployer_account_info.try_borrow_data()?;
-    let deployer = Deployer::try_from_bytes(&data[8..])?;
+    let deployer = deployer_account_info.as_account::<Deployer>(&crate::id())?;
     let current_deploy_authority = deployer.deploy_authority;
-    drop(data);
 
     // Determine who is signing and what they can update
     let is_manager_authority = manager.authority == *signer.key;
