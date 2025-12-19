@@ -20,6 +20,7 @@ export default function ManagePage() {
     createManager,
     createDeployer,
     updateDeployer,
+    bulkUpdateDeployers,
     depositAutodeployBalance,
     withdrawAutodeployBalance,
     checkpoint,
@@ -112,12 +113,17 @@ export default function ManagePage() {
 
   const handleBulkUpdate = async (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint) => {
     const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
-    for (const manager of selected) {
-      const deployer = getDeployerForManager(manager.address);
-      if (deployer) {
-        await updateDeployer(manager.address, deployAuthority, bpsFee, flatFee);
-      }
-    }
+    // Filter to only managers that have deployers
+    const managersWithDeployers = selected.filter(m => getDeployerForManager(m.address));
+    if (managersWithDeployers.length === 0) return;
+    
+    // Batch all updates into a single transaction
+    await bulkUpdateDeployers(
+      managersWithDeployers.map(m => m.address),
+      deployAuthority,
+      bpsFee,
+      flatFee
+    );
   };
 
   const handleCreateManager = async (keypair: Keypair): Promise<string> => {

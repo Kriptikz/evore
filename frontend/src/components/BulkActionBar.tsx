@@ -116,7 +116,7 @@ export function BulkActionBar({
       setError(null);
       const deployAuthority = new PublicKey(updateDeployAuthority);
       const bpsFee = BigInt(Math.floor(parseFloat(updateBpsFee) * 100)); // Convert % to basis points
-      const flatFee = updateFlatFee ? parseSolToLamports(updateFlatFee) : BigInt(0);
+      const flatFee = updateFlatFee ? BigInt(Math.floor(parseFloat(updateFlatFee))) : BigInt(0); // Already in lamports
       await onBulkUpdate(deployAuthority, bpsFee, flatFee);
       setShowUpdateModal(false);
       setUpdateDeployAuthority("");
@@ -307,16 +307,19 @@ export function BulkActionBar({
                 </p>
               </div>
               <div>
-                <label className="block text-sm text-zinc-400 mb-1">Flat Fee (SOL, optional)</label>
+                <label className="block text-sm text-zinc-400 mb-1">Flat Fee (lamports, optional)</label>
                 <input
                   type="number"
                   value={updateFlatFee}
                   onChange={(e) => setUpdateFlatFee(e.target.value)}
                   placeholder="0"
                   min="0"
-                  step="0.001"
+                  step="1"
                   className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
                 />
+                <p className="text-xs text-zinc-500 mt-1">
+                  e.g., 1000 lamports = 0.000001 SOL
+                </p>
               </div>
               {error && <p className="text-sm text-red-400">{error}</p>}
               <div className="flex gap-2">

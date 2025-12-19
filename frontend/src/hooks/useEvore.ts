@@ -356,6 +356,34 @@ export function useEvore() {
     return signature;
   }, [connection, publicKey, sendTransaction, fetchDeployers]);
 
+  // Bulk update multiple deployers in a single transaction
+  const bulkUpdateDeployers = useCallback(async (
+    managerAccounts: PublicKey[],
+    newDeployAuthority: PublicKey,
+    newBpsFee: bigint,
+    newFlatFee: bigint = BigInt(0)
+  ) => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (managerAccounts.length === 0) throw new Error("No managers to update");
+
+    const tx = new Transaction();
+    
+    for (const managerAccount of managerAccounts) {
+      const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee);
+      tx.add(ix);
+    }
+    
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = publicKey;
+
+    const signature = await sendTransaction(tx, connection);
+    await connection.confirmTransaction(signature, "confirmed");
+    
+    await fetchDeployers();
+    return signature;
+  }, [connection, publicKey, sendTransaction, fetchDeployers]);
+
   // Deposit to autodeploy balance (to managed_miner_auth PDA)
   const depositAutodeployBalance = useCallback(async (
     managerAccount: PublicKey,
@@ -563,6 +591,7 @@ export function useEvore() {
     createDeployer,
     createAutoMiner,
     updateDeployer,
+    bulkUpdateDeployers,
     depositAutodeployBalance,
     withdrawAutodeployBalance,
     withdrawAll,
