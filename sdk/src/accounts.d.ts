@@ -12,6 +12,7 @@ export interface Deployer {
   flatFee: bigint;
   expectedBpsFee: bigint;
   expectedFlatFee: bigint;
+  maxPerRound: bigint;
 }
 
 // Account Decoders

@@ -21,6 +21,7 @@ interface DeployerData {
   deployAuthority: PublicKey;
   bpsFee: bigint;  // Percentage fee in basis points (1000 = 10%)
   flatFee: bigint; // Flat fee in lamports (added on top of bpsFee)
+  maxPerRound: bigint; // Maximum lamports to deploy per round (0 = unlimited)
   autodeployBalance: bigint;
 }
 
@@ -275,6 +276,12 @@ export function AutoMinerCard({
           <div className="flex justify-between mt-1">
             <span>Fee:</span>
             <span>{formatFee(deployer.bpsFee, deployer.flatFee)}</span>
+          </div>
+          <div className="flex justify-between mt-1">
+            <span>Max Per Round:</span>
+            <span className="text-blue-400">
+              {deployer.maxPerRound === BigInt(0) ? 'Unlimited' : `${formatSol(deployer.maxPerRound)} SOL`}
+            </span>
           </div>
         </div>
       )}

@@ -15,7 +15,7 @@ interface BulkActionBarProps {
   onBulkCheckpoint?: () => Promise<void>;
   onBulkClaimOre?: () => Promise<void>;
   onBulkClaimSol?: () => Promise<void>;
-  onBulkUpdate?: (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint) => Promise<void>;
+  onBulkUpdate?: (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint, maxPerRound: bigint) => Promise<void>;
   totalAutodeployBalance?: bigint;
 }
 
@@ -38,6 +38,7 @@ export function BulkActionBar({
   const [updateDeployAuthority, setUpdateDeployAuthority] = useState("");
   const [updateBpsFee, setUpdateBpsFee] = useState("");
   const [updateFlatFee, setUpdateFlatFee] = useState("");
+  const [updateMaxPerRound, setUpdateMaxPerRound] = useState("1000000000");
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
@@ -117,11 +118,13 @@ export function BulkActionBar({
       const deployAuthority = new PublicKey(updateDeployAuthority);
       const bpsFee = BigInt(Math.floor(parseFloat(updateBpsFee) * 100)); // Convert % to basis points
       const flatFee = updateFlatFee ? BigInt(Math.floor(parseFloat(updateFlatFee))) : BigInt(0); // Already in lamports
-      await onBulkUpdate(deployAuthority, bpsFee, flatFee);
+      const maxPerRound = BigInt(Math.floor(parseFloat(updateMaxPerRound) || 0)); // Already in lamports
+      await onBulkUpdate(deployAuthority, bpsFee, flatFee, maxPerRound);
       setShowUpdateModal(false);
       setUpdateDeployAuthority("");
       setUpdateBpsFee("");
       setUpdateFlatFee("");
+      setUpdateMaxPerRound("1000000000");
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -319,6 +322,21 @@ export function BulkActionBar({
                 />
                 <p className="text-xs text-zinc-500 mt-1">
                   e.g., 1000 lamports = 0.000001 SOL
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">Max Per Round (lamports)</label>
+                <input
+                  type="number"
+                  value={updateMaxPerRound}
+                  onChange={(e) => setUpdateMaxPerRound(e.target.value)}
+                  placeholder="1000000000"
+                  min="0"
+                  step="1"
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
+                />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Maximum lamports to deploy per round. Set to 0 for unlimited. (1 SOL = 1,000,000,000 lamports)
                 </p>
               </div>
               {error && <p className="text-sm text-red-400">{error}</p>}

@@ -19,9 +19,9 @@ function decodeManager(data) {
 
 /**
  * Decodes a Deployer account from raw account data
- * Size: 104 bytes (8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee + 8 flat_fee + 8 expected_bps_fee + 8 expected_flat_fee)
+ * Size: 112 bytes (8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee + 8 flat_fee + 8 expected_bps_fee + 8 expected_flat_fee + 8 max_per_round)
  * @param {Buffer|Uint8Array} data - Raw account data from getAccountInfo
- * @returns {{ managerKey: PublicKey, deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint, expectedBpsFee: bigint, expectedFlatFee: bigint }}
+ * @returns {{ managerKey: PublicKey, deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint, expectedBpsFee: bigint, expectedFlatFee: bigint, maxPerRound: bigint }}
  */
 function decodeDeployer(data) {
   const buffer = Buffer.from(data);
@@ -33,8 +33,9 @@ function decodeDeployer(data) {
   const flatFee = buffer.readBigUInt64LE(80);
   const expectedBpsFee = buffer.readBigUInt64LE(88);
   const expectedFlatFee = buffer.readBigUInt64LE(96);
+  const maxPerRound = buffer.readBigUInt64LE(104);
   
-  return { managerKey, deployAuthority, bpsFee, flatFee, expectedBpsFee, expectedFlatFee };
+  return { managerKey, deployAuthority, bpsFee, flatFee, expectedBpsFee, expectedFlatFee, maxPerRound };
 }
 
 /**

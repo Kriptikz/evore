@@ -365,15 +365,17 @@ function mmClaimOreInstruction(signer, manager, authId = 0n) {
  * @param {PublicKey} deployAuthority - The authority that will execute autodeploys
  * @param {bigint} bpsFee - Percentage fee in basis points (1000 = 10%)
  * @param {bigint} flatFee - Flat fee in lamports (added on top of bpsFee)
+ * @param {bigint} maxPerRound - Maximum lamports to deploy per round (0 = unlimited)
  * @returns {TransactionInstruction}
  */
-function createDeployerInstruction(signer, manager, deployAuthority, bpsFee, flatFee = 0n) {
+function createDeployerInstruction(signer, manager, deployAuthority, bpsFee, flatFee = 0n, maxPerRound = 1_000_000_000n) {
   const [deployerPda] = getDeployerPda(manager);
   
-  const data = Buffer.alloc(17);
+  const data = Buffer.alloc(25);
   data[0] = EvoreInstruction.CreateDeployer;
   data.writeBigUInt64LE(bpsFee, 1);
   data.writeBigUInt64LE(flatFee, 9);
+  data.writeBigUInt64LE(maxPerRound, 17);
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,
@@ -390,7 +392,7 @@ function createDeployerInstruction(signer, manager, deployAuthority, bpsFee, fla
 
 /**
  * Creates an UpdateDeployer instruction
- * - Manager authority: can update deploy_authority, bps_fee, flat_fee
+ * - Manager authority: can update deploy_authority, bps_fee, flat_fee, max_per_round
  * - Deploy authority: can update deploy_authority, expected_bps_fee, expected_flat_fee
  * @param {PublicKey} signer - Manager authority or deploy authority
  * @param {PublicKey} manager - Manager account
@@ -399,6 +401,7 @@ function createDeployerInstruction(signer, manager, deployAuthority, bpsFee, fla
  * @param {bigint} newFlatFee - New flat fee in lamports (manager only)
  * @param {bigint} newExpectedBpsFee - Expected bps_fee (deploy authority only, 0 = accept any)
  * @param {bigint} newExpectedFlatFee - Expected flat_fee (deploy authority only, 0 = accept any)
+ * @param {bigint} newMaxPerRound - Maximum lamports to deploy per round (manager only, 0 = unlimited)
  * @returns {TransactionInstruction}
  */
 function updateDeployerInstruction(
@@ -408,16 +411,18 @@ function updateDeployerInstruction(
   newBpsFee,
   newFlatFee = 0n,
   newExpectedBpsFee = 0n,
-  newExpectedFlatFee = 0n
+  newExpectedFlatFee = 0n,
+  newMaxPerRound = 1_000_000_000n
 ) {
   const [deployerPda] = getDeployerPda(manager);
 
-  const data = Buffer.alloc(33);
+  const data = Buffer.alloc(41);
   data[0] = EvoreInstruction.UpdateDeployer;
   data.writeBigUInt64LE(newBpsFee, 1);
   data.writeBigUInt64LE(newFlatFee, 9);
   data.writeBigUInt64LE(newExpectedBpsFee, 17);
   data.writeBigUInt64LE(newExpectedFlatFee, 25);
+  data.writeBigUInt64LE(newMaxPerRound, 33);
 
   return new TransactionInstruction({
     programId: EVORE_PROGRAM_ID,

@@ -111,7 +111,7 @@ export default function ManagePage() {
     }
   };
 
-  const handleBulkUpdate = async (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint) => {
+  const handleBulkUpdate = async (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint, maxPerRound: bigint) => {
     const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
     // Filter to only managers that have deployers
     const managersWithDeployers = selected.filter(m => getDeployerForManager(m.address));
@@ -122,7 +122,10 @@ export default function ManagePage() {
       managersWithDeployers.map(m => m.address),
       deployAuthority,
       bpsFee,
-      flatFee
+      flatFee,
+      BigInt(0), // expected_bps_fee
+      BigInt(0), // expected_flat_fee
+      maxPerRound
     );
   };
 
@@ -222,6 +225,7 @@ export default function ManagePage() {
                               deployAuthority: deployer.data.deployAuthority,
                               bpsFee: deployer.data.bpsFee,
                               flatFee: deployer.data.flatFee,
+                              maxPerRound: deployer.data.maxPerRound,
                               autodeployBalance: deployer.autodeployBalance,
                               authPdaAddress: deployer.authPdaAddress,
                             }
@@ -231,11 +235,11 @@ export default function ManagePage() {
                       currentBoardRoundId={board?.roundId}
                       isSelected={selectedManagers.has(managerKey)}
                       onToggleSelect={() => toggleSelection(managerKey)}
-                      onCreateDeployer={(deployAuthority, bpsFee, flatFee) =>
-                        createDeployer(manager.address, deployAuthority, bpsFee, flatFee)
+                      onCreateDeployer={(deployAuthority, bpsFee, flatFee, maxPerRound) =>
+                        createDeployer(manager.address, deployAuthority, bpsFee, flatFee, maxPerRound)
                       }
-                      onUpdateDeployer={(newDeployAuthority, newBpsFee, newFlatFee) =>
-                        updateDeployer(manager.address, newDeployAuthority, newBpsFee, newFlatFee)
+                      onUpdateDeployer={(newDeployAuthority, newBpsFee, newFlatFee, newMaxPerRound) =>
+                        updateDeployer(manager.address, newDeployAuthority, newBpsFee, newFlatFee, BigInt(0), BigInt(0), newMaxPerRound)
                       }
                       onDeposit={(authId, amount) =>
                         depositAutodeployBalance(manager.address, authId, amount)

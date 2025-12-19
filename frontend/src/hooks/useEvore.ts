@@ -283,11 +283,12 @@ export function useEvore() {
     managerAccount: PublicKey,
     deployAuthority: PublicKey,
     bpsFee: bigint,
-    flatFee: bigint = BigInt(0)
+    flatFee: bigint = BigInt(0),
+    maxPerRound: bigint = BigInt(1_000_000_000)
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
-    const ix = createDeployerInstruction(publicKey, managerAccount, deployAuthority, bpsFee, flatFee);
+    const ix = createDeployerInstruction(publicKey, managerAccount, deployAuthority, bpsFee, flatFee, maxPerRound);
     const tx = new Transaction().add(ix);
     
     const { blockhash } = await connection.getLatestBlockhash();
@@ -305,7 +306,8 @@ export function useEvore() {
   const createAutoMiner = useCallback(async (
     deployAuthority: PublicKey,
     bpsFee: bigint,
-    flatFee: bigint = BigInt(0)
+    flatFee: bigint = BigInt(0),
+    maxPerRound: bigint = BigInt(1_000_000_000)
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
@@ -314,7 +316,7 @@ export function useEvore() {
 
     // Create both instructions
     const createManagerIx = createManagerInstruction(publicKey, managerKeypair.publicKey);
-    const createDeployerIx = createDeployerInstruction(publicKey, managerKeypair.publicKey, deployAuthority, bpsFee, flatFee);
+    const createDeployerIx = createDeployerInstruction(publicKey, managerKeypair.publicKey, deployAuthority, bpsFee, flatFee, maxPerRound);
 
     const tx = new Transaction().add(createManagerIx).add(createDeployerIx);
     
@@ -338,11 +340,14 @@ export function useEvore() {
     managerAccount: PublicKey,
     newDeployAuthority: PublicKey,
     newBpsFee: bigint,
-    newFlatFee: bigint = BigInt(0)
+    newFlatFee: bigint = BigInt(0),
+    newExpectedBpsFee: bigint = BigInt(0),
+    newExpectedFlatFee: bigint = BigInt(0),
+    newMaxPerRound: bigint = BigInt(1_000_000_000)
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
 
-    const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee);
+    const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee, newExpectedBpsFee, newExpectedFlatFee, newMaxPerRound);
     const tx = new Transaction().add(ix);
     
     const { blockhash } = await connection.getLatestBlockhash();
@@ -361,7 +366,10 @@ export function useEvore() {
     managerAccounts: PublicKey[],
     newDeployAuthority: PublicKey,
     newBpsFee: bigint,
-    newFlatFee: bigint = BigInt(0)
+    newFlatFee: bigint = BigInt(0),
+    newExpectedBpsFee: bigint = BigInt(0),
+    newExpectedFlatFee: bigint = BigInt(0),
+    newMaxPerRound: bigint = BigInt(1_000_000_000)
   ) => {
     if (!publicKey) throw new Error("Wallet not connected");
     if (managerAccounts.length === 0) throw new Error("No managers to update");
@@ -369,7 +377,7 @@ export function useEvore() {
     const tx = new Transaction();
     
     for (const managerAccount of managerAccounts) {
-      const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee);
+      const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee, newExpectedBpsFee, newExpectedFlatFee, newMaxPerRound);
       tx.add(ix);
     }
     

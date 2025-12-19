@@ -234,6 +234,7 @@ export default function Home() {
                         deployAuthority: deployer.data.deployAuthority,
                         bpsFee: deployer.data.bpsFee,
                         flatFee: deployer.data.flatFee,
+                        maxPerRound: deployer.data.maxPerRound,
                         autodeployBalance: deployer.autodeployBalance,
                       }}
                       miner={miner}

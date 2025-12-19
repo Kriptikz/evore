@@ -23,6 +23,7 @@ interface ManagerCardProps {
     deployAuthority: PublicKey;
     bpsFee: bigint;  // Percentage fee in basis points (1000 = 10%)
     flatFee: bigint; // Flat fee in lamports (added on top of bpsFee)
+    maxPerRound: bigint; // Maximum lamports to deploy per round (0 = unlimited)
     autodeployBalance: bigint;
     authPdaAddress: PublicKey;  // The managed_miner_auth PDA where funds are held
   };
@@ -30,8 +31,8 @@ interface ManagerCardProps {
   currentBoardRoundId?: bigint;
   isSelected?: boolean;
   onToggleSelect?: () => void;
-  onCreateDeployer: (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint) => Promise<string>;
-  onUpdateDeployer: (newDeployAuthority: PublicKey, newBpsFee: bigint, newFlatFee: bigint) => Promise<string>;
+  onCreateDeployer: (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint, maxPerRound: bigint) => Promise<string>;
+  onUpdateDeployer: (newDeployAuthority: PublicKey, newBpsFee: bigint, newFlatFee: bigint, newMaxPerRound: bigint) => Promise<string>;
   onDeposit: (authId: bigint, amount: bigint) => Promise<string>;
   onWithdraw: (authId: bigint, amount: bigint) => Promise<string>;
   onCheckpoint: (roundId: bigint) => Promise<string>;
@@ -102,6 +103,7 @@ export function ManagerCard({
   const [deployAuthority, setDeployAuthority] = useState("");
   const [bpsFeeAmount, setBpsFeeAmount] = useState("5"); // Default 5%
   const [flatFeeAmount, setFlatFeeAmount] = useState("0"); // Default 0 lamports
+  const [maxPerRoundAmount, setMaxPerRoundAmount] = useState("1000000000"); // Default 1 SOL in lamports
   const [depositAmount, setDepositAmount] = useState("");
   const [withdrawAmount, setWithdrawAmount] = useState("");
 
@@ -128,7 +130,8 @@ export function ManagerCard({
       const authority = new PublicKey(deployAuthority);
       const bpsFee = parsePercentToBps(bpsFeeAmount);
       const flatFee = BigInt(Math.floor(parseFloat(flatFeeAmount) || 0));
-      await onCreateDeployer(authority, bpsFee, flatFee);
+      const maxPerRound = BigInt(Math.floor(parseFloat(maxPerRoundAmount) || 0));
+      await onCreateDeployer(authority, bpsFee, flatFee, maxPerRound);
       setShowCreateDeployer(false);
       setDeployAuthority("");
     } catch (err: any) {
@@ -150,7 +153,8 @@ export function ManagerCard({
       const authority = new PublicKey(deployAuthority);
       const bpsFee = parsePercentToBps(bpsFeeAmount);
       const flatFee = BigInt(Math.floor(parseFloat(flatFeeAmount) || 0));
-      await onUpdateDeployer(authority, bpsFee, flatFee);
+      const maxPerRound = BigInt(Math.floor(parseFloat(maxPerRoundAmount) || 0));
+      await onUpdateDeployer(authority, bpsFee, flatFee, maxPerRound);
       setShowUpdateDeployer(false);
     } catch (err: any) {
       setError(err.message);
@@ -377,6 +381,12 @@ export function ManagerCard({
               <span>{formatFee(deployer.bpsFee, deployer.flatFee)}</span>
             </div>
             <div className="flex justify-between">
+              <span className="text-zinc-400">Max Per Round:</span>
+              <span className="text-blue-400">
+                {deployer.maxPerRound === BigInt(0) ? 'Unlimited' : `${formatSol(deployer.maxPerRound)} SOL`}
+              </span>
+            </div>
+            <div className="flex justify-between">
               <span className="text-zinc-400">Autodeploy Balance:</span>
               <span className="text-yellow-400">{formatSol(deployer.autodeployBalance)} SOL</span>
             </div>
@@ -388,6 +398,7 @@ export function ManagerCard({
                 setDeployAuthority(deployer.deployAuthority.toBase58());
                 setBpsFeeAmount((Number(deployer.bpsFee) / 100).toString());
                 setFlatFeeAmount(deployer.flatFee.toString());
+                setMaxPerRoundAmount(deployer.maxPerRound.toString());
                 setShowUpdateDeployer(true);
               }}
               className="flex-1 px-3 py-1.5 text-sm bg-zinc-700 hover:bg-zinc-600 rounded"
@@ -481,6 +492,21 @@ export function ManagerCard({
                   Additional flat fee in lamports. Set to 0 to disable.
                 </p>
               </div>
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">Max Per Round (lamports)</label>
+                <input
+                  type="number"
+                  value={maxPerRoundAmount}
+                  onChange={(e) => setMaxPerRoundAmount(e.target.value)}
+                  placeholder="1000000000"
+                  min="0"
+                  step="1"
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
+                />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Maximum lamports to deploy per round. Set to 0 for unlimited. (1 SOL = 1,000,000,000 lamports)
+                </p>
+              </div>
               <div className="flex gap-2">
                 <button
                   onClick={() => setShowCreateDeployer(false)}
@@ -547,6 +573,21 @@ export function ManagerCard({
                 />
                 <p className="text-xs text-zinc-500 mt-1">
                   Additional flat fee in lamports. Set to 0 to disable.
+                </p>
+              </div>
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">Max Per Round (lamports)</label>
+                <input
+                  type="number"
+                  value={maxPerRoundAmount}
+                  onChange={(e) => setMaxPerRoundAmount(e.target.value)}
+                  placeholder="1000000000"
+                  min="0"
+                  step="1"
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm"
+                />
+                <p className="text-xs text-zinc-500 mt-1">
+                  Maximum lamports to deploy per round. Set to 0 for unlimited. (1 SOL = 1,000,000,000 lamports)
                 </p>
               </div>
               <div className="flex gap-2">

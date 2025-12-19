@@ -73,7 +73,8 @@ export declare function createDeployerInstruction(
   manager: PublicKey,
   deployAuthority: PublicKey,
   bpsFee: bigint,
-  flatFee?: bigint
+  flatFee?: bigint,
+  maxPerRound?: bigint
 ): TransactionInstruction;
 
 export declare function updateDeployerInstruction(
@@ -83,7 +84,8 @@ export declare function updateDeployerInstruction(
   newBpsFee: bigint,
   newFlatFee?: bigint,
   newExpectedBpsFee?: bigint,
-  newExpectedFlatFee?: bigint
+  newExpectedFlatFee?: bigint,
+  newMaxPerRound?: bigint
 ): TransactionInstruction;
 
 // Autodeploy Balance (manager authority)
