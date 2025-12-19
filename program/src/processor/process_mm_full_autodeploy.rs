@@ -145,12 +145,17 @@ pub fn process_mm_full_autodeploy(
     // ==========================================================================
     // STEP 1: Checkpoint if needed (check miner.checkpoint_id < round.id)
     // ==========================================================================
-    let checkpoint_round = checkpoint_round_account_info.as_account::<Round>(&ore_api::id())?;
+    let checkpoint_round_id = if ore_miner_account_info.data_is_empty() {
+      return Err(ProgramError::InvalidAccountData)
+    } else {
+      let ore_miner = ore_miner_account_info.as_account::<Miner>(&ore_api::id())?;
+      ore_miner.round_id
+    };
     
     // Check miner state only if it exists
     let (needs_checkpoint, is_already_deployed) = if !ore_miner_account_info.data_is_empty() {
         let miner = ore_miner_account_info.as_account::<Miner>(&ore_api::id())?;
-        (miner.checkpoint_id < checkpoint_round.id, miner.round_id == board.round_id)
+        (miner.checkpoint_id < checkpoint_round_id, miner.round_id == board.round_id)
     } else {
         (false, false) // First ever deploy, miner doesn't exist yet
     };
@@ -170,7 +175,7 @@ pub fn process_mm_full_autodeploy(
             &ore_api::checkpoint(
                 *managed_miner_auth_account_info.key,
                 *managed_miner_auth_account_info.key,
-                checkpoint_round.id,
+                checkpoint_round_id,
             ),
             &checkpoint_accounts,
             &[managed_miner_auth_seeds],

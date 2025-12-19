@@ -7,7 +7,7 @@ use crate::{
     consts::{DEPLOYER, MANAGED_MINER_AUTH},
     error::EvoreError,
     instruction::MMAutocheckpoint,
-    ore_api::{self, Round},
+    ore_api::{self, Miner, Round},
     state::{Deployer, Manager},
 };
 
@@ -98,9 +98,6 @@ pub fn process_mm_autocheckpoint(
         return Err(EvoreError::InvalidPDA.into());
     }
 
-    // Get round for checkpoint CPI
-    let round = round_account_info.as_account::<Round>(&ore_api::id())?;
-
     // Build checkpoint CPI accounts
     let checkpoint_accounts = vec![
         managed_miner_auth_account_info.clone(),
@@ -114,12 +111,19 @@ pub fn process_mm_autocheckpoint(
 
     let managed_miner_auth_key = *managed_miner_auth_account_info.key;
 
+    let checkpoint_round_id = if ore_miner_account_info.data_is_empty() {
+      return Err(ProgramError::InvalidAccountData)
+    } else {
+      let ore_miner = ore_miner_account_info.as_account::<Miner>(&ore_api::id())?;
+      ore_miner.round_id
+    };
+
     // Call ORE checkpoint CPI
     solana_program::program::invoke_signed(
         &ore_api::checkpoint(
             managed_miner_auth_key,
             managed_miner_auth_key,
-            round.id,
+            checkpoint_round_id,
         ),
         &checkpoint_accounts,
         &[&[
