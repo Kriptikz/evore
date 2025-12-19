@@ -1008,7 +1008,7 @@ async fn run_manage_tui(
     config_path: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use crate::config::Config;
-    use crate::manage::{discover_accounts, load_signers_from_directory};
+    use crate::manage::{discover_accounts, load_signers_from_directory, DiscoveryResult};
     use crate::manage_tui::{self, ManageApp};
     use std::path::Path;
     use solana_client::rpc_client::RpcClient;
@@ -1066,84 +1066,144 @@ async fn run_manage_tui(
     // Create app state
     let mut app = ManageApp::new(rpc_url, config.manage.clone(), discovery, signers);
     
+    // Channel for async operation results
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::channel::<(usize, manage_tui::MinerAction, Result<solana_sdk::signature::Signature, String>)>(32);
+    let (refresh_tx, mut refresh_rx) = tokio::sync::mpsc::channel::<Result<DiscoveryResult, String>>(1);
+    
     // Main TUI loop
     let result = async {
         while app.running {
+            // Check for async operation results (non-blocking)
+            while let Ok((miner_idx, action, tx_result)) = result_rx.try_recv() {
+                app.operation_in_progress = false;
+                match tx_result {
+                    Ok(sig) => {
+                        app.log_tx(miner_idx, action, Some(sig), None);
+                        app.set_status(format!("✓ {} complete: {}...", action.as_str(), &sig.to_string()[..8]), false);
+                    }
+                    Err(e) => {
+                        let formatted_error = manage_tui::format_rpc_error(&e);
+                        app.log_tx(miner_idx, action, None, Some(formatted_error.clone()));
+                        app.set_status(format!("✗ {} failed: {}", action.as_str(), formatted_error), true);
+                    }
+                }
+            }
+            
+            // Check for refresh results (non-blocking)
+            while let Ok(refresh_result) = refresh_rx.try_recv() {
+                app.refreshing = false;
+                app.operation_in_progress = false;
+                match refresh_result {
+                    Ok(new_discovery) => {
+                        app.discovery = new_discovery.clone();
+                        app.all_miners = new_discovery.miners.clone();
+                        app.all_miners.extend(new_discovery.legacy_miners.clone());
+                        app.set_status(format!("Refreshed: {} miners", app.all_miners.len()), false);
+                    }
+                    Err(e) => {
+                        let formatted_error = manage_tui::format_rpc_error(&e);
+                        app.set_status(format!("Refresh failed: {}", formatted_error), true);
+                    }
+                }
+            }
+            
             // Draw UI
             terminal.draw(|frame| manage_tui::draw(frame, &app))?;
             
             // Handle input
             match manage_tui::handle_input(&mut app)? {
                 manage_tui::InputResult::Quit => break,
+                manage_tui::InputResult::CopyPubkey(pubkey) => {
+                    manage_tui::copy_to_clipboard(&mut app, &pubkey);
+                }
+                manage_tui::InputResult::ToggleSkipPreflight => {
+                    app.toggle_skip_preflight();
+                }
                 manage_tui::InputResult::Refresh => {
-                    app.set_status("Refreshing...".to_string(), false);
-                    app.refreshing = true;
-                    
-                    // Re-discover accounts
-                    match discover_accounts(&rpc, &config.manage) {
-                        Ok(new_discovery) => {
-                            app.discovery = new_discovery.clone();
-                            app.all_miners = new_discovery.miners.clone();
-                            app.all_miners.extend(new_discovery.legacy_miners.clone());
-                            app.set_status(format!("Refreshed: {} miners", app.all_miners.len()), false);
-                        }
-                        Err(e) => {
-                            app.set_status(format!("Refresh failed: {}", e), true);
-                        }
+                    if !app.operation_in_progress {
+                        app.set_status("Refreshing...".to_string(), false);
+                        app.refreshing = true;
+                        app.operation_in_progress = true;
+                        
+                        // Spawn async refresh operation
+                        let manage_config = config.manage.clone();
+                        let rpc_url_clone = rpc_url.to_string();
+                        let tx = refresh_tx.clone();
+                        
+                        tokio::spawn(async move {
+                            let result = tokio::task::spawn_blocking(move || {
+                                let rpc = RpcClient::new(rpc_url_clone);
+                                discover_accounts(&rpc, &manage_config)
+                            }).await;
+                            
+                            let send_result = match result {
+                                Ok(Ok(discovery)) => Ok(discovery),
+                                Ok(Err(e)) => Err(e),
+                                Err(e) => Err(format!("Task failed: {}", e)),
+                            };
+                            let _ = tx.send(send_result).await;
+                        });
                     }
-                    app.refreshing = false;
                 }
                 manage_tui::InputResult::ExecuteAction(miner_idx, action) => {
-                    // Clone the miner data we need to avoid borrow conflicts
-                    let miner_data = app.all_miners.get(miner_idx).cloned();
-                    
-                    match miner_data {
-                        None => {
-                            app.set_status("Miner not found".to_string(), true);
-                        }
-                        Some(miner) => {
-                            // Find the signer keypair for this miner
-                            let signer = {
-                                use solana_sdk::signer::Signer;
-                                app.signers.iter()
-                                    .find(|(kp, _)| kp.pubkey() == miner.signer)
-                                    .map(|(kp, _)| kp.clone())
-                            };
-                            
-                            match signer {
-                                None => {
-                                    app.set_status("Signer keypair not found".to_string(), true);
-                                }
-                                Some(signer_keypair) => {
-                                    app.set_status(format!("Executing {}...", action.as_str()), false);
-                                    
-                                    let blockhash = rpc.get_latest_blockhash()
-                                        .map_err(|e| format!("Failed to get blockhash: {}", e));
-                                    
-                                    match blockhash {
-                                        Ok(bh) => {
-                                            let tx_result = execute_miner_action(
-                                                &rpc,
-                                                &signer_keypair,
-                                                &miner,
-                                                action,
-                                                bh,
-                                            );
+                    if app.operation_in_progress {
+                        app.set_status("Operation already in progress...".to_string(), false);
+                    } else {
+                        // Clone the miner data we need to avoid borrow conflicts
+                        let miner_data = app.all_miners.get(miner_idx).cloned();
+                        
+                        match miner_data {
+                            None => {
+                                app.set_status("Miner not found".to_string(), true);
+                            }
+                            Some(miner) => {
+                                // Find the signer keypair for this miner
+                                let signer = {
+                                    use solana_sdk::signer::Signer;
+                                    app.signers.iter()
+                                        .find(|(kp, _)| kp.pubkey() == miner.signer)
+                                        .map(|(kp, _)| kp.clone())
+                                };
+                                
+                                match signer {
+                                    None => {
+                                        app.set_status("Signer keypair not found".to_string(), true);
+                                    }
+                                    Some(signer_keypair) => {
+                                        app.set_status(format!("Executing {}...", action.as_str()), false);
+                                        app.operation_in_progress = true;
+                                        
+                                        // Spawn async transaction operation
+                                        let rpc_url_clone = rpc_url.to_string();
+                                        let skip_preflight = app.skip_preflight;
+                                        let tx = result_tx.clone();
+                                        
+                                        tokio::spawn(async move {
+                                            let result = tokio::task::spawn_blocking(move || {
+                                                let rpc = RpcClient::new(rpc_url_clone);
+                                                
+                                                // Get blockhash
+                                                let blockhash = match rpc.get_latest_blockhash() {
+                                                    Ok(bh) => bh,
+                                                    Err(e) => return Err(format!("Failed to get blockhash: {}", e)),
+                                                };
+                                                
+                                                execute_miner_action_with_opts(
+                                                    &rpc,
+                                                    &signer_keypair,
+                                                    &miner,
+                                                    action,
+                                                    blockhash,
+                                                    skip_preflight,
+                                                )
+                                            }).await;
                                             
-                                            match tx_result {
-                                                Ok(sig) => {
-                                                    app.log_tx(miner_idx, action, Some(sig), None);
-                                                    app.set_status(format!("✓ {} complete: {}...", action.as_str(), &sig.to_string()[..8]), false);
-                                                }
-                                                Err(e) => {
-                                                    app.log_tx(miner_idx, action, None, Some(e.clone()));
-                                                    app.set_status(format!("✗ {} failed: {}", action.as_str(), e), true);
-                                                }
-                                            }
-                                        }
-                                        Err(e) => {
-                                            app.set_status(e, true);
-                                        }
+                                            let send_result = match result {
+                                                Ok(r) => r,
+                                                Err(e) => Err(format!("Task failed: {}", e)),
+                                            };
+                                            let _ = tx.send((miner_idx, action, send_result)).await;
+                                        });
                                     }
                                 }
                             }
@@ -1164,14 +1224,17 @@ async fn run_manage_tui(
     result
 }
 
-/// Execute a miner action (checkpoint, claim_sol, claim_ore)
-fn execute_miner_action(
+/// Execute a miner action (checkpoint, claim_sol, claim_ore) with options
+fn execute_miner_action_with_opts(
     rpc: &solana_client::rpc_client::RpcClient,
     signer: &std::sync::Arc<Keypair>,
     miner: &manage::DiscoveredMiner,
     action: manage_tui::MinerAction,
     blockhash: solana_sdk::hash::Hash,
+    skip_preflight: bool,
 ) -> Result<solana_sdk::signature::Signature, String> {
+    use solana_client::rpc_config::RpcSendTransactionConfig;
+    use solana_sdk::commitment_config::CommitmentLevel;
     
     let tx = match action {
         manage_tui::MinerAction::Checkpoint => {
@@ -1191,13 +1254,12 @@ fn execute_miner_action(
         }
         manage_tui::MinerAction::ClaimSol => {
             if miner.is_legacy {
-                // For legacy miners, we need to build the tx with the legacy program ID
-                // For now, use the same instruction but note this may need adjustment
-                // based on the legacy program's instruction format
-                deploy::build_claim_sol_tx(
+                // For legacy miners, use the legacy program ID
+                deploy::build_claim_sol_tx_with_program(
                     signer.as_ref(),
                     &miner.manager,
                     miner.auth_id,
+                    &miner.program_id,
                     blockhash,
                 )
             } else {
@@ -1210,19 +1272,69 @@ fn execute_miner_action(
             }
         }
         manage_tui::MinerAction::ClaimOre => {
-            // Build claim ORE transaction
-            deploy::build_claim_ore_tx(
-                signer.as_ref(),
-                &miner.manager,
-                miner.auth_id,
-                blockhash,
-            )
+            if miner.is_legacy {
+                // For legacy miners, use the legacy program ID
+                deploy::build_claim_ore_tx_with_program(
+                    signer.as_ref(),
+                    &miner.manager,
+                    miner.auth_id,
+                    &miner.program_id,
+                    blockhash,
+                )
+            } else {
+                deploy::build_claim_ore_tx(
+                    signer.as_ref(),
+                    &miner.manager,
+                    miner.auth_id,
+                    blockhash,
+                )
+            }
         }
     };
     
+    // Send transaction with options
+    let config = RpcSendTransactionConfig {
+        skip_preflight,
+        preflight_commitment: Some(CommitmentLevel::Confirmed),
+        ..Default::default()
+    };
+    
     // Send and confirm transaction
-    match rpc.send_and_confirm_transaction(&tx) {
-        Ok(sig) => Ok(sig),
-        Err(e) => Err(format!("{}", e)),
+    let sig = rpc.send_transaction_with_config(&tx, config)
+        .map_err(|e| format!("{}", e))?;
+    
+    // Wait for confirmation (with timeout)
+    use std::time::{Duration, Instant};
+    
+    let start = Instant::now();
+    let timeout = Duration::from_secs(30);
+    
+    loop {
+        if start.elapsed() > timeout {
+            return Err(format!("Transaction {} not confirmed in 30s", sig));
+        }
+        
+        match rpc.get_signature_statuses(&[sig]) {
+            Ok(response) => {
+                if let Some(Some(status)) = response.value.first() {
+                    if let Some(err) = &status.err {
+                        return Err(format!("Transaction failed: {:?}", err));
+                    }
+                    // Check if has any confirmations or confirmation status is set
+                    // (confirmation_status being Some means it's at least processed)
+                    let is_confirmed = status.confirmations.unwrap_or(0) > 0 
+                        || status.confirmation_status.is_some();
+                    if is_confirmed {
+                        return Ok(sig);
+                    }
+                }
+            }
+            Err(e) => {
+                // Log but continue waiting - network hiccup
+                let _ = e; // silence unused warning
+            }
+        }
+        
+        std::thread::sleep(Duration::from_millis(500));
     }
 }

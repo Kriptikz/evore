@@ -10,6 +10,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use cli_clipboard;
 use crossterm::{
     event::{self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind},
     execute,
@@ -23,12 +24,9 @@ use ratatui::{
     widgets::{Block, Borders, List, ListItem, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState},
     Frame, Terminal,
 };
-use solana_client::rpc_client::RpcClient;
 use solana_sdk::{
-    hash::Hash,
     pubkey::Pubkey,
     signature::{Keypair, Signature},
-    signer::Signer,
 };
 
 use crate::config::ManageConfig;
@@ -69,8 +67,10 @@ impl MinerAction {
 /// Selection state
 #[derive(Clone, Debug, PartialEq)]
 pub enum Selection {
-    /// Selected miner by index
-    Miner(usize),
+    /// Selected signer pubkey for miner at index
+    Signer(usize),
+    /// Selected auth pubkey for miner at index
+    Auth(usize),
     /// Selected action on a miner (miner_index, action)
     Action(usize, MinerAction),
 }
@@ -110,6 +110,12 @@ pub struct ManageApp {
     
     /// Flag indicating refresh is in progress
     pub refreshing: bool,
+    
+    /// Skip preflight simulation when sending transactions
+    pub skip_preflight: bool,
+    
+    /// Flag indicating an async operation is in progress (non-blocking)
+    pub operation_in_progress: bool,
 }
 
 impl ManageApp {
@@ -135,32 +141,64 @@ impl ManageApp {
             status_msg: None,
             tx_log: Vec::new(),
             refreshing: false,
+            skip_preflight: false,
+            operation_in_progress: false,
+        }
+    }
+    
+    /// Get the pubkey of the currently selected element (if a pubkey is selected)
+    pub fn get_selected_pubkey(&self) -> Option<Pubkey> {
+        match &self.selection {
+            Some(Selection::Signer(i)) => {
+                self.all_miners.get(*i).map(|m| m.signer)
+            }
+            Some(Selection::Auth(i)) => {
+                self.all_miners.get(*i).map(|m| m.authority_pda)
+            }
+            _ => None,
+        }
+    }
+    
+    /// Toggle skip preflight setting
+    pub fn toggle_skip_preflight(&mut self) {
+        self.skip_preflight = !self.skip_preflight;
+        let state = if self.skip_preflight { "ON" } else { "OFF" };
+        self.set_status(format!("Skip preflight: {}", state), false);
+    }
+    
+    /// Get miner index from current selection
+    fn get_selection_miner_index(&self) -> Option<usize> {
+        match &self.selection {
+            Some(Selection::Signer(i)) | Some(Selection::Auth(i)) | Some(Selection::Action(i, _)) => Some(*i),
+            None => None,
         }
     }
     
     /// Select next item
+    /// Navigation order per miner: Signer -> Auth -> Checkpoint (if not legacy) -> ClaimSol -> ClaimOre -> next miner
     pub fn select_next(&mut self) {
         if self.all_miners.is_empty() {
             return;
         }
         
         self.selection = match &self.selection {
-            None => Some(Selection::Miner(0)),
-            Some(Selection::Miner(i)) => {
-                // Move to first action on this miner
-                Some(Selection::Action(*i, MinerAction::Checkpoint))
+            None => Some(Selection::Signer(0)),
+            Some(Selection::Signer(i)) => {
+                Some(Selection::Auth(*i))
+            }
+            Some(Selection::Auth(i)) => {
+                let miner = &self.all_miners[*i];
+                if miner.is_legacy {
+                    // Skip checkpoint for legacy miners
+                    Some(Selection::Action(*i, MinerAction::ClaimSol))
+                } else {
+                    Some(Selection::Action(*i, MinerAction::Checkpoint))
+                }
             }
             Some(Selection::Action(i, action)) => {
                 let miner = &self.all_miners[*i];
                 let next_action = match action {
-                    MinerAction::Checkpoint => {
-                        // Skip checkpoint for legacy miners
-                        if miner.is_legacy {
-                            Some(MinerAction::ClaimSol)
-                        } else {
-                            Some(MinerAction::ClaimSol)
-                        }
-                    }
+                    MinerAction::Checkpoint => Some(MinerAction::ClaimSol),
                     MinerAction::ClaimSol => Some(MinerAction::ClaimOre),
                     MinerAction::ClaimOre => None, // Move to next miner
                 };
@@ -168,31 +206,35 @@ impl ManageApp {
                 match next_action {
                     Some(a) => Some(Selection::Action(*i, a)),
                     None => {
-                        // Move to next miner
+                        // Move to next miner's signer
                         let next_i = (*i + 1) % self.all_miners.len();
-                        Some(Selection::Miner(next_i))
+                        Some(Selection::Signer(next_i))
                     }
                 }
             }
         };
         
         // Ensure selected miner is visible
-        if let Some(Selection::Miner(i)) | Some(Selection::Action(i, _)) = &self.selection {
-            if *i >= self.scroll_offset + self.visible_miners() {
+        if let Some(i) = self.get_selection_miner_index() {
+            if i >= self.scroll_offset + self.visible_miners() {
                 self.scroll_offset = i.saturating_sub(self.visible_miners() - 1);
             }
         }
     }
     
     /// Select previous item
+    /// Navigation order per miner (reverse): ClaimOre -> ClaimSol -> Checkpoint (if not legacy) -> Auth -> Signer -> prev miner
     pub fn select_prev(&mut self) {
         if self.all_miners.is_empty() {
             return;
         }
         
         self.selection = match &self.selection {
-            None => Some(Selection::Miner(self.all_miners.len() - 1)),
-            Some(Selection::Miner(i)) => {
+            None => {
+                // Start at last miner's last action
+                Some(Selection::Action(self.all_miners.len() - 1, MinerAction::ClaimOre))
+            }
+            Some(Selection::Signer(i)) => {
                 if *i == 0 {
                     // Wrap to last miner's last action
                     Some(Selection::Action(self.all_miners.len() - 1, MinerAction::ClaimOre))
@@ -201,14 +243,16 @@ impl ManageApp {
                     Some(Selection::Action(i - 1, MinerAction::ClaimOre))
                 }
             }
+            Some(Selection::Auth(i)) => {
+                Some(Selection::Signer(*i))
+            }
             Some(Selection::Action(i, action)) => {
                 let miner = &self.all_miners[*i];
-                let prev_action = match action {
-                    MinerAction::Checkpoint => None, // Move to miner header
+                let prev = match action {
+                    MinerAction::Checkpoint => None, // Move to Auth
                     MinerAction::ClaimSol => {
-                        // Skip checkpoint for legacy miners
                         if miner.is_legacy {
-                            None // Move to miner header
+                            None // Move to Auth (skip checkpoint)
                         } else {
                             Some(MinerAction::Checkpoint)
                         }
@@ -216,17 +260,17 @@ impl ManageApp {
                     MinerAction::ClaimOre => Some(MinerAction::ClaimSol),
                 };
                 
-                match prev_action {
+                match prev {
                     Some(a) => Some(Selection::Action(*i, a)),
-                    None => Some(Selection::Miner(*i)),
+                    None => Some(Selection::Auth(*i)),
                 }
             }
         };
         
         // Ensure selected miner is visible
-        if let Some(Selection::Miner(i)) | Some(Selection::Action(i, _)) = &self.selection {
-            if *i < self.scroll_offset {
-                self.scroll_offset = *i;
+        if let Some(i) = self.get_selection_miner_index() {
+            if i < self.scroll_offset {
+                self.scroll_offset = i;
             }
         }
     }
@@ -394,12 +438,17 @@ fn draw_miner_list(frame: &mut Frame, area: Rect, app: &ManageApp) {
         .skip(app.scroll_offset)
         .take(inner.height as usize)
         .map(|(i, miner)| {
-            let is_miner_selected = app.selection == Some(Selection::Miner(i));
+            let is_signer_selected = app.selection == Some(Selection::Signer(i));
+            let is_auth_selected = app.selection == Some(Selection::Auth(i));
+            let is_any_on_this_row = is_signer_selected || is_auth_selected 
+                || app.selection == Some(Selection::Action(i, MinerAction::Checkpoint))
+                || app.selection == Some(Selection::Action(i, MinerAction::ClaimSol))
+                || app.selection == Some(Selection::Action(i, MinerAction::ClaimOre));
             
             let mut spans = Vec::new();
             
             // Selection indicator
-            if is_miner_selected {
+            if is_any_on_this_row {
                 spans.push(Span::styled("► ", Style::default().fg(Color::White).bold()));
             } else {
                 spans.push(Span::styled("  ", Style::default()));
@@ -414,16 +463,26 @@ fn draw_miner_list(frame: &mut Frame, area: Rect, app: &ManageApp) {
                 spans.push(Span::styled("📦 ", Style::default().fg(Color::Cyan)));
             }
             
-            // Signer pubkey
+            // Signer pubkey (selectable)
+            let signer_style = if is_signer_selected {
+                Style::default().fg(Color::White).bold().on_blue()
+            } else {
+                Style::default().fg(Color::Gray)
+            };
             spans.push(Span::styled(
                 format!("Signer:{} ", shorten_pubkey(&miner.signer)),
-                if is_miner_selected { Style::default().fg(Color::White).bold() } else { Style::default().fg(Color::Gray) }
+                signer_style
             ));
             
-            // Auth PDA (the evore authority)
+            // Auth PDA (selectable)
+            let auth_style = if is_auth_selected {
+                Style::default().fg(Color::White).bold().on_blue()
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
             spans.push(Span::styled(
                 format!("Auth:{} ", shorten_pubkey(&miner.authority_pda)),
-                Style::default().fg(Color::Cyan)
+                auth_style
             ));
             
             // Auth PDA SOL balance
@@ -512,10 +571,27 @@ fn draw_miner_list(frame: &mut Frame, area: Rect, app: &ManageApp) {
 
 /// Draw footer with help
 fn draw_footer(frame: &mut Frame, area: Rect, app: &ManageApp) {
+    // Skip preflight status indicator
+    let preflight_style = if app.skip_preflight {
+        Style::default().fg(Color::Green).bold()
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let preflight_text = if app.skip_preflight { "[S]kip Preflight: ON " } else { "[S]kip Preflight: OFF " };
+    
+    // Operation in progress indicator
+    let busy_indicator = if app.operation_in_progress {
+        Span::styled("⏳ ", Style::default().fg(Color::Yellow))
+    } else {
+        Span::styled("", Style::default())
+    };
+    
     let help_spans = vec![
+        busy_indicator,
         Span::styled(" [↑↓/jk] Navigate ", Style::default().fg(Color::DarkGray)),
-        Span::styled("[Enter] Execute ", Style::default().fg(Color::Cyan)),
+        Span::styled("[Enter] Execute/Copy ", Style::default().fg(Color::Cyan)),
         Span::styled("[R] Refresh ", Style::default().fg(Color::Yellow)),
+        Span::styled(preflight_text, preflight_style),
         Span::styled("[Q] Quit ", Style::default().fg(Color::Red)),
     ];
     
@@ -534,6 +610,8 @@ pub enum InputResult {
     Quit,
     ExecuteAction(usize, MinerAction),
     Refresh,
+    CopyPubkey(Pubkey),
+    ToggleSkipPreflight,
 }
 
 /// Handle keyboard input
@@ -563,15 +641,24 @@ pub fn handle_input(app: &mut ManageApp) -> io::Result<InputResult> {
                             app.scroll_down();
                         }
                     }
-                    // Execute action
+                    // Execute action or copy pubkey
                     KeyCode::Enter => {
+                        // If an action is selected, execute it
                         if let Some((miner_idx, action)) = app.get_selected_action() {
                             return Ok(InputResult::ExecuteAction(miner_idx, action));
+                        }
+                        // If a pubkey is selected, copy it to clipboard
+                        if let Some(pubkey) = app.get_selected_pubkey() {
+                            return Ok(InputResult::CopyPubkey(pubkey));
                         }
                     }
                     // Refresh
                     KeyCode::Char('r') | KeyCode::Char('R') => {
                         return Ok(InputResult::Refresh);
+                    }
+                    // Toggle skip preflight
+                    KeyCode::Char('s') | KeyCode::Char('S') => {
+                        return Ok(InputResult::ToggleSkipPreflight);
                     }
                     _ => {}
                 }
@@ -579,12 +666,91 @@ pub fn handle_input(app: &mut ManageApp) -> io::Result<InputResult> {
         }
     }
     
-    // Clear status message after 3 seconds
-    if let Some((_, instant, _)) = &app.status_msg {
-        if instant.elapsed() > Duration::from_secs(3) {
+    // Clear status message after 5 seconds (longer for error messages)
+    if let Some((_, instant, is_error)) = &app.status_msg {
+        let timeout = if *is_error { Duration::from_secs(8) } else { Duration::from_secs(3) };
+        if instant.elapsed() > timeout {
             app.status_msg = None;
         }
     }
     
     Ok(InputResult::Continue)
+}
+
+/// Copy pubkey to clipboard and show status
+pub fn copy_to_clipboard(app: &mut ManageApp, pubkey: &Pubkey) {
+    let pubkey_str = pubkey.to_string();
+    match cli_clipboard::set_contents(pubkey_str.clone()) {
+        Ok(_) => {
+            app.set_status(format!("Copied: {}", shorten_pubkey(pubkey)), false);
+        }
+        Err(e) => {
+            app.set_status(format!("Copy failed: {}", e), true);
+        }
+    }
+}
+
+/// Parse RPC error to extract meaningful error message
+pub fn format_rpc_error(error: &str) -> String {
+    // Try to extract custom program error
+    if let Some(idx) = error.find("Custom(") {
+        if let Some(end_idx) = error[idx..].find(')') {
+            let custom_code = &error[idx+7..idx+end_idx];
+            return format!("Program error: Custom({})", custom_code);
+        }
+    }
+    
+    // Try to extract instruction error
+    if error.contains("InstructionError") {
+        if let Some(start) = error.find("InstructionError") {
+            // Find closing bracket or end
+            let snippet = &error[start..];
+            let end = snippet.find(']').unwrap_or(snippet.len().min(80));
+            return format!("Instruction error: {}", &snippet[..end]);
+        }
+    }
+    
+    // Try to extract simulation failed message
+    if error.contains("Transaction simulation failed") {
+        if let Some(start) = error.find("Transaction simulation failed") {
+            let snippet = &error[start..];
+            // Try to find the actual error within
+            if snippet.contains("custom program error:") {
+                if let Some(err_start) = snippet.find("custom program error:") {
+                    let err_part = &snippet[err_start..];
+                    let end = err_part.find('\n').unwrap_or(err_part.len().min(50));
+                    return format!("Simulation failed: {}", &err_part[..end]);
+                }
+            }
+            let end = snippet.find('\n').unwrap_or(snippet.len().min(100));
+            return format!("{}", &snippet[..end]);
+        }
+    }
+    
+    // Try to extract preflight check message  
+    if error.contains("Preflight check failed") {
+        return "Preflight failed - try toggling [S]kip Preflight".to_string();
+    }
+    
+    // Try to extract blockhash not found
+    if error.contains("BlockhashNotFound") {
+        return "Blockhash expired - try again".to_string();
+    }
+    
+    // Try to extract insufficient funds
+    if error.contains("insufficient funds") || error.contains("InsufficientFunds") {
+        return "Insufficient funds for transaction".to_string();
+    }
+    
+    // Account not found
+    if error.contains("AccountNotFound") {
+        return "Account not found on chain".to_string();
+    }
+    
+    // Default: truncate long errors
+    if error.len() > 80 {
+        format!("{}...", &error[..77])
+    } else {
+        error.to_string()
+    }
 }

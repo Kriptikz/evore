@@ -209,6 +209,100 @@ pub fn build_claim_ore_tx(
     tx
 }
 
+/// Build claim SOL transaction with custom program ID (for legacy programs)
+pub fn build_claim_sol_tx_with_program(
+    signer: &Keypair,
+    manager: &Pubkey,
+    auth_id: u64,
+    program_id: &Pubkey,
+    recent_blockhash: Hash,
+) -> Transaction {
+    use solana_sdk::instruction::{AccountMeta, Instruction};
+    use evore::ore_api::miner_pda;
+    
+    // Derive PDAs with the specified program ID
+    let (managed_miner_auth_address, bump) = Pubkey::find_program_address(
+        &[b"managed-miner-auth", manager.as_ref(), &auth_id.to_le_bytes()],
+        program_id,
+    );
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
+
+    // Build instruction data (same format as evore::instruction::MMClaimSOL)
+    let mut data = vec![3u8]; // MMClaimSOL discriminator
+    data.extend_from_slice(&auth_id.to_le_bytes());
+    data.push(bump);
+
+    let claim_ix = Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(signer.pubkey(), true),
+            AccountMeta::new(*manager, false),
+            AccountMeta::new(managed_miner_auth_address, false),
+            AccountMeta::new(ore_miner_address.0, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(evore::ore_api::id(), false),
+        ],
+        data,
+    };
+
+    let mut tx = Transaction::new_with_payer(&[claim_ix], Some(&signer.pubkey()));
+    tx.sign(&[signer], recent_blockhash);
+    tx
+}
+
+/// Build a claim ORE transaction with custom program ID (for legacy programs)
+pub fn build_claim_ore_tx_with_program(
+    signer: &Keypair,
+    manager: &Pubkey,
+    auth_id: u64,
+    program_id: &Pubkey,
+    recent_blockhash: Hash,
+) -> Transaction {
+    use solana_sdk::instruction::{AccountMeta, Instruction};
+    use spl_associated_token_account::get_associated_token_address;
+    use evore::ore_api::{miner_pda, treasury_pda, MINT_ADDRESS};
+    
+    // Derive PDAs with the specified program ID
+    let (managed_miner_auth_address, bump) = Pubkey::find_program_address(
+        &[b"managed-miner-auth", manager.as_ref(), &auth_id.to_le_bytes()],
+        program_id,
+    );
+    let ore_miner_address = miner_pda(managed_miner_auth_address);
+    let treasury_address = treasury_pda().0;
+    let treasury_tokens_address = get_associated_token_address(&treasury_address, &MINT_ADDRESS);
+    let recipient_address = get_associated_token_address(&managed_miner_auth_address, &MINT_ADDRESS);
+    let signer_recipient_address = get_associated_token_address(&signer.pubkey(), &MINT_ADDRESS);
+
+    // Build instruction data (same format as evore::instruction::MMClaimORE)
+    let mut data = vec![4u8]; // MMClaimORE discriminator
+    data.extend_from_slice(&auth_id.to_le_bytes());
+    data.push(bump);
+
+    let claim_ix = Instruction {
+        program_id: *program_id,
+        accounts: vec![
+            AccountMeta::new(signer.pubkey(), true),
+            AccountMeta::new(*manager, false),
+            AccountMeta::new(managed_miner_auth_address, false),
+            AccountMeta::new(ore_miner_address.0, false),
+            AccountMeta::new(MINT_ADDRESS, false),
+            AccountMeta::new(recipient_address, false),
+            AccountMeta::new(signer_recipient_address, false),
+            AccountMeta::new(treasury_address, false),
+            AccountMeta::new(treasury_tokens_address, false),
+            AccountMeta::new_readonly(solana_sdk::system_program::id(), false),
+            AccountMeta::new_readonly(spl_token::id(), false),
+            AccountMeta::new_readonly(spl_associated_token_account::id(), false),
+            AccountMeta::new_readonly(evore::ore_api::id(), false),
+        ],
+        data,
+    };
+
+    let mut tx = Transaction::new_with_payer(&[claim_ix], Some(&signer.pubkey()));
+    tx.sign(&[signer], recent_blockhash);
+    tx
+}
+
 /// Single deployment using websocket slot tracking
 /// Sends transactions every 100ms until slot changes past end_slot
 pub async fn single_deploy(
