@@ -461,6 +461,8 @@ pub struct CreateDeployer {
     pub bps_fee: [u8; 8],
     /// Flat fee in lamports (added on top of bps_fee)
     pub flat_fee: [u8; 8],
+    /// Maximum lamports to deploy per round (0 = unlimited)
+    pub max_per_round: [u8; 8],
 }
 
 instruction!(Instructions, CreateDeployer);
@@ -470,12 +472,14 @@ instruction!(Instructions, CreateDeployer);
 /// deploy_authority is the key that will be allowed to execute autodeploys
 /// bps_fee: Percentage fee in basis points (1000 = 10%)
 /// flat_fee: Flat fee in lamports (added on top of bps_fee)
+/// max_per_round: Maximum lamports to deploy per round (0 = unlimited)
 pub fn create_deployer(
     signer: Pubkey,
     manager: Pubkey,
     deploy_authority: Pubkey,
     bps_fee: u64,
     flat_fee: u64,
+    max_per_round: u64,
 ) -> Instruction {
     let (deployer_address, _bump) = deployer_pda(manager);
 
@@ -491,13 +495,14 @@ pub fn create_deployer(
         data: CreateDeployer {
             bps_fee: bps_fee.to_le_bytes(),
             flat_fee: flat_fee.to_le_bytes(),
+            max_per_round: max_per_round.to_le_bytes(),
         }.to_bytes(),
     }
 }
 
 /// UpdateDeployer instruction data
 /// Updates deployer configuration
-/// - Manager authority: can update deploy_authority, bps_fee, flat_fee
+/// - Manager authority: can update deploy_authority, bps_fee, flat_fee, max_per_round
 /// - Deploy authority: can update expected_bps_fee, expected_flat_fee
 /// Pass current values for fields you don't want to change
 #[repr(C)]
@@ -511,12 +516,14 @@ pub struct UpdateDeployer {
     pub expected_bps_fee: [u8; 8],
     /// Expected flat_fee set by deploy_authority (0 = accept any)
     pub expected_flat_fee: [u8; 8],
+    /// Maximum lamports to deploy per round (0 = unlimited) - manager only
+    pub max_per_round: [u8; 8],
 }
 
 instruction!(Instructions, UpdateDeployer);
 
 /// Update deployer configuration
-/// - Manager authority: can update deploy_authority, bps_fee, flat_fee
+/// - Manager authority: can update deploy_authority, bps_fee, flat_fee, max_per_round
 /// - Deploy authority: can update expected_bps_fee, expected_flat_fee
 /// Pass current values for fields you don't want to change
 pub fn update_deployer(
@@ -527,6 +534,7 @@ pub fn update_deployer(
     new_flat_fee: u64,
     new_expected_bps_fee: u64,
     new_expected_flat_fee: u64,
+    new_max_per_round: u64,
 ) -> Instruction {
     let (deployer_address, _bump) = deployer_pda(manager);
 
@@ -544,6 +552,7 @@ pub fn update_deployer(
             flat_fee: new_flat_fee.to_le_bytes(),
             expected_bps_fee: new_expected_bps_fee.to_le_bytes(),
             expected_flat_fee: new_expected_flat_fee.to_le_bytes(),
+            max_per_round: new_max_per_round.to_le_bytes(),
         }.to_bytes(),
     }
 }

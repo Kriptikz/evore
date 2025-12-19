@@ -98,6 +98,10 @@ pub enum EvoreError {
     /// The account is already initialized
     #[error("Already initialized: account already exists")]
     AlreadyInitialized = 18,
+    
+    /// Deployment amount exceeds max_per_round limit
+    #[error("Exceeds max per round: total deployed would exceed max_per_round limit")]
+    ExceedsMaxPerRound = 19,
 }
 
 error!(EvoreError);

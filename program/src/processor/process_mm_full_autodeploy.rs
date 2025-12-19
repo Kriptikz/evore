@@ -96,6 +96,7 @@ pub fn process_mm_full_autodeploy(
     let flat_fee = deployer.flat_fee;
     let expected_bps_fee = deployer.expected_bps_fee;
     let expected_flat_fee = deployer.expected_flat_fee;
+    let max_per_round = deployer.max_per_round;
 
     // Verify signer is the deploy_authority
     if deploy_authority != *signer.key {
@@ -222,14 +223,35 @@ pub fn process_mm_full_autodeploy(
         return Err(EvoreError::NoDeployments.into());
     }
 
-    let total_deployed = amount.saturating_mul(num_squares);
-    if total_deployed == 0 {
+    let total_to_deploy = amount.saturating_mul(num_squares);
+    if total_to_deploy == 0 {
         return Err(EvoreError::NoDeployments.into());
+    }
+
+    // Check max_per_round limit (includes already deployed amount for this round)
+    if max_per_round > 0 {
+        // Get already deployed amount for this round (if miner exists and is in current round)
+        let already_deployed = if !ore_miner_account_info.data_is_empty() {
+            let miner = ore_miner_account_info.as_account::<Miner>(&ore_api::id())?;
+            if miner.round_id == board.round_id {
+                // Sum all deployed amounts for current round
+                miner.deployed.iter().sum::<u64>()
+            } else {
+                0
+            }
+        } else {
+            0
+        };
+
+        let total_for_round = already_deployed.saturating_add(total_to_deploy);
+        if total_for_round > max_per_round {
+            return Err(EvoreError::ExceedsMaxPerRound.into());
+        }
     }
 
     // Calculate fees
     let bps_fee_amount = if bps_fee > 0 {
-        total_deployed.saturating_mul(bps_fee).saturating_div(10_000)
+        total_to_deploy.saturating_mul(bps_fee).saturating_div(10_000)
     } else {
         0
     };
@@ -247,7 +269,7 @@ pub fn process_mm_full_autodeploy(
 
     let required_balance = AUTH_PDA_RENT
         .saturating_add(ore_api::CHECKPOINT_FEE)
-        .saturating_add(total_deployed)
+        .saturating_add(total_to_deploy)
         .saturating_add(miner_rent)
         .saturating_add(deployer_fee)
         .saturating_add(protocol_fee);

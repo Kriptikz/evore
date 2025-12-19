@@ -2935,6 +2935,7 @@ pub fn add_deployer_account(
         flat_fee,
         expected_bps_fee,
         expected_flat_fee,
+        max_per_round: 1000000000
     };
     
     let mut data = Vec::new();
@@ -2993,7 +2994,7 @@ mod mm_autodeploy_fee_tests {
         // Verify deployer account
         let deployer_account = context.banks_client.get_account(deployer_pda_addr).await.unwrap().unwrap();
         assert_eq!(deployer_account.owner, evore::id());
-        assert_eq!(deployer_account.data.len(), 104); // 8 discriminator + 96 deployer data
+        assert_eq!(deployer_account.data.len(), 112); // 8 discriminator + 96 deployer data
         
         // Verify we can deserialize it
         // Note: steel's try_from_bytes expects the discriminator to be included

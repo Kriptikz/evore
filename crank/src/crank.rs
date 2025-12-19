@@ -145,8 +145,8 @@ impl Crank {
         
         let mut deployers = Vec::new();
         
-        // Deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee + 8 flat_fee + 8 expected_bps_fee + 8 expected_flat_fee = 104
-        const DEPLOYER_SIZE: usize = 104;
+        // Deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee + 8 flat_fee + 8 expected_bps_fee + 8 expected_flat_fee + 8 max_per_round = 112
+        const DEPLOYER_SIZE: usize = 112;
         
         for (deployer_address, account) in accounts {
             let data_len = account.data.len();
@@ -162,11 +162,12 @@ impl Crank {
                             manager_address,
                             bps_fee: deployer.bps_fee,
                             flat_fee: deployer.flat_fee,
+                            max_per_round: deployer.max_per_round,
                         });
                         
                         info!(
-                            "Found deployer: {} for manager: {} (fee: {})",
-                            deployer_address, manager_address, fee_str
+                            "Found deployer: {} for manager: {} (fee: {}, max_per_round: {})",
+                            deployer_address, manager_address, fee_str, deployer.max_per_round
                         );
                     }
                     Err(e) => {
@@ -189,14 +190,13 @@ impl Crank {
         Ok(deployers)
     }
     
-    /// Check all Evore program accounts for legacy V1 deployers or unexpected sizes
+    /// Check all Evore program accounts
     pub fn check_all_accounts(&self) -> Result<(), CrankError> {
         info!("Loading all accounts for Evore program {}...", evore::id());
         
         // Account sizes
-        const MANAGER_SIZE: usize = 40;      // 8 discriminator + 32 authority
-        const DEPLOYER_V1_SIZE: usize = 88;  // 8 + 32 + 32 + 8 + 8 (old format)
-        const DEPLOYER_V2_SIZE: usize = 104; // 8 + 32 + 32 + 8 + 8 + 8 + 8 (current)
+        const MANAGER_SIZE: usize = 40;     // 8 discriminator + 32 authority
+        const DEPLOYER_SIZE: usize = 112;   // 8 + 32 + 32 + 8 + 8 + 8 + 8 + 8 (with max_per_round)
         
         // Discriminators
         const MANAGER_DISCRIMINATOR: u8 = 100;
@@ -209,8 +209,7 @@ impl Crank {
         info!("Found {} total accounts", accounts.len());
         
         let mut managers = Vec::new();
-        let mut deployers_v2 = Vec::new();
-        let mut deployers_v1 = Vec::new();
+        let mut deployers = Vec::new();
         let mut unknown = Vec::new();
         
         for (address, account) in &accounts {
@@ -224,11 +223,8 @@ impl Crank {
                 (d, s) if d == MANAGER_DISCRIMINATOR && s == MANAGER_SIZE => {
                     managers.push(*address);
                 }
-                (d, s) if d == DEPLOYER_DISCRIMINATOR && s == DEPLOYER_V2_SIZE => {
-                    deployers_v2.push(*address);
-                }
-                (d, s) if d == DEPLOYER_DISCRIMINATOR && s == DEPLOYER_V1_SIZE => {
-                    deployers_v1.push(*address);
+                (d, s) if d == DEPLOYER_DISCRIMINATOR && s == DEPLOYER_SIZE => {
+                    deployers.push(*address);
                 }
                 _ => {
                     unknown.push((*address, discriminator, size));
@@ -239,19 +235,7 @@ impl Crank {
         // Print summary
         info!("\n=== Evore Program Account Summary ===");
         info!("Manager accounts (40 bytes): {}", managers.len());
-        info!("Deployer V2 accounts (104 bytes): {}", deployers_v2.len());
-        info!("Deployer V1 accounts (88 bytes): {} {}", 
-            deployers_v1.len(),
-            if deployers_v1.is_empty() { "✓" } else { "⚠ NEEDS MIGRATION" }
-        );
-        
-        if !deployers_v1.is_empty() {
-            warn!("\n⚠ Found {} legacy V1 deployer accounts that need migration:", deployers_v1.len());
-            for addr in &deployers_v1 {
-                warn!("  - {}", addr);
-            }
-            warn!("\nTo migrate, call update_deployer on each account.");
-        }
+        info!("Deployer accounts (112 bytes): {}", deployers.len());
         
         if !unknown.is_empty() {
             warn!("\n⚠ Found {} unknown/unexpected accounts:", unknown.len());
@@ -260,7 +244,7 @@ impl Crank {
             }
         }
         
-        if deployers_v1.is_empty() && unknown.is_empty() {
+        if unknown.is_empty() {
             info!("\n✓ All accounts are in expected format!");
         }
         
@@ -981,6 +965,7 @@ impl Crank {
             deployer.flat_fee,  // Keep current flat_fee
             expected_bps_fee,
             expected_flat_fee,
+            deployer.max_per_round,  // Keep current max_per_round
         );
         
         let recent_blockhash = self.rpc_client.get_latest_blockhash()

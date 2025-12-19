@@ -17,6 +17,7 @@ pub fn process_create_deployer(
     let args = CreateDeployer::try_from_bytes(instruction_data)?;
     let bps_fee = u64::from_le_bytes(args.bps_fee);
     let flat_fee = u64::from_le_bytes(args.flat_fee);
+    let max_per_round = u64::from_le_bytes(args.max_per_round);
 
     let [
         signer,
@@ -92,6 +93,7 @@ pub fn process_create_deployer(
         flat_fee,
         expected_bps_fee: bps_fee,
         expected_flat_fee: flat_fee,
+        max_per_round,
     };
 
     // Write discriminator and data

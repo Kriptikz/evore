@@ -27,7 +27,7 @@ account!(EvoreAccount, Manager);
 /// 
 /// expected_bps_fee and expected_flat_fee provide deploy_authority protection.
 /// If expected fee > 0, the actual fee must match for the deploy to succeed.
-/// Size: 32 + 32 + 8 + 8 + 8 + 8 = 96 bytes (+ 8 discriminator = 104)
+/// Size: 32 + 32 + 8 + 8 + 8 + 8 + 8 = 104 bytes (+ 8 discriminator = 112)
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct Deployer {
@@ -43,6 +43,8 @@ pub struct Deployer {
     pub expected_bps_fee: u64,
     /// Expected flat_fee set by deploy_authority (0 = accept any, >0 = must match flat_fee)
     pub expected_flat_fee: u64,
+    /// Maximum lamports to deploy per round (0 = unlimited)
+    pub max_per_round: u64,
 }
 
 account!(EvoreAccount, Deployer);

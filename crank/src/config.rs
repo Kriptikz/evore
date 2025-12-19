@@ -70,7 +70,7 @@ pub enum Command {
     DeactivateUnused,
     /// Show deactivating LUTs status and close any that are ready
     CleanupDeactivated,
-    /// Check all Evore program accounts for legacy V1 deployers
+    /// Check all Evore program accounts
     CheckAccounts,
 }
 
@@ -94,4 +94,6 @@ pub struct DeployerInfo {
     pub bps_fee: u64,
     /// Flat fee in lamports (added on top of bps_fee)
     pub flat_fee: u64,
+    /// Maximum lamports to deploy per round (0 = unlimited)
+    pub max_per_round: u64,
 }
