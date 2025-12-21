@@ -75,6 +75,9 @@ pub fn process_instruction(
         Instructions::MMFullAutodeploy => {
             process_mm_full_autodeploy::process_mm_full_autodeploy(accounts, data)?;
         }
+        Instructions::TransferManager => {
+            process_transfer_manager::process_transfer_manager(accounts, data)?;
+        }
     }
 
     Ok(())

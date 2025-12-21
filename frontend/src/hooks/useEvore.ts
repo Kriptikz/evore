@@ -7,6 +7,7 @@ import { getDeployerPda, getManagedMinerAuthPda, getOreMinerPda, getOreBoardPda 
 import { Manager, Deployer, decodeManager, decodeDeployer } from "@/lib/accounts";
 import {
   createManagerInstruction,
+  transferManagerInstruction,
   createDeployerInstruction,
   updateDeployerInstruction,
   depositAutodeployBalanceInstruction,
@@ -539,6 +540,28 @@ export function useEvore() {
     return signature;
   }, [connection, publicKey, sendTransaction, fetchMiners]);
 
+  // Transfer manager authority to a new pubkey
+  const transferManager = useCallback(async (
+    managerAccount: PublicKey,
+    newAuthority: PublicKey
+  ) => {
+    if (!publicKey) throw new Error("Wallet not connected");
+
+    const ix = transferManagerInstruction(publicKey, managerAccount, newAuthority);
+    const tx = new Transaction().add(ix);
+    
+    const { blockhash } = await connection.getLatestBlockhash();
+    tx.recentBlockhash = blockhash;
+    tx.feePayer = publicKey;
+
+    const signature = await sendTransaction(tx, connection);
+    await connection.confirmTransaction(signature, "confirmed");
+    
+    // Refresh managers to remove transferred one from list
+    await fetchManagers();
+    return signature;
+  }, [connection, publicKey, sendTransaction, fetchManagers]);
+
   // Refresh all data
   const refreshAll = useCallback(async () => {
     await fetchManagers();
@@ -606,5 +629,6 @@ export function useEvore() {
     checkpoint,
     claimSol,
     claimOre,
+    transferManager,
   };
 }

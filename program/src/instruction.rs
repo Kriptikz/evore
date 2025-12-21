@@ -19,6 +19,7 @@ pub enum Instructions {
     WithdrawAutodeployBalance = 10,
     MMAutocheckpoint = 11,
     MMFullAutodeploy = 12,
+    TransferManager = 13,
 }
 
 /// Deployment strategy enum with associated data
@@ -76,6 +77,26 @@ pub fn create_manager(signer: Pubkey, manager: Pubkey) -> Instruction {
             AccountMeta::new_readonly(system_program::id(), false),
         ],
         data: CreateManager {}.to_bytes(),
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct TransferManager {}
+
+instruction!(Instructions, TransferManager);
+
+/// Transfer manager authority to a new pubkey.
+/// Note: This transfers all associated mining accounts (deployer, miner, etc.)
+pub fn transfer_manager(signer: Pubkey, manager: Pubkey, new_authority: Pubkey) -> Instruction {
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(manager, false),
+            AccountMeta::new_readonly(new_authority, false),
+        ],
+        data: TransferManager {}.to_bytes(),
     }
 }
 

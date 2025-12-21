@@ -134,6 +134,12 @@ The executor **CANNOT**:
 - This protects executors from users changing fees mid-flight
 - Using account fields instead of instruction args reduces transaction size
 
+### Transferring Manager Authority
+- Use `transferManagerInstruction` to transfer manager authority to a new public key
+- **Important**: This transfers all associated mining accounts (deployer, miner, automation, etc.)
+- The new authority gains full control over claims, withdrawals, and fee settings
+- This operation is irreversible without the new authority's cooperation
+
 ## Quick Start
 
 ### For Users

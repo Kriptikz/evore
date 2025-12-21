@@ -25,6 +25,7 @@ export default function Home() {
     withdrawAll,
     checkpoint,
     claimOre,
+    transferManager,
   } = useEvore();
 
   const [creating, setCreating] = useState(false);
@@ -247,6 +248,7 @@ export default function Home() {
                       }
                       onCheckpoint={(roundId) => checkpoint(manager.address, roundId)}
                       onClaimOre={() => claimOre(manager.address)}
+                      onTransfer={(newAuthority) => transferManager(manager.address, newAuthority)}
                     />
                   );
                 })}

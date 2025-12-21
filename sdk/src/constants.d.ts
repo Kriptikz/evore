@@ -47,6 +47,8 @@ export declare const EvoreInstruction: {
   RecycleSol: number;
   WithdrawAutodeployBalance: number;
   MMAutocheckpoint: number;
+  MMFullAutodeploy: number;
+  TransferManager: number;
 };
 
 // Helpers

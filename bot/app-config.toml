@@ -25,9 +25,9 @@ name = "PERC"
 auth_id = 4
 strategy = "percentage"
 slots_left = 6
-bankroll = 5_000_000
+bankroll = 5_000_000_000
 attempts = 1
-priority_fee = 4_000
+priority_fee = 4000
 jito_tip = 200_000
 paused_on_startup = false
 signer_path = "/Users/kriptikz/Development/game-wallets/perc-bot.json"
@@ -35,7 +35,7 @@ manager_path = "/Users/kriptikz/Development/game-wallets/perc-bot-manager.json"
 
 [bots.strategy_params]
 type = "percentage"
-percentage = 5000
+percentage = 3300
 squares_count = 25
 
 [[bots]]
@@ -61,7 +61,7 @@ name = "EV SOL END"
 auth_id = 2
 strategy = "ev"
 slots_left = 2
-bankroll = 150_000_000
+bankroll = 1_000_000_000
 attempts = 2
 priority_fee = 5_000
 jito_tip = 200_000

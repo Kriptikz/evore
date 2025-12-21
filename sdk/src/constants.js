@@ -99,6 +99,7 @@ const EvoreInstruction = {
   WithdrawAutodeployBalance: 10,
   MMAutocheckpoint: 11,
   MMFullAutodeploy: 12,
+  TransferManager: 13,
 };
 
 // =============================================================================

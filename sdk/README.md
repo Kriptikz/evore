@@ -58,6 +58,23 @@ The executor **CANNOT**:
 - **Best practice**: Create a new Manager for each miner for maximum modularity
 - The `authId` parameter defaults to `0` and should stay `0` unless you have a specific reason to create multiple miners under the same Manager (note: all miners under a Manager transfer together if authority changes)
 
+### Transferring Manager Authority
+
+Use `transferManagerInstruction` to transfer manager authority to a new public key.
+
+**Important**: Transferring manager authority transfers **all** associated mining accounts (deployer, miner, automation, etc.) since they are derived from the manager. The new authority will have full control over claims, withdrawals, and fee settings.
+
+```javascript
+const { transferManagerInstruction } = require("evore-sdk");
+
+// Transfer manager to new authority
+const ix = transferManagerInstruction(
+  currentAuthority,  // Current owner (must sign)
+  managerAccount,    // The manager account
+  newAuthority       // New owner pubkey
+);
+```
+
 ## Installation
 
 ```bash

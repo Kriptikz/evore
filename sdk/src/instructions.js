@@ -50,6 +50,29 @@ function createManagerInstruction(signer, managerAccount) {
   });
 }
 
+/**
+ * Creates a TransferManager instruction
+ * Transfers manager authority to a new public key.
+ * Note: This transfers all associated mining accounts (deployer, miner, automation, etc.)
+ * @param {PublicKey} signer - Current manager authority
+ * @param {PublicKey} manager - The manager account to transfer
+ * @param {PublicKey} newAuthority - The new authority public key
+ * @returns {TransactionInstruction}
+ */
+function transferManagerInstruction(signer, manager, newAuthority) {
+  const data = Buffer.from([EvoreInstruction.TransferManager]);
+
+  return new TransactionInstruction({
+    programId: EVORE_PROGRAM_ID,
+    keys: [
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: manager, isSigner: false, isWritable: true },
+      { pubkey: newAuthority, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+}
+
 // =============================================================================
 // Deploy Instructions (Manager Authority Required)
 // =============================================================================
@@ -767,32 +790,33 @@ function maskToSquares(mask) {
 module.exports = {
   // Manager
   createManagerInstruction,
-  
+  transferManagerInstruction,
+
   // Deploy (manager authority)
   evDeployInstruction,
   percentageDeployInstruction,
   manualDeployInstruction,
   splitDeployInstruction,
-  
+
   // Checkpoint & Claim (manager authority)
   mmCheckpointInstruction,
   mmClaimSolInstruction,
   mmClaimOreInstruction,
-  
+
   // Deployer (manager authority)
   createDeployerInstruction,
   updateDeployerInstruction,
-  
+
   // Autodeploy Balance (manager authority)
   depositAutodeployBalanceInstruction,
   withdrawAutodeployBalanceInstruction,
-  
+
   // Autodeploy (deploy authority - for executors)
   mmAutodeployInstruction,
   mmAutocheckpointInstruction,
   recycleSolInstruction,
   mmFullAutodeployInstruction,
-  
+
   // Helpers
   squaresToMask,
   maskToSquares,

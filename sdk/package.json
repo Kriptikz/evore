@@ -1,6 +1,6 @@
 {
   "name": "evore-sdk",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "description": "JavaScript SDK for the Evore automining program - the cheapest and most secure managed miner solution on Solana",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",

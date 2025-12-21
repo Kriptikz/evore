@@ -26,6 +26,7 @@ export default function ManagePage() {
     checkpoint,
     claimSol,
     claimOre,
+    transferManager,
   } = useEvore();
 
   const [selectedManagers, setSelectedManagers] = useState<Set<string>>(new Set());
@@ -255,6 +256,9 @@ export default function ManagePage() {
                       }
                       onClaimOre={() =>
                         claimOre(manager.address)
+                      }
+                      onTransfer={(newAuthority) =>
+                        transferManager(manager.address, newAuthority)
                       }
                     />
                   );

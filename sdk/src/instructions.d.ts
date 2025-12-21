@@ -2,6 +2,7 @@ import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
 // Manager
 export declare function createManagerInstruction(signer: PublicKey, managerAccount: PublicKey): TransactionInstruction;
+export declare function transferManagerInstruction(signer: PublicKey, manager: PublicKey, newAuthority: PublicKey): TransactionInstruction;
 
 // Deploy (manager authority)
 export declare function evDeployInstruction(

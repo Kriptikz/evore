@@ -36,6 +36,7 @@ interface AutoMinerCardProps {
   onWithdraw: (authId: bigint, rewardsSol: bigint, autodeployBalance: bigint) => Promise<string>;
   onCheckpoint: (roundId: bigint) => Promise<string>;
   onClaimOre: () => Promise<string>;
+  onTransfer: (newAuthority: PublicKey) => Promise<string>;
 }
 
 // Copy text to clipboard
@@ -81,9 +82,12 @@ export function AutoMinerCard({
   onWithdraw,
   onCheckpoint,
   onClaimOre,
+  onTransfer,
 }: AutoMinerCardProps) {
   const [showDeposit, setShowDeposit] = useState(false);
+  const [showTransfer, setShowTransfer] = useState(false);
   const [depositAmount, setDepositAmount] = useState("");
+  const [transferAddress, setTransferAddress] = useState("");
   const [loading, setLoading] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [showGrid, setShowGrid] = useState(false);
@@ -159,6 +163,22 @@ export function AutoMinerCard({
       setLoading("claimOre");
       setError(null);
       await onClaimOre();
+    } catch (err: any) {
+      setError(err.message);
+    } finally {
+      setLoading(null);
+    }
+  };
+
+  const handleTransfer = async () => {
+    if (!transferAddress) return;
+    try {
+      setLoading("transfer");
+      setError(null);
+      const newAuthority = new PublicKey(transferAddress);
+      await onTransfer(newAuthority);
+      setShowTransfer(false);
+      setTransferAddress("");
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -331,6 +351,13 @@ export function AutoMinerCard({
             {loading === "claimOre" ? "..." : "Claim ORE"}
           </button>
         )}
+        <button
+          onClick={() => setShowTransfer(true)}
+          disabled={loading !== null}
+          className="flex-1 px-3 py-2 bg-zinc-600 hover:bg-zinc-500 rounded text-sm font-medium"
+        >
+          Transfer
+        </button>
       </div>
 
       {/* Deposit Modal */}
@@ -365,6 +392,50 @@ export function AutoMinerCard({
                   disabled={loading !== null}
                 >
                   {loading === "deposit" ? "..." : "Deposit"}
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Transfer Modal */}
+      {showTransfer && (
+        <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">
+          <div className="bg-zinc-900 border border-zinc-700 rounded-lg p-6 max-w-md w-full mx-4">
+            <h3 className="text-lg font-semibold mb-2">Transfer Manager</h3>
+            <p className="text-sm text-zinc-400 mb-4">
+              ⚠️ This will transfer full control of this miner to a new wallet. This action is irreversible.
+            </p>
+            <div className="space-y-4">
+              <div>
+                <label className="block text-sm text-zinc-400 mb-1">New Authority Address</label>
+                <input
+                  type="text"
+                  value={transferAddress}
+                  onChange={(e) => setTransferAddress(e.target.value)}
+                  placeholder="Enter wallet address..."
+                  className="w-full px-3 py-2 bg-zinc-800 border border-zinc-700 rounded text-sm font-mono"
+                />
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={() => {
+                    setShowTransfer(false);
+                    setTransferAddress("");
+                    setError(null);
+                  }}
+                  className="flex-1 px-4 py-2 bg-zinc-700 hover:bg-zinc-600 rounded"
+                  disabled={loading !== null}
+                >
+                  Cancel
+                </button>
+                <button
+                  onClick={handleTransfer}
+                  className="flex-1 px-4 py-2 bg-red-600 hover:bg-red-500 rounded"
+                  disabled={loading !== null || !transferAddress}
+                >
+                  {loading === "transfer" ? "..." : "Transfer"}
                 </button>
               </div>
             </div>
