@@ -100,6 +100,7 @@ const EvoreInstruction = {
   MMAutocheckpoint: 11,
   MMFullAutodeploy: 12,
   TransferManager: 13,
+  MMCreateMiner: 14,
 };
 
 // =============================================================================

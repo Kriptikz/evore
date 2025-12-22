@@ -787,6 +787,52 @@ function maskToSquares(mask) {
   return squares;
 }
 
+// =============================================================================
+// MMCreateMiner Instruction (Manager Authority Required)
+// =============================================================================
+
+/**
+ * Creates an MMCreateMiner instruction
+ * Creates an ORE miner account by CPIing to automate twice (open then close)
+ * @param {PublicKey} signer - Manager authority
+ * @param {PublicKey} manager - Manager account
+ * @param {bigint} authId - Auth ID for the managed miner (default: 0)
+ * @returns {TransactionInstruction}
+ */
+function mmCreateMinerInstruction(signer, manager, authId = 0n) {
+  const [managedMinerAuth, bump] = getManagedMinerAuthPda(manager, authId);
+  const [oreAutomation] = getOreAutomationPda(managedMinerAuth);
+  const [oreMiner] = getOreMinerPda(managedMinerAuth);
+
+  const data = Buffer.alloc(10);
+  data[0] = EvoreInstruction.MMCreateMiner;
+  data.writeBigUInt64LE(authId, 1);
+  data[9] = bump;
+
+  // executor_1 = signer (for first automate CPI - open)
+  // executor_2 = Pubkey::default() (for second automate CPI - close)
+  // Note: executor_2 is readonly to avoid privilege conflicts with system_program
+  // (they're the same pubkey). ORE doesn't actually check executor is writable.
+  const executor1 = signer;
+  const executor2 = PublicKey.default;
+
+  return new TransactionInstruction({
+    programId: EVORE_PROGRAM_ID,
+    keys: [
+      { pubkey: signer, isSigner: true, isWritable: true },
+      { pubkey: manager, isSigner: false, isWritable: true },
+      { pubkey: managedMinerAuth, isSigner: false, isWritable: true },
+      { pubkey: oreAutomation, isSigner: false, isWritable: true },
+      { pubkey: oreMiner, isSigner: false, isWritable: true },
+      { pubkey: executor1, isSigner: false, isWritable: true },
+      { pubkey: executor2, isSigner: false, isWritable: false }, // readonly to match system_program
+      { pubkey: SYSTEM_PROGRAM_ID, isSigner: false, isWritable: false },
+      { pubkey: ORE_PROGRAM_ID, isSigner: false, isWritable: false },
+    ],
+    data,
+  });
+}
+
 module.exports = {
   // Manager
   createManagerInstruction,
@@ -816,6 +862,9 @@ module.exports = {
   mmAutocheckpointInstruction,
   recycleSolInstruction,
   mmFullAutodeployInstruction,
+
+  // Miner Creation (manager authority)
+  mmCreateMinerInstruction,
 
   // Helpers
   squaresToMask,

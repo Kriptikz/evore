@@ -15,6 +15,7 @@ import {
   mmCheckpointInstruction,
   mmClaimSolInstruction,
   mmClaimOreInstruction,
+  mmCreateMinerInstruction,
 } from "@/lib/instructions";
 import { EVORE_PROGRAM_ID, MANAGER_DISCRIMINATOR } from "@/lib/constants";
 
@@ -303,7 +304,7 @@ export function useEvore() {
     return signature;
   }, [connection, publicKey, sendTransaction, fetchDeployers]);
 
-  // Create an AutoMiner (manager + deployer in one transaction)
+  // Create an AutoMiner (manager + deployer + miner in one transaction)
   const createAutoMiner = useCallback(async (
     deployAuthority: PublicKey,
     bpsFee: bigint,
@@ -315,11 +316,15 @@ export function useEvore() {
     // Generate new manager keypair
     const managerKeypair = Keypair.generate();
 
-    // Create both instructions
+    // Create all instructions: manager, deployer, and miner
     const createManagerIx = createManagerInstruction(publicKey, managerKeypair.publicKey);
     const createDeployerIx = createDeployerInstruction(publicKey, managerKeypair.publicKey, deployAuthority, bpsFee, flatFee, maxPerRound);
+    const createMinerIx = mmCreateMinerInstruction(publicKey, managerKeypair.publicKey, BigInt(0));
 
-    const tx = new Transaction().add(createManagerIx).add(createDeployerIx);
+    const tx = new Transaction()
+      .add(createManagerIx)
+      .add(createDeployerIx)
+      .add(createMinerIx);
     
     const { blockhash } = await connection.getLatestBlockhash();
     tx.recentBlockhash = blockhash;
@@ -333,8 +338,9 @@ export function useEvore() {
     
     await fetchManagers();
     await fetchDeployers();
+    await fetchMiners();
     return signature;
-  }, [connection, publicKey, sendTransaction, fetchManagers, fetchDeployers]);
+  }, [connection, publicKey, sendTransaction, fetchManagers, fetchDeployers, fetchMiners]);
 
   // Update a deployer
   const updateDeployer = useCallback(async (

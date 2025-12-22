@@ -137,6 +137,13 @@ export declare function mmFullAutodeployInstruction(
   squaresMask: number
 ): TransactionInstruction;
 
+// Miner Creation (manager authority)
+export declare function mmCreateMinerInstruction(
+  signer: PublicKey,
+  manager: PublicKey,
+  authId?: bigint
+): TransactionInstruction;
+
 // Helpers
 export declare function squaresToMask(squares: boolean[]): number;
 export declare function maskToSquares(mask: number): boolean[];

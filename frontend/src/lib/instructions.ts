@@ -9,4 +9,5 @@ export {
   mmCheckpointInstruction,
   mmClaimSolInstruction,
   mmClaimOreInstruction,
+  mmCreateMinerInstruction,
 } from "evore-sdk";
