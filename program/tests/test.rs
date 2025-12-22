@@ -3224,3 +3224,152 @@ mod mm_autodeploy_fee_tests {
         );
     }
 }
+
+// ============================================================================
+// MMCreateMiner Tests
+// ============================================================================
+
+mod test_ore_automate_direct {
+    use super::*;
+    use solana_sdk::pubkey::Pubkey;
+
+    /// Test calling ORE automate directly (open then close) to verify the flow works
+    #[tokio::test]
+    async fn test_automate_open_close() {
+        let mut program_test = setup_programs();
+        
+        let authority = Keypair::new();
+        
+        // Fund authority
+        program_test.add_account(
+            authority.pubkey(),
+            Account {
+                lamports: 10_000_000_000, // 10 SOL
+                data: vec![],
+                owner: solana_sdk::system_program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+
+        let ctx = program_test.start_with_context().await;
+
+        let (miner_address, _) = miner_pda(authority.pubkey());
+        let automation_address = ore_api::automation_pda(authority.pubkey()).0;
+
+        // Step 1: Open automation (creates miner)
+        // executor = authority (opens)
+        let open_ix = ore_api::automate(
+            authority.pubkey(),
+            0,
+            0,
+            authority.pubkey(), // executor = signer opens
+            0,
+            0,
+            0,
+            false,
+        );
+
+        let open_tx = Transaction::new_signed_with_payer(
+            &[open_ix],
+            Some(&authority.pubkey()),
+            &[&authority],
+            ctx.last_blockhash,
+        );
+
+        ctx.banks_client.process_transaction(open_tx).await.unwrap();
+
+        // Verify miner and automation exist
+        let miner_account = ctx.banks_client.get_account(miner_address).await.unwrap();
+        assert!(miner_account.is_some(), "Miner account should exist after open");
+        
+        let automation_account = ctx.banks_client.get_account(automation_address).await.unwrap();
+        assert!(automation_account.is_some(), "Automation account should exist after open");
+
+        // Step 2: Close automation
+        // executor = Pubkey::default() (closes)
+        let close_ix = ore_api::automate(
+            authority.pubkey(),
+            0,
+            0,
+            Pubkey::default(), // executor = default closes
+            0,
+            0,
+            0,
+            false,
+        );
+
+        let close_tx = Transaction::new_signed_with_payer(
+            &[close_ix],
+            Some(&authority.pubkey()),
+            &[&authority],
+            ctx.last_blockhash,
+        );
+
+        ctx.banks_client.process_transaction(close_tx).await.unwrap();
+
+        // Verify miner still exists and automation is closed
+        let miner_account_final = ctx.banks_client.get_account(miner_address).await.unwrap();
+        assert!(miner_account_final.is_some(), "Miner account should still exist");
+        
+        let automation_account_final = ctx.banks_client.get_account(automation_address).await.unwrap();
+        assert!(automation_account_final.is_none(), "Automation account should be closed");
+    }
+}
+
+mod test_mm_create_miner {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_success() {
+        let mut program_test = setup_programs();
+        
+        // Setup manager
+        let manager = Keypair::new();
+        let authority = Keypair::new();
+        add_manager_account(&mut program_test, manager.pubkey(), authority.pubkey());
+        
+        let auth_id = 0u64;
+        let (managed_miner_auth, _) = managed_miner_auth_pda(manager.pubkey(), auth_id);
+        
+        // Fund authority to pay for transaction and miner rent
+        program_test.add_account(
+            authority.pubkey(),
+            Account {
+                lamports: 10_000_000_000, // 10 SOL
+                data: vec![],
+                owner: solana_sdk::system_program::id(),
+                executable: false,
+                rent_epoch: 0,
+            },
+        );
+
+        let ctx = program_test.start_with_context().await;
+
+        // Build and send MMCreateMiner instruction
+        let ix = evore::instruction::mm_create_miner(
+            authority.pubkey(),
+            manager.pubkey(),
+            auth_id,
+        );
+
+        let tx = Transaction::new_signed_with_payer(
+            &[ix],
+            Some(&authority.pubkey()),
+            &[&authority],
+            ctx.last_blockhash,
+        );
+
+        ctx.banks_client.process_transaction(tx).await.unwrap();
+
+        // Verify miner account was created
+        let (miner_address, _) = miner_pda(managed_miner_auth);
+        let miner_account = ctx.banks_client.get_account(miner_address).await.unwrap();
+        assert!(miner_account.is_some(), "Miner account should exist");
+        
+        // Verify automation account was closed
+        let automation_address = ore_api::automation_pda(managed_miner_auth).0;
+        let automation_account = ctx.banks_client.get_account(automation_address).await.unwrap();
+        assert!(automation_account.is_none(), "Automation account should be closed");
+    }
+}

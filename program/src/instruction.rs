@@ -20,6 +20,7 @@ pub enum Instructions {
     MMAutocheckpoint = 11,
     MMFullAutodeploy = 12,
     TransferManager = 13,
+    MMCreateMiner = 14,
 }
 
 /// Deployment strategy enum with associated data
@@ -921,5 +922,53 @@ pub fn mm_full_autodeploy(
             squares_mask: squares_mask.to_le_bytes(),
             _pad: [0; 4],
         }.to_bytes(),
+    }
+}
+
+// ============================================================================
+// MMCreateMiner Instruction
+// ============================================================================
+
+/// MMCreateMiner instruction data
+/// Creates an ORE miner account by CPIing to automate twice (open then close)
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct MMCreateMiner {
+    pub auth_id: [u8; 8],
+    pub bump: u8,
+}
+
+instruction!(Instructions, MMCreateMiner);
+
+/// Create an ORE miner account for a managed miner authority.
+/// This CPIs to ORE's automate instruction twice:
+/// 1. First with executor = signer (opens automation, creates miner)
+/// 2. Second with executor = Pubkey::default() (closes automation)
+/// 
+/// Note: executor_2 = Pubkey::default() = system_program::id()
+/// We use readonly for executor_2 to avoid privilege conflicts with system_program.
+/// ORE doesn't actually check that executor is writable.
+pub fn mm_create_miner(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instruction {
+    let (managed_miner_auth_address, bump) = managed_miner_auth_pda(manager, auth_id);
+    let automation_address = automation_pda(managed_miner_auth_address).0;
+    let miner_address = miner_pda(managed_miner_auth_address).0;
+
+    let executor_1 = signer;
+    let executor_2 = Pubkey::default();
+
+    Instruction {
+        program_id: crate::id(),
+        accounts: vec![
+            AccountMeta::new(signer, true),
+            AccountMeta::new(manager, false),
+            AccountMeta::new(managed_miner_auth_address, false),
+            AccountMeta::new(automation_address, false),
+            AccountMeta::new(miner_address, false),
+            AccountMeta::new(executor_1, false),
+            AccountMeta::new_readonly(executor_2, false), // readonly to match system_program
+            AccountMeta::new_readonly(system_program::id(), false),
+            AccountMeta::new_readonly(ore_api::id(), false),
+        ],
+        data: MMCreateMiner { auth_id: auth_id.to_le_bytes(), bump }.to_bytes(),
     }
 }

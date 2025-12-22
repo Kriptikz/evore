@@ -348,6 +348,52 @@ pub enum OreInstruction {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
+pub struct Automate {
+    pub amount: [u8; 8],
+    pub deposit: [u8; 8],
+    pub fee: [u8; 8],
+    pub mask: [u8; 8],
+    pub strategy: u8,
+    pub reload: [u8; 8],
+}
+
+instruction!(OreInstruction, Automate);
+
+pub fn automate(
+  signer: Pubkey,
+  amount: u64,
+  deposit: u64,
+  executor: Pubkey,
+  fee: u64,
+  mask: u64,
+  strategy: u8,
+  reload: bool,
+) -> Instruction {
+  let automation_address = automation_pda(signer).0;
+  let miner_address = miner_pda(signer).0;
+  Instruction {
+      program_id: PROGRAM_ID,
+      accounts: vec![
+          AccountMeta::new(signer, true),
+          AccountMeta::new(automation_address, false),
+          AccountMeta::new(executor, false),
+          AccountMeta::new(miner_address, false),
+          AccountMeta::new_readonly(system_program::ID, false),
+      ],
+      data: Automate {
+          amount: amount.to_le_bytes(),
+          deposit: deposit.to_le_bytes(),
+          fee: fee.to_le_bytes(),
+          mask: mask.to_le_bytes(),
+          strategy: strategy as u8,
+          reload: (reload as u64).to_le_bytes(),
+      }
+      .to_bytes(),
+  }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct Deploy {
     pub amount: [u8; 8],
     pub squares: [u8; 4],

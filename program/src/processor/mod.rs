@@ -12,3 +12,4 @@ pub mod process_withdraw_autodeploy_balance;
 pub mod process_mm_autocheckpoint;
 pub mod process_mm_full_autodeploy;
 pub mod process_transfer_manager;
+pub mod process_mm_create_miner;

@@ -78,6 +78,9 @@ pub fn process_instruction(
         Instructions::TransferManager => {
             process_transfer_manager::process_transfer_manager(accounts, data)?;
         }
+        Instructions::MMCreateMiner => {
+            process_mm_create_miner::process_mm_create_miner(accounts, data)?;
+        }
     }
 
     Ok(())
