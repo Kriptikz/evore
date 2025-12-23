@@ -35,15 +35,17 @@ pub struct Deployer {
     pub manager_key: Pubkey,
     /// The authority that can execute deploys via this deployer
     pub deploy_authority: Pubkey,
-    /// Percentage fee in basis points (1000 = 10%, 500 = 5%, etc.) - set by manager
+    /// Actual percentage fee in basis points (1000 = 10%, etc.) - set by deploy_authority
+    /// Must be <= expected_bps_fee for autodeploys to succeed
     pub bps_fee: u64,
-    /// Flat fee in lamports (added on top of bps_fee if > 0) - set by manager
+    /// Actual flat fee in lamports - set by deploy_authority
+    /// Must be <= expected_flat_fee for autodeploys to succeed
     pub flat_fee: u64,
-    /// Expected bps_fee set by deploy_authority (0 = accept any, >0 = must match bps_fee)
+    /// Maximum bps_fee the manager accepts (set by manager) - deployer can charge up to this
     pub expected_bps_fee: u64,
-    /// Expected flat_fee set by deploy_authority (0 = accept any, >0 = must match flat_fee)
+    /// Maximum flat_fee in lamports the manager accepts (set by manager) - deployer can charge up to this
     pub expected_flat_fee: u64,
-    /// Maximum lamports to deploy per round (0 = unlimited)
+    /// Maximum lamports to deploy per round (0 = unlimited) - set by manager
     pub max_per_round: u64,
 }
 

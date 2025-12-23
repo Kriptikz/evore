@@ -98,11 +98,12 @@ pub fn process_mm_autodeploy(
         return Err(EvoreError::InvalidDeployAuthority.into());
     }
 
-    // Verify expected fees match (if expected > 0)
-    if expected_bps_fee > 0 && bps_fee != expected_bps_fee {
+    // Verify actual fees don't exceed expected fees (if expected > 0)
+    // This allows deployer to dynamically adjust fees while respecting user's max
+    if expected_bps_fee > 0 && bps_fee > expected_bps_fee {
         return Err(EvoreError::UnexpectedFee.into());
     }
-    if expected_flat_fee > 0 && flat_fee != expected_flat_fee {
+    if expected_flat_fee > 0 && flat_fee > expected_flat_fee {
         return Err(EvoreError::UnexpectedFee.into());
     }
 

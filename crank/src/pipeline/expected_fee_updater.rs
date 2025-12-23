@@ -1,6 +1,8 @@
-//! Expected Fee Updater System
+//! Fee Updater System
 //!
-//! Batches expected fee updates (up to 10 per transaction or 5 second timeout).
+//! Updates the actual fees (bps_fee, flat_fee) on deployer accounts.
+//! As deploy_authority, we can set the actual fees charged.
+//! Batches updates (up to 10 per transaction or 5 second timeout).
 //! After confirmation, miners are sent to DeploymentCheck to continue the pipeline.
 
 use std::sync::Arc;
@@ -36,7 +38,7 @@ pub async fn run(
     deploy_authority: Arc<Keypair>,
     priority_fee: u64,
 ) {
-    info!("[ExpectedFeeUpdater] Starting...");
+    info!("[FeeUpdater] Starting...");
 
     let mut batch: Vec<MinerTask> = Vec::with_capacity(MAX_BATCH_SIZE);
     let mut total_batched = 0u64;
@@ -108,7 +110,7 @@ pub async fn run(
     }
 
     info!(
-        "[ExpectedFeeUpdater] Shutting down. Total batches: {}",
+        "[FeeUpdater] Shutting down. Total batches: {}",
         total_batched
     );
 }
@@ -128,7 +130,7 @@ async fn process_batch(
 
     let batch_size = batch.len();
     info!(
-        "[ExpectedFeeUpdater] Processing batch of {} fee updates",
+        "[FeeUpdater] Processing batch of {} fee updates",
         batch_size
     );
 
@@ -142,15 +144,16 @@ async fn process_batch(
         let deployer = &task.deployer;
 
         // Build update_deployer instruction
-        // We set expected_flat_fee to REQUIRED_FLAT_FEE, keep everything else the same
+        // As deploy_authority, we set the actual fees (bps_fee, flat_fee)
+        // We set flat_fee to REQUIRED_FLAT_FEE, keep bps_fee at 0
         let ix = evore::instruction::update_deployer(
             deploy_authority.pubkey(),
             deployer.manager_address,
             deploy_authority.pubkey(), // Keep ourselves as deploy_authority
-            deployer.bps_fee,          // Keep current bps_fee
-            deployer.flat_fee,         // Keep current flat_fee
-            0,                         // expected_bps_fee (0 = accept any)
-            REQUIRED_FLAT_FEE,         // expected_flat_fee
+            0,                         // bps_fee (we set actual bps fee to 0)
+            REQUIRED_FLAT_FEE,         // flat_fee (we set actual flat fee)
+            deployer.expected_bps_fee, // Keep user's expected_bps_fee
+            deployer.expected_flat_fee,// Keep user's expected_flat_fee
             deployer.max_per_round,    // Keep current max_per_round
         );
         instructions.push(ix);
@@ -161,7 +164,7 @@ async fn process_batch(
         Ok(bh) => bh,
         Err(e) => {
             error!(
-                "[ExpectedFeeUpdater] Failed to get blockhash: {}. Retrying miners.",
+                "[FeeUpdater] Failed to get blockhash: {}. Retrying miners.",
                 e
             );
             // Send miners back to fee check for retry
@@ -183,7 +186,7 @@ async fn process_batch(
         Ok(vtx) => vtx,
         Err(e) => {
             error!(
-                "[ExpectedFeeUpdater] Failed to convert transaction: {}",
+                "[FeeUpdater] Failed to convert transaction: {}",
                 e
             );
             return;
@@ -199,14 +202,14 @@ async fn process_batch(
     // Send to transaction processor
     if let Err(e) = senders.to_tx_processor.send(batched_tx).await {
         error!(
-            "[ExpectedFeeUpdater] Failed to send to tx processor: {}",
+            "[FeeUpdater] Failed to send to tx processor: {}",
             e
         );
     }
 
     shared.stats.increment(&shared.stats.fee_updates_sent);
     info!(
-        "[ExpectedFeeUpdater] Sent batch of {} fee updates to tx processor",
+        "[FeeUpdater] Sent batch of {} fee updates to tx processor",
         batch_size
     );
 }

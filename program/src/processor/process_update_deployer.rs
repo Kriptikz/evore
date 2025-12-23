@@ -74,25 +74,27 @@ pub fn process_update_deployer(
     let mut data = deployer_account_info.try_borrow_mut_data()?;
     
     if is_manager_authority {
-        // Manager can update deploy_authority, bps_fee, flat_fee, max_per_round
-        // deploy_authority at offset 40
-        data[40..72].copy_from_slice(new_deploy_authority_info.key.as_ref());
-        // bps_fee at offset 72
-        data[72..80].copy_from_slice(&new_bps_fee.to_le_bytes());
-        // flat_fee at offset 80
-        data[80..88].copy_from_slice(&new_flat_fee.to_le_bytes());
-        // max_per_round at offset 104
-        data[104..112].copy_from_slice(&new_max_per_round.to_le_bytes());
-    }
-    
-    if is_deploy_authority {
-        // Deploy authority can update deploy_authority, expected_bps_fee, expected_flat_fee
+        // Manager can update: deploy_authority, expected_bps_fee, expected_flat_fee, max_per_round
+        // These are the maximum fees the manager is willing to accept
         // deploy_authority at offset 40
         data[40..72].copy_from_slice(new_deploy_authority_info.key.as_ref());
         // expected_bps_fee at offset 88
         data[88..96].copy_from_slice(&new_expected_bps_fee.to_le_bytes());
         // expected_flat_fee at offset 96
         data[96..104].copy_from_slice(&new_expected_flat_fee.to_le_bytes());
+        // max_per_round at offset 104
+        data[104..112].copy_from_slice(&new_max_per_round.to_le_bytes());
+    }
+    
+    if is_deploy_authority {
+        // Deploy authority can update: deploy_authority, bps_fee, flat_fee
+        // These are the actual fees charged (must be <= expected fees for autodeploys)
+        // deploy_authority at offset 40
+        data[40..72].copy_from_slice(new_deploy_authority_info.key.as_ref());
+        // bps_fee at offset 72
+        data[72..80].copy_from_slice(&new_bps_fee.to_le_bytes());
+        // flat_fee at offset 80
+        data[80..88].copy_from_slice(&new_flat_fee.to_le_bytes());
     }
 
     Ok(())

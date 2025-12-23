@@ -479,9 +479,9 @@ pub fn mm_claim_ore(signer: Pubkey, manager: Pubkey, auth_id: u64) -> Instructio
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct CreateDeployer {
-    /// Percentage fee in basis points (1000 = 10%, 500 = 5%)
+    /// Maximum bps fee user accepts (deployer can charge up to this)
     pub bps_fee: [u8; 8],
-    /// Flat fee in lamports (added on top of bps_fee)
+    /// Maximum flat fee in lamports user accepts (deployer can charge up to this)
     pub flat_fee: [u8; 8],
     /// Maximum lamports to deploy per round (0 = unlimited)
     pub max_per_round: [u8; 8],
@@ -492,8 +492,8 @@ instruction!(Instructions, CreateDeployer);
 /// Create a deployer account for a manager
 /// The manager authority signs to authorize the deployer creation
 /// deploy_authority is the key that will be allowed to execute autodeploys
-/// bps_fee: Percentage fee in basis points (1000 = 10%)
-/// flat_fee: Flat fee in lamports (added on top of bps_fee)
+/// bps_fee: Max bps fee user accepts (deployer can set actual fee up to this)
+/// flat_fee: Max flat fee user accepts (deployer can set actual fee up to this)
 /// max_per_round: Maximum lamports to deploy per round (0 = unlimited)
 pub fn create_deployer(
     signer: Pubkey,
@@ -524,19 +524,19 @@ pub fn create_deployer(
 
 /// UpdateDeployer instruction data
 /// Updates deployer configuration
-/// - Manager authority: can update deploy_authority, bps_fee, flat_fee, max_per_round
-/// - Deploy authority: can update expected_bps_fee, expected_flat_fee
+/// - Manager authority: can update deploy_authority, expected_bps_fee, expected_flat_fee, max_per_round
+/// - Deploy authority: can update deploy_authority, bps_fee, flat_fee
 /// Pass current values for fields you don't want to change
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 pub struct UpdateDeployer {
-    /// New percentage fee in basis points (1000 = 10%, 500 = 5%) - manager only
+    /// Actual bps fee charged (deploy_authority only, must be <= expected_bps_fee)
     pub bps_fee: [u8; 8],
-    /// New flat fee in lamports (added on top of bps_fee) - manager only
+    /// Actual flat fee charged (deploy_authority only, must be <= expected_flat_fee)
     pub flat_fee: [u8; 8],
-    /// Expected bps_fee set by deploy_authority (0 = accept any)
+    /// Max bps fee user accepts (manager only, 0 = accept any)
     pub expected_bps_fee: [u8; 8],
-    /// Expected flat_fee set by deploy_authority (0 = accept any)
+    /// Max flat fee user accepts (manager only, 0 = accept any)
     pub expected_flat_fee: [u8; 8],
     /// Maximum lamports to deploy per round (0 = unlimited) - manager only
     pub max_per_round: [u8; 8],
@@ -545,8 +545,8 @@ pub struct UpdateDeployer {
 instruction!(Instructions, UpdateDeployer);
 
 /// Update deployer configuration
-/// - Manager authority: can update deploy_authority, bps_fee, flat_fee, max_per_round
-/// - Deploy authority: can update expected_bps_fee, expected_flat_fee
+/// - Manager authority: can update deploy_authority, expected_bps_fee, expected_flat_fee, max_per_round
+/// - Deploy authority: can update deploy_authority, bps_fee, flat_fee
 /// Pass current values for fields you don't want to change
 pub fn update_deployer(
     signer: Pubkey,

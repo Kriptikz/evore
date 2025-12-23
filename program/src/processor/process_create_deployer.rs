@@ -15,8 +15,9 @@ pub fn process_create_deployer(
     instruction_data: &[u8],
 ) -> Result<(), ProgramError> {
     let args = CreateDeployer::try_from_bytes(instruction_data)?;
-    let bps_fee = u64::from_le_bytes(args.bps_fee);
-    let flat_fee = u64::from_le_bytes(args.flat_fee);
+    // Manager sets expected fees (max they're willing to pay)
+    let expected_bps_fee = u64::from_le_bytes(args.bps_fee);
+    let expected_flat_fee = u64::from_le_bytes(args.flat_fee);
     let max_per_round = u64::from_le_bytes(args.max_per_round);
 
     let [
@@ -85,14 +86,14 @@ pub fn process_create_deployer(
     )?;
 
     // Initialize the deployer data
-    // Expected fees initialized to actual fees (deploy_authority can update via update_deployer)
+    // Manager sets expected fees (max they'll accept), actual fees start at expected (deploy_authority can lower)
     let deployer = Deployer {
         manager_key: *manager_account_info.key,
         deploy_authority: *deploy_authority_info.key,
-        bps_fee,
-        flat_fee,
-        expected_bps_fee: bps_fee,
-        expected_flat_fee: flat_fee,
+        bps_fee: expected_bps_fee,        // Actual fee starts at expected max
+        flat_fee: expected_flat_fee,       // Actual fee starts at expected max
+        expected_bps_fee,                  // Max bps fee manager accepts
+        expected_flat_fee,                 // Max flat fee manager accepts
         max_per_round,
     };
 

@@ -1,7 +1,9 @@
 //! Fee Check System - PIPELINE ENTRY POINT
 //!
 //! First system in the pipeline. All miners enter here.
-//! Validates flat_fee and expected_flat_fee on deployer accounts.
+//! Validates fees on deployer accounts:
+//! - expected_flat_fee (set by user): must be >= REQUIRED_FLAT_FEE (user accepts our fee)
+//! - flat_fee (set by us): must be REQUIRED_FLAT_FEE (our actual fee)
 
 use std::sync::Arc;
 
@@ -28,14 +30,15 @@ pub async fn run(
     while let Some(task) = rx.recv().await {
         let deployer = &task.deployer;
 
-        // Check 1: flat_fee must be REQUIRED_FLAT_FEE (set by user)
-        if deployer.flat_fee != REQUIRED_FLAT_FEE {
+        // Check 1: expected_flat_fee (set by user) must be >= REQUIRED_FLAT_FEE
+        // This means the user accepts at least our required fee
+        if deployer.expected_flat_fee < REQUIRED_FLAT_FEE {
             warn!(
-                "[FeeCheck] SKIPPED - wrong flat_fee | manager: {} | miner: {} | auth: {} | flat_fee: {} (required: {})",
+                "[FeeCheck] SKIPPED - user expected_fee too low | manager: {} | miner: {} | auth: {} | expected_flat_fee: {} < required: {}",
                 deployer.manager_address,
                 task.miner_address,
                 task.miner_auth,
-                deployer.flat_fee,
+                deployer.expected_flat_fee,
                 REQUIRED_FLAT_FEE
             );
             shared.stats.increment(&shared.stats.miners_skipped_wrong_fee);
@@ -43,15 +46,16 @@ pub async fn run(
             continue;
         }
 
-        // Check 2: expected_flat_fee must be REQUIRED_FLAT_FEE (set by deployer authority)
-        if deployer.expected_flat_fee != REQUIRED_FLAT_FEE {
+        // Check 2: flat_fee (set by us as deploy_authority) must be REQUIRED_FLAT_FEE
+        // If not, we need to update it
+        if deployer.flat_fee != REQUIRED_FLAT_FEE {
             debug!(
-                "[FeeCheck] {} needs expected fee update: {} -> {}",
-                deployer.manager_address, deployer.expected_flat_fee, REQUIRED_FLAT_FEE
+                "[FeeCheck] {} needs actual fee update: {} -> {}",
+                deployer.manager_address, deployer.flat_fee, REQUIRED_FLAT_FEE
             );
-            // Send to expected fee updater
+            // Send to fee updater (we update the actual fee)
             if let Err(e) = senders.to_expected_fee_updater.send(task).await {
-                warn!("[FeeCheck] Failed to send to expected fee updater: {}", e);
+                warn!("[FeeCheck] Failed to send to fee updater: {}", e);
             }
             need_update_count += 1;
             continue;
@@ -67,7 +71,7 @@ pub async fn run(
         let total = ok_count + need_update_count + skipped_count;
         if total % 50 == 0 {
             info!(
-                "[FeeCheck] {} OK, {} need fee update, {} skipped (wrong flat_fee)",
+                "[FeeCheck] {} OK, {} need fee update, {} skipped (user fee too low)",
                 ok_count, need_update_count, skipped_count
             );
         }
