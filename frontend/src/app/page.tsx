@@ -72,6 +72,16 @@ export default function Home() {
       return 0;
     });
 
+  // Minimum balance required for autodeploy (100,000 lamports = 0.0001 SOL)
+  // This is slightly more than the 70,000 lamports deploy amount to account for fees
+  const MIN_AUTODEPLOY_BALANCE = BigInt(100_000);
+
+  // Get managers with low balance (below minimum for autodeploy)
+  const managersWithLowBalance = managersWithDeployers.filter(m => {
+    const deployer = getDeployerForManager(m.address);
+    return deployer && deployer.autodeployBalance < MIN_AUTODEPLOY_BALANCE;
+  });
+
   // Selection helpers
   const toggleSelection = (managerKey: string) => {
     setSelectedManagers(prev => {
@@ -91,6 +101,10 @@ export default function Home() {
 
   const deselectAll = () => {
     setSelectedManagers(new Set());
+  };
+
+  const selectLowBalance = () => {
+    setSelectedManagers(new Set(managersWithLowBalance.map(m => m.address.toBase58())));
   };
 
   // Bulk action handlers - all now use batched transactions that auto-split if needed
@@ -266,8 +280,10 @@ export default function Home() {
                 <BulkActionBar
                   selectedCount={selectedManagers.size}
                   totalCount={managersWithDeployers.length}
+                  lowBalanceCount={managersWithLowBalance.length}
                   onSelectAll={selectAll}
                   onDeselectAll={deselectAll}
+                  onSelectLowBalance={selectLowBalance}
                   onBulkDeposit={handleBulkDeposit}
                   onBulkWithdraw={handleBulkClaimSol}
                   onBulkCheckpoint={handleBulkCheckpoint}

@@ -8,8 +8,10 @@ import { parseSolToLamports } from "@/lib/accounts";
 interface BulkActionBarProps {
   selectedCount: number;
   totalCount: number;
+  lowBalanceCount?: number;
   onSelectAll: () => void;
   onDeselectAll: () => void;
+  onSelectLowBalance?: () => void;
   onBulkDeposit?: (authId: bigint, amount: bigint) => Promise<void>;
   onBulkWithdraw?: () => Promise<void>;
   onBulkCheckpoint?: () => Promise<void>;
@@ -22,8 +24,10 @@ interface BulkActionBarProps {
 export function BulkActionBar({
   selectedCount,
   totalCount,
+  lowBalanceCount,
   onSelectAll,
   onDeselectAll,
+  onSelectLowBalance,
   onBulkDeposit,
   onBulkWithdraw,
   onBulkCheckpoint,
@@ -142,6 +146,14 @@ export function BulkActionBar({
           >
             Select All ({totalCount})
           </button>
+          {onSelectLowBalance && lowBalanceCount !== undefined && lowBalanceCount > 0 && (
+            <button
+              onClick={onSelectLowBalance}
+              className="text-sm text-orange-400 hover:text-orange-300"
+            >
+              Select Low Balance ({lowBalanceCount})
+            </button>
+          )}
         </div>
         <p className="text-sm text-zinc-500">Select miners to perform bulk actions</p>
       </div>
@@ -161,6 +173,14 @@ export function BulkActionBar({
           >
             {selectedCount === totalCount ? "Deselect All" : "Select All"}
           </button>
+          {onSelectLowBalance && lowBalanceCount !== undefined && lowBalanceCount > 0 && (
+            <button
+              onClick={onSelectLowBalance}
+              className="text-sm text-orange-400 hover:text-orange-300"
+            >
+              Select Low Balance ({lowBalanceCount})
+            </button>
+          )}
           <button
             onClick={onDeselectAll}
             className="text-sm text-zinc-400 hover:text-zinc-300"

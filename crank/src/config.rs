@@ -43,6 +43,8 @@ pub struct Config {
 pub enum Command {
     /// Run the main crank loop (auto-discovers/creates LUTs)
     Run,
+    /// Run the new pipeline architecture (experimental)
+    Pipeline,
     /// Send a test transaction to verify connectivity
     Test,
     /// Show deployer accounts we manage and their LUT status
@@ -94,6 +96,10 @@ pub struct DeployerInfo {
     pub bps_fee: u64,
     /// Flat fee in lamports (added on top of bps_fee)
     pub flat_fee: u64,
+    /// Expected bps_fee set by deploy_authority (0 = accept any)
+    pub expected_bps_fee: u64,
+    /// Expected flat_fee set by deploy_authority (0 = accept any)
+    pub expected_flat_fee: u64,
     /// Maximum lamports to deploy per round (0 = unlimited)
     pub max_per_round: u64,
 }

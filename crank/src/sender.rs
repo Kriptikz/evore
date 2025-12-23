@@ -74,49 +74,82 @@ impl TxSender {
         Ok(signature)
     }
     
-    /// Check transaction signature status
+    /// Check transaction signature status for a single signature
     pub async fn get_signature_status(&self, signature: &Signature) -> Result<Option<bool>, SendError> {
-        let body = serde_json::json!({
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "getSignatureStatuses",
-            "params": [
-                [signature.to_string()],
-                { "searchTransactionHistory": false }
-            ]
-        });
-        
-        let response = self.client
-            .post(&self.rpc_url)
-            .json(&body)
-            .send()
-            .await
-            .map_err(|e| SendError::Network(e.to_string()))?;
-        
-        let json: serde_json::Value = response.json().await
-            .map_err(|e| SendError::Parse(e.to_string()))?;
-        
-        if let Some(error) = json.get("error") {
-            return Err(SendError::RpcError(error.to_string()));
+        let statuses = self.get_signature_statuses(&[*signature]).await?;
+        Ok(statuses.into_iter().next().unwrap_or(None))
+    }
+    
+    /// Maximum signatures per getSignatureStatuses RPC call (Solana limit is 256)
+    const MAX_SIGNATURES_PER_BATCH: usize = 256;
+    
+    /// Check transaction signature statuses in batch
+    /// Returns a Vec of Option<bool> where:
+    /// - None = not found yet
+    /// - Some(true) = confirmed/finalized
+    /// - Some(false) = failed with error
+    pub async fn get_signature_statuses(&self, signatures: &[Signature]) -> Result<Vec<Option<bool>>, SendError> {
+        if signatures.is_empty() {
+            return Ok(vec![]);
         }
         
-        // Check if status exists and has confirmation
-        if let Some(value) = json["result"]["value"].get(0) {
-            if value.is_null() {
-                return Ok(None); // Not found
+        let mut all_statuses = Vec::with_capacity(signatures.len());
+        
+        // Process in batches of MAX_SIGNATURES_PER_BATCH
+        for chunk in signatures.chunks(Self::MAX_SIGNATURES_PER_BATCH) {
+            let sig_strings: Vec<String> = chunk.iter().map(|s| s.to_string()).collect();
+            
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "getSignatureStatuses",
+                "params": [
+                    sig_strings,
+                    { "searchTransactionHistory": false }
+                ]
+            });
+            
+            let response = self.client
+                .post(&self.rpc_url)
+                .json(&body)
+                .send()
+                .await
+                .map_err(|e| SendError::Network(e.to_string()))?;
+            
+            let json: serde_json::Value = response.json().await
+                .map_err(|e| SendError::Parse(e.to_string()))?;
+            
+            if let Some(error) = json.get("error") {
+                return Err(SendError::RpcError(error.to_string()));
             }
-            if let Some(err) = value.get("err") {
-                if !err.is_null() {
-                    return Ok(Some(false)); // Failed
-                }
-            }
-            if let Some(status) = value.get("confirmationStatus") {
-                let status_str = status.as_str().unwrap_or("");
-                return Ok(Some(status_str == "confirmed" || status_str == "finalized"));
+            
+            // Parse each status in the batch
+            let values = json["result"]["value"].as_array()
+                .ok_or(SendError::Parse("Expected array in result.value".to_string()))?;
+            
+            for value in values {
+                let status = if value.is_null() {
+                    None // Not found
+                } else if let Some(err) = value.get("err") {
+                    if !err.is_null() {
+                        Some(false) // Failed
+                    } else if let Some(conf_status) = value.get("confirmationStatus") {
+                        let status_str = conf_status.as_str().unwrap_or("");
+                        Some(status_str == "confirmed" || status_str == "finalized")
+                    } else {
+                        None
+                    }
+                } else if let Some(conf_status) = value.get("confirmationStatus") {
+                    let status_str = conf_status.as_str().unwrap_or("");
+                    Some(status_str == "confirmed" || status_str == "finalized")
+                } else {
+                    None
+                };
+                all_statuses.push(status);
             }
         }
         
-        Ok(None)
+        Ok(all_statuses)
     }
     
     /// Send and confirm a transaction via standard RPC
@@ -231,6 +264,106 @@ impl TxSender {
         
         Err(SendError::Timeout(signature.to_string()))
     }
+    
+    /// Send multiple versioned transactions and confirm them in batch
+    /// Returns results for each transaction in the same order
+    pub async fn send_and_confirm_versioned_batch(
+        &self,
+        txs: &[VersionedTransaction],
+        max_retries: u32,
+    ) -> Vec<ConfirmationResult> {
+        if txs.is_empty() {
+            return vec![];
+        }
+        
+        // Send all transactions first
+        let mut signatures: Vec<Option<Signature>> = Vec::with_capacity(txs.len());
+        for tx in txs {
+            match self.send_versioned_rpc(tx).await {
+                Ok(sig) => signatures.push(Some(sig)),
+                Err(e) => {
+                    info!("Failed to send tx: {}", e);
+                    signatures.push(None);
+                }
+            }
+        }
+        
+        // Track which transactions are still pending
+        let mut results: Vec<Option<ConfirmationResult>> = vec![None; txs.len()];
+        
+        // Mark failed sends
+        for (i, sig) in signatures.iter().enumerate() {
+            if sig.is_none() {
+                results[i] = Some(ConfirmationResult::Failed(
+                    Signature::default(),
+                    "Failed to send transaction".to_string(),
+                ));
+            }
+        }
+        
+        // Poll for confirmations in batch
+        for retry in 0..max_retries {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            
+            // Collect pending signatures
+            let pending: Vec<(usize, Signature)> = signatures
+                .iter()
+                .enumerate()
+                .filter_map(|(i, sig)| {
+                    if results[i].is_none() {
+                        sig.map(|s| (i, s))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            
+            if pending.is_empty() {
+                break; // All done
+            }
+            
+            // Batch check statuses
+            let pending_sigs: Vec<Signature> = pending.iter().map(|(_, s)| *s).collect();
+            match self.get_signature_statuses(&pending_sigs).await {
+                Ok(statuses) => {
+                    for ((original_idx, sig), status) in pending.iter().zip(statuses.iter()) {
+                        match status {
+                            Some(true) => {
+                                results[*original_idx] = Some(ConfirmationResult::Confirmed(*sig));
+                            }
+                            Some(false) => {
+                                results[*original_idx] = Some(ConfirmationResult::Failed(
+                                    *sig,
+                                    "Transaction failed".to_string(),
+                                ));
+                            }
+                            None => {
+                                // Still pending, re-send periodically
+                                if retry % 10 == 0 && retry > 0 {
+                                    let _ = self.send_versioned_rpc(&txs[*original_idx]).await;
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    info!("Error checking batch statuses: {}", e);
+                    // Continue polling on error
+                }
+            }
+        }
+        
+        // Mark remaining as timeout
+        for (i, result) in results.iter_mut().enumerate() {
+            if result.is_none() {
+                if let Some(sig) = signatures[i] {
+                    *result = Some(ConfirmationResult::Timeout(sig));
+                }
+            }
+        }
+        
+        results.into_iter().filter_map(|r| r).collect()
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -247,4 +380,15 @@ pub enum SendError {
     TransactionFailed(String),
     #[error("Timeout waiting for confirmation: {0}")]
     Timeout(String),
+}
+
+/// Confirmation result for batch operations
+#[derive(Debug, Clone)]
+pub enum ConfirmationResult {
+    /// Transaction confirmed successfully
+    Confirmed(Signature),
+    /// Transaction failed with error
+    Failed(Signature, String),
+    /// Transaction timed out waiting for confirmation
+    Timeout(Signature),
 }

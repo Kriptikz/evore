@@ -16,13 +16,14 @@ mod config;
 mod crank;
 mod db;
 mod lut;
+mod miner_cache;
+mod pipeline;
 mod sender;
 
 use clap::Parser;
 use config::Config;
 use lut::{LutManager, LutRegistry, get_miner_auth_pda};
-use solana_sdk::pubkey::Pubkey;
-use std::collections::HashSet;
+use solana_sdk::signature::Signer;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
@@ -147,18 +148,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             info!("Setting expected fees for all deployers...");
             info!("Expected BPS fee: {} (0 = accept any)", expected_bps_fee);
             info!("Expected flat fee: {} lamports", expected_flat_fee);
-            
+
             let deployers = crank.find_deployers().await?;
             if deployers.is_empty() {
                 warn!("No deployers found where we are the deploy_authority");
                 return Ok(());
             }
-            
-            info!("Updating {} deployers...", deployers.len());
+
+            info!("Checking {} deployers...", deployers.len());
+            let mut updated = 0;
+            let mut skipped = 0;
             for d in &deployers {
                 match crank.update_expected_fees(&d, expected_bps_fee, expected_flat_fee).await {
-                    Ok(sig) => {
+                    Ok(Some(sig)) => {
                         info!("  ✓ Updated {}: {}", d.manager_address, sig);
+                        updated += 1;
+                    }
+                    Ok(None) => {
+                        info!("  - Skipped {} (already set)", d.manager_address);
+                        skipped += 1;
                     }
                     Err(e) => {
                         error!("  ✗ Failed to update {}: {}", d.manager_address, e);
@@ -166,6 +174,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
             
+            info!("Done: {} updated, {} already set", updated, skipped);
             return Ok(());
         }
         Some(config::Command::CreateLut) => {
@@ -407,11 +416,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             crank.check_all_accounts()?;
             return Ok(());
         }
+        Some(config::Command::Pipeline) => {
+            info!("Starting new pipeline architecture...");
+            
+            // Load keypair
+            let deploy_authority = Arc::new(config.load_keypair()?);
+            info!("Deploy authority: {}", deploy_authority.pubkey());
+            
+            // Create RPC client
+            let rpc_client = Arc::new(solana_client::rpc_client::RpcClient::new_with_commitment(
+                config.rpc_url.clone(),
+                solana_sdk::commitment_config::CommitmentConfig::confirmed(),
+            ));
+            
+            // Run pipeline
+            if let Err(e) = pipeline::run_pipeline(config, rpc_client, deploy_authority).await {
+                error!("Pipeline error: {}", e);
+                return Err(e.into());
+            }
+            
+            return Ok(());
+        }
         Some(config::Command::Run) | None => {
             // Continue to main loop
         }
     }
-    
+
     info!("Database: {}", config.db_path.display());
     info!("Priority fee: {} microlamports/CU", config.priority_fee);
     
@@ -473,6 +503,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Wrap registry in Arc<RwLock> for sharing across async tasks
     let registry = Arc::new(RwLock::new(registry));
     
+    // Initialize miner cache for reduced RPC usage
+    let mut miner_cache = miner_cache::MinerCache::new();
+    
     // Main loop
     let poll_interval = Duration::from_millis(config.poll_interval_ms);
     info!("Starting main loop (poll interval: {}ms)", config.poll_interval_ms);
@@ -481,8 +514,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     info!("Max batch size: {} (limited by 64 account limit)", MAX_BATCH_SIZE);
     
     let mut last_round_id: Option<u64> = None;
-    // Track which (deployer, round) pairs have already been deployed
-    let mut deployed_rounds: HashSet<(Pubkey, u64)> = HashSet::new();
     
     loop {
         // Check pending transactions first
@@ -490,8 +521,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             error!("Error checking pending txs: {}", e);
         }
         
-        // Run the deployment strategy
-        if let Err(e) = run_strategy(&crank, &deployers, &mut last_round_id, &mut deployed_rounds, &registry).await {
+        // Run the deployment strategy with cached miner data
+        if let Err(e) = run_strategy(&crank, &deployers, &mut last_round_id, &mut miner_cache, &registry).await {
             error!("Strategy error: {}", e);
         }
         
@@ -500,14 +531,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 /// Deployment strategy - customize this for your use case
+/// Uses miner cache to minimize RPC calls
 async fn run_strategy(
     crank: &crank::Crank,
     deployers: &[config::DeployerInfo],
     last_round_id: &mut Option<u64>,
-    deployed_rounds: &mut HashSet<(Pubkey, u64)>,
+    miner_cache: &mut miner_cache::MinerCache,
     registry: &Arc<RwLock<LutRegistry>>,
 ) -> Result<(), crank::CrankError> {
-    // Get current board state
+    // Get current board state (single RPC call)
     let (board, current_slot) = crank.get_board()?;
     
     // Don't deploy if round hasn't fully started (end_slot is u64::MAX during reset)
@@ -522,9 +554,13 @@ async fn run_strategy(
     if is_new_round {
         info!("New round detected: {} (ends in {} slots)", board.round_id, slots_remaining);
         *last_round_id = Some(board.round_id);
-        
-        // Clean up old entries from deployed_rounds (keep only current round)
-        deployed_rounds.retain(|(_, round_id)| *round_id == board.round_id);
+    }
+    
+    // Refresh miner cache (batched RPC call - only when needed)
+    // This fetches all miner accounts and balances in bulk
+    if let Err(e) = miner_cache.refresh(crank.rpc_client(), deployers, AUTH_ID, board.round_id) {
+        error!("Failed to refresh miner cache: {}", e);
+        return Err(e);
     }
     
     // Don't deploy if too close to round end (transaction won't land in time)
@@ -537,31 +573,39 @@ async fn run_strategy(
         return Ok(());
     }
     
-    // Collect deployers for deployment (with checkpoint info)
+    // Calculate required balance once (no RPC needed, just math)
+    let required = crank::Crank::calculate_required_balance_simple(
+        DEPLOY_AMOUNT_LAMPORTS,
+        SQUARES_MASK,
+        deployers.first().map(|d| d.flat_fee).unwrap_or(0),
+        1, // flat fee type
+    );
+    
+    // Collect deployers for deployment using cached data
     let mut to_deploy: Vec<(&config::DeployerInfo, u64, u64, u64, u32, Option<u64>)> = Vec::new();
+    // (deployer, checkpoint_round, miner_address, has_sol_to_recycle)
+    let mut checkpoint_only: Vec<(&config::DeployerInfo, u64, solana_sdk::pubkey::Pubkey, bool)> = Vec::new();
     
     for deployer in deployers {
-        let deploy_key = (deployer.deployer_address, board.round_id);
+        // Get miner address for this deployer
+        let miner_address = match miner_cache.get_miner_address_for_deployer(&deployer.deployer_address) {
+            Some(addr) => addr,
+            None => continue, // Not in cache yet
+        };
         
-        // Skip if already deployed this round
-        if deployed_rounds.contains(&deploy_key) {
-            info!("Skipping {}: already deployed this round", deployer.manager_address);
-            continue;
+        // Check if already deployed this round using cache
+        if miner_cache.has_deployed_in_round(&miner_address, board.round_id) {
+            continue; // Already deployed, skip silently
         }
         
-        // Check if checkpoint is needed
-        let checkpoint_round = crank.needs_checkpoint(deployer, AUTH_ID)?;
+        // Check if checkpoint is needed using cache
+        let checkpoint_round = miner_cache.needs_checkpoint(&miner_address);
         
-        // Calculate required balance for this deploy
-        let required = crank.calculate_required_balance_with_state(
-            deployer,
-            AUTH_ID,
-            DEPLOY_AMOUNT_LAMPORTS, 
-            SQUARES_MASK, 
-        )?;
+        // Get cached balance
+        let balance = miner_cache.get_balance(&miner_address).unwrap_or(0);
         
-        // Check balance in managed_miner_auth
-        let balance = crank.get_miner_balance(deployer, AUTH_ID)?;
+        // Check if miner has SOL rewards to recycle
+        let has_sol_to_recycle = miner_cache.has_sol_to_recycle(&miner_address);
         
         if balance >= required {
             info!(
@@ -571,17 +615,28 @@ async fn run_strategy(
             );
             to_deploy.push((deployer, AUTH_ID, board.round_id, DEPLOY_AMOUNT_LAMPORTS, SQUARES_MASK, checkpoint_round));
         } else if checkpoint_round.is_some() {
-            // Not enough to deploy but needs checkpoint - do checkpoint only
-            info!("Manager {} needs checkpoint but insufficient balance for deploy", deployer.manager_address);
-            match crank.execute_checkpoint_recycle(deployer, AUTH_ID, checkpoint_round.unwrap()).await {
-                Ok(sig) => info!("✓ Checkpoint+recycle for {}: {}", deployer.manager_address, sig),
-                Err(e) => error!("✗ Checkpoint+recycle failed for {}: {}", deployer.manager_address, e),
+            // Not enough to deploy but needs checkpoint
+            checkpoint_only.push((deployer, checkpoint_round.unwrap(), miner_address, has_sol_to_recycle));
+        }
+        // Don't log insufficient balance every poll - too noisy
+    }
+    
+    // Execute checkpoint-only for miners that need it
+    if !checkpoint_only.is_empty() {
+        let with_recycle = checkpoint_only.iter().filter(|(_, _, _, has_sol)| *has_sol).count();
+        let without_recycle = checkpoint_only.len() - with_recycle;
+        info!("Executing {} checkpoint operations ({} with recycle, {} without)", 
+            checkpoint_only.len(), with_recycle, without_recycle);
+        for (deployer, round, _miner_addr, has_sol_to_recycle) in checkpoint_only {
+            let op_name = if has_sol_to_recycle { "Checkpoint+recycle" } else { "Checkpoint" };
+            match crank.execute_checkpoint_recycle(deployer, AUTH_ID, round, has_sol_to_recycle).await {
+                Ok(sig) => {
+                    info!("✓ {} for {}: {}", op_name, deployer.manager_address, sig);
+                    // Invalidate cache after checkpoint
+                    miner_cache.invalidate_balances();
+                }
+                Err(e) => error!("✗ {} failed for {}: {}", op_name, deployer.manager_address, e),
             }
-        } else {
-            warn!(
-                "Skipping {}: insufficient balance ({} < {} lamports)",
-                deployer.manager_address, balance, required
-            );
         }
     }
     
@@ -592,7 +647,9 @@ async fn run_strategy(
         let reg = registry.read().await;
         
         for batch in to_deploy.chunks(MAX_BATCH_SIZE) {
-            let deployer_keys: Vec<_> = batch.iter().map(|(d, _, _, _, _, _)| d.deployer_address).collect();
+            let miner_addresses: Vec<_> = batch.iter()
+                .filter_map(|(d, _, _, _, _, _)| miner_cache.get_miner_address_for_deployer(&d.deployer_address))
+                .collect();
             let batch_vec: Vec<_> = batch.to_vec();
             let checkpoints_in_batch = batch.iter().filter(|(_, _, _, _, _, cp)| cp.is_some()).count();
             
@@ -601,11 +658,14 @@ async fn run_strategy(
                 Ok(sig) => {
                     info!("✓ Autodeploy ({} deployers, {} checkpoints): {}", 
                         batch.len(), checkpoints_in_batch, sig);
-                    for key in deployer_keys {
-                        deployed_rounds.insert((key, board.round_id));
-                    }
+                    // Mark miners as deployed in cache
+                    miner_cache.mark_deployed(&miner_addresses, board.round_id);
                 }
-                Err(e) => error!("✗ Autodeploy failed: {}", e),
+                Err(e) => {
+                    error!("✗ Autodeploy failed: {}", e);
+                    // Invalidate cache on failure to get fresh data next time
+                    miner_cache.invalidate_balances();
+                }
             }
         }
     }

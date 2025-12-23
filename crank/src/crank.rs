@@ -109,17 +109,32 @@ impl Crank {
         }
     }
     
+    /// Get a reference to the RPC client (for miner cache)
+    pub fn rpc_client(&self) -> &RpcClient {
+        &self.rpc_client
+    }
+    
     /// Find all deployer accounts where we are the deploy_authority
+    /// Uses optimized GPA with data size filter for efficient bulk fetching
     pub async fn find_deployers(&self) -> Result<Vec<DeployerInfo>, CrankError> {
         let deploy_authority_pubkey = self.deploy_authority.pubkey();
         
-        info!("Scanning for deployers with deploy_authority: {}", deploy_authority_pubkey);
+        // Deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee + 8 flat_fee + 8 expected_bps_fee + 8 expected_flat_fee + 8 max_per_round = 112
+        const DEPLOYER_SIZE: u64 = 112;
         
-        // Use getProgramAccounts to find all Deployer accounts
+        info!("Scanning for deployers with deploy_authority: {} (data_size={})", 
+            deploy_authority_pubkey, DEPLOYER_SIZE);
+        
+        // Use getProgramAccounts with optimized filters:
+        // 1. Data size filter - most efficient, filters on server side
+        // 2. Discriminator filter - ensures we get Deployer accounts
+        // 3. Deploy authority filter - only accounts we manage
         let accounts = self.rpc_client.get_program_accounts_with_config(
             &evore::id(),
             solana_client::rpc_config::RpcProgramAccountsConfig {
                 filters: Some(vec![
+                    // Filter by data size first (most efficient filter)
+                    solana_client::rpc_filter::RpcFilterType::DataSize(DEPLOYER_SIZE),
                     // Filter by account discriminator (Deployer = 101)
                     solana_client::rpc_filter::RpcFilterType::Memcmp(
                         solana_client::rpc_filter::Memcmp::new_base58_encoded(
@@ -143,49 +158,40 @@ impl Crank {
             },
         ).map_err(|e| CrankError::Rpc(e.to_string()))?;
         
+        info!("GPA returned {} deployer accounts", accounts.len());
+        
         let mut deployers = Vec::new();
         
-        // Deployer size: 8 discriminator + 32 manager_key + 32 deploy_authority + 8 bps_fee + 8 flat_fee + 8 expected_bps_fee + 8 expected_flat_fee + 8 max_per_round = 112
-        const DEPLOYER_SIZE: usize = 112;
-        
         for (deployer_address, account) in accounts {
-            let data_len = account.data.len();
-            
-            if data_len == DEPLOYER_SIZE {
-                match Deployer::try_from_bytes(&account.data) {
-                    Ok(deployer) => {
-                        let manager_address = deployer.manager_key;
-                        let fee_str = format!("{} bps + {} lamports flat", deployer.bps_fee, deployer.flat_fee);
+            match Deployer::try_from_bytes(&account.data) {
+                Ok(deployer) => {
+                    let manager_address = deployer.manager_key;
+                    let fee_str = format!("{} bps + {} lamports flat", deployer.bps_fee, deployer.flat_fee);
+                    let expected_str = format!("expected: {} bps + {} lamports", deployer.expected_bps_fee, deployer.expected_flat_fee);
 
-                        deployers.push(DeployerInfo {
-                            deployer_address,
-                            manager_address,
-                            bps_fee: deployer.bps_fee,
-                            flat_fee: deployer.flat_fee,
-                            max_per_round: deployer.max_per_round,
-                        });
-                        
-                        info!(
-                            "Found deployer: {} for manager: {} (fee: {}, max_per_round: {})",
-                            deployer_address, manager_address, fee_str, deployer.max_per_round
-                        );
-                    }
-                    Err(e) => {
-                        warn!(
-                            "Failed to parse deployer {}: {:?}",
-                            deployer_address, e
-                        );
-                    }
+                    deployers.push(DeployerInfo {
+                        deployer_address,
+                        manager_address,
+                        bps_fee: deployer.bps_fee,
+                        flat_fee: deployer.flat_fee,
+                        expected_bps_fee: deployer.expected_bps_fee,
+                        expected_flat_fee: deployer.expected_flat_fee,
+                        max_per_round: deployer.max_per_round,
+                    });
+                    
+                    debug!(
+                        "Found deployer: {} for manager: {} (fee: {}, {}, max_per_round: {})",
+                        deployer_address, manager_address, fee_str, expected_str, deployer.max_per_round
+                    );
                 }
-            } else {
-                warn!(
-                    "Deployer account {} has unexpected size {} (expected {})",
-                    deployer_address, data_len, DEPLOYER_SIZE
-                );
+                Err(e) => {
+                    warn!(
+                        "Failed to parse deployer {}: {:?}",
+                        deployer_address, e
+                    );
+                }
             }
         }
-        
-        info!("Found {} deployers", deployers.len());
         
         Ok(deployers)
     }
@@ -407,17 +413,20 @@ impl Crank {
         }
     }
     
-    /// Execute checkpoint and recycle only (no deploy)
-    /// Use this when balance is too low to deploy but we still want to claim winnings
+    /// Execute checkpoint and optionally recycle (no deploy)
+    /// Use this when balance is too low to deploy but we still want to checkpoint/claim winnings
+    /// Only includes recycle if should_recycle is true (i.e., miner has SOL rewards to claim)
     pub async fn execute_checkpoint_recycle(
         &self,
         deployer: &DeployerInfo,
         auth_id: u64,
         checkpoint_round: u64,
+        should_recycle: bool,
     ) -> Result<String, CrankError> {
+        let op_name = if should_recycle { "checkpoint+recycle" } else { "checkpoint" };
         info!(
-            "Executing checkpoint+recycle for manager {} auth_id {} (checkpointing round {})",
-            deployer.manager_address, auth_id, checkpoint_round
+            "Executing {} for manager {} auth_id {} (checkpointing round {})",
+            op_name, deployer.manager_address, auth_id, checkpoint_round
         );
         
         let payer = &self.deploy_authority;
@@ -429,8 +438,9 @@ impl Crank {
         
         let mut instructions = Vec::new();
         
-        // ~150k CU for checkpoint + recycle
-        instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(200_000));
+        // ~150k CU for checkpoint + recycle, ~100k for checkpoint only
+        let cu_limit = if should_recycle { 200_000 } else { 150_000 };
+        instructions.push(ComputeBudgetInstruction::set_compute_unit_limit(cu_limit));
         instructions.push(ComputeBudgetInstruction::set_compute_unit_price(self.config.priority_fee));
         
         // Checkpoint
@@ -441,12 +451,14 @@ impl Crank {
             auth_id,
         ));
         
-        // Recycle
-        instructions.push(recycle_sol(
-            payer.pubkey(),
-            deployer.manager_address,
-            auth_id,
-        ));
+        // Only include recycle if there's SOL to recycle
+        if should_recycle {
+            instructions.push(recycle_sol(
+                payer.pubkey(),
+                deployer.manager_address,
+                auth_id,
+            ));
+        }
         
         let mut tx = Transaction::new_with_payer(&instructions, Some(&payer.pubkey()));
         tx.sign(&[payer], recent_blockhash);
@@ -455,11 +467,11 @@ impl Crank {
         
         match self.sender.send_and_confirm_rpc(&tx, 60).await {
             Ok(sig) => {
-                info!("✓ Checkpoint+recycle confirmed: {}", sig);
+                info!("✓ {} confirmed: {}", op_name, sig);
                 Ok(sig.to_string())
             }
             Err(e) => {
-                error!("✗ Checkpoint+recycle failed: {}", e);
+                error!("✗ {} failed: {}", op_name, e);
                 Err(CrankError::Send(e.to_string()))
             }
         }
@@ -946,12 +958,19 @@ impl Crank {
     
     /// Update expected fees for a deployer (as deploy_authority)
     /// This allows the deploy_authority to protect itself from fee changes by the manager
+    /// Returns Ok(None) if the expected fees are already set correctly (no tx needed)
+    /// Returns Ok(Some(signature)) if a transaction was sent
     pub async fn update_expected_fees(
         &self,
         deployer: &DeployerInfo,
         expected_bps_fee: u64,
         expected_flat_fee: u64,
-    ) -> Result<String, CrankError> {
+    ) -> Result<Option<String>, CrankError> {
+        // Check if already set to the desired values
+        if deployer.expected_bps_fee == expected_bps_fee && deployer.expected_flat_fee == expected_flat_fee {
+            return Ok(None);
+        }
+        
         let payer = &self.deploy_authority;
         
         // Build the update_deployer instruction
@@ -982,7 +1001,7 @@ impl Crank {
         
         // Send and confirm
         match self.sender.send_and_confirm_rpc(&tx, 60).await {
-            Ok(sig) => Ok(sig.to_string()),
+            Ok(sig) => Ok(Some(sig.to_string())),
             Err(e) => Err(CrankError::Send(e.to_string())),
         }
     }
