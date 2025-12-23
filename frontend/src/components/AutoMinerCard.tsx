@@ -33,7 +33,7 @@ interface AutoMinerCardProps {
   isSelected?: boolean;
   onToggleSelect?: () => void;
   onDeposit: (authId: bigint, amount: bigint) => Promise<string>;
-  onWithdraw: (authId: bigint, rewardsSol: bigint, autodeployBalance: bigint) => Promise<string>;
+  onClaimSol: () => Promise<string>;
   onCheckpoint: (roundId: bigint) => Promise<string>;
   onClaimOre: () => Promise<string>;
   onTransfer: (newAuthority: PublicKey) => Promise<string>;
@@ -79,7 +79,7 @@ export function AutoMinerCard({
   isSelected = false,
   onToggleSelect,
   onDeposit,
-  onWithdraw,
+  onClaimSol,
   onCheckpoint,
   onClaimOre,
   onTransfer,
@@ -107,8 +107,8 @@ export function AutoMinerCard({
     miner.checkpointId < miner.roundId && 
     roundsBehind >= 3;
 
-  // Total withdrawable (SOL rewards + autodeploy balance)
-  const totalWithdrawable = (miner?.rewardsSol || BigInt(0)) + (deployer?.autodeployBalance || BigInt(0));
+  // Total claimable SOL (rewards + autodeploy balance)
+  const totalClaimableSol = (miner?.rewardsSol || BigInt(0)) + (deployer?.autodeployBalance || BigInt(0));
 
   // Check if balance is too low for deployments
   // First deploy needs more (miner account creation), subsequent deploys need less
@@ -131,13 +131,11 @@ export function AutoMinerCard({
     }
   };
 
-  const handleWithdraw = async () => {
-    if (!deployer) return;
+  const handleClaimSol = async () => {
     try {
-      setLoading("withdraw");
+      setLoading("claimSol");
       setError(null);
-      // Use auth_id 0 for legacy deployers
-      await onWithdraw(BigInt(0), miner?.rewardsSol || BigInt(0), deployer.autodeployBalance);
+      await onClaimSol();
     } catch (err: any) {
       setError(err.message);
     } finally {
@@ -300,7 +298,7 @@ export function AutoMinerCard({
           <div className="flex justify-between mt-1">
             <span>Max Per Round:</span>
             <span className="text-blue-400">
-              {deployer.maxPerRound === BigInt(0) ? 'Unlimited' : `${formatSol(deployer.maxPerRound)} SOL`}
+              {!deployer.maxPerRound || deployer.maxPerRound <= BigInt(0) ? 'Unlimited' : `${formatSol(deployer.maxPerRound)} SOL`}
             </span>
           </div>
         </div>
@@ -323,15 +321,15 @@ export function AutoMinerCard({
           Deposit
         </button>
         <button
-          onClick={handleWithdraw}
-          disabled={totalWithdrawable === BigInt(0) || loading !== null}
+          onClick={handleClaimSol}
+          disabled={!totalClaimableSol || totalClaimableSol <= BigInt(0) || loading !== null}
           className={`flex-1 px-3 py-2 rounded text-sm font-medium ${
-            totalWithdrawable > BigInt(0)
-              ? 'bg-orange-600 hover:bg-orange-500'
+            totalClaimableSol > BigInt(0)
+              ? 'bg-yellow-600 hover:bg-yellow-500'
               : 'bg-zinc-700 text-zinc-500 cursor-not-allowed'
           }`}
         >
-          {loading === "withdraw" ? "..." : "Withdraw All"}
+          {loading === "claimSol" ? "..." : "Claim SOL"}
         </button>
         {needsCheckpoint && (
           <button

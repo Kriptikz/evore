@@ -21,14 +21,21 @@ export default function Home() {
     walletBalance,
     loading,
     createAutoMiner,
+    bulkCreateAutoMiners,
     depositAutodeployBalance,
-    withdrawAll,
+    bulkDepositAutodeployBalance,
+    claimSol,
+    bulkClaimSol,
     checkpoint,
+    bulkCheckpoint,
     claimOre,
+    bulkClaimOre,
     transferManager,
   } = useEvore();
 
   const [creating, setCreating] = useState(false);
+  const [createCount, setCreateCount] = useState(1);
+  const [createProgress, setCreateProgress] = useState<{ completed: number; total: number } | null>(null);
   const [createError, setCreateError] = useState<string | null>(null);
   const [selectedManagers, setSelectedManagers] = useState<Set<string>>(new Set());
 
@@ -51,10 +58,19 @@ export default function Home() {
     BigInt(0)
   );
 
-  // Get managers with deployers (for selection)
-  const managersWithDeployers = managers.filter(m => 
-    deployers.some(d => d.data.managerKey.toBase58() === m.address.toBase58())
-  );
+  // Get managers with deployers (for selection), sorted by claimable ORE (descending)
+  const managersWithDeployers = managers
+    .filter(m => deployers.some(d => d.data.managerKey.toBase58() === m.address.toBase58()))
+    .sort((a, b) => {
+      const minerA = miners.get(a.address.toBase58());
+      const minerB = miners.get(b.address.toBase58());
+      const oreA = (minerA?.rewardsOre || BigInt(0)) + (minerA?.refinedOre || BigInt(0));
+      const oreB = (minerB?.rewardsOre || BigInt(0)) + (minerB?.refinedOre || BigInt(0));
+      // Sort descending (most ORE first)
+      if (oreB > oreA) return 1;
+      if (oreB < oreA) return -1;
+      return 0;
+    });
 
   // Selection helpers
   const toggleSelection = (managerKey: string) => {
@@ -77,51 +93,79 @@ export default function Home() {
     setSelectedManagers(new Set());
   };
 
-  // Bulk action handlers
+  // Bulk action handlers - all now use batched transactions that auto-split if needed
   const handleBulkDeposit = async (authId: bigint, amount: bigint) => {
     const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
-    for (const manager of selected) {
-      await depositAutodeployBalance(manager.address, authId, amount);
-    }
+    if (selected.length === 0) return;
+    
+    await bulkDepositAutodeployBalance(
+      selected.map(m => m.address),
+      authId,
+      amount
+    );
   };
 
-  const handleBulkWithdraw = async () => {
+  // Bulk claim SOL - claims all SOL (rewards + balance) from selected miners
+  const handleBulkClaimSol = async () => {
     const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
+    const claims: { managerAccount: PublicKey; authId: bigint }[] = [];
+    
     for (const manager of selected) {
       const deployer = getDeployerForManager(manager.address);
       const miner = getMinerForManager(manager.address);
-      if (deployer) {
-        await withdrawAll(
-          manager.address, 
-          BigInt(0), 
-          miner?.rewardsSol || BigInt(0), 
-          deployer.autodeployBalance
-        );
+      // Include if there's any SOL to claim (rewards or balance)
+      const hasBalance = deployer && deployer.autodeployBalance > BigInt(0);
+      const hasRewards = miner && miner.rewardsSol > BigInt(0);
+      if (hasBalance || hasRewards) {
+        claims.push({
+          managerAccount: manager.address,
+          authId: BigInt(0),
+        });
       }
     }
+    
+    if (claims.length === 0) return;
+    await bulkClaimSol(claims);
   };
 
   const handleBulkCheckpoint = async () => {
     const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
+    const checkpoints: { managerAccount: PublicKey; roundId: bigint; authId: bigint }[] = [];
+    
     for (const manager of selected) {
       const miner = getMinerForManager(manager.address);
       if (miner && board?.roundId && miner.checkpointId < miner.roundId && miner.roundId < board.roundId) {
-        await checkpoint(manager.address, miner.roundId);
+        checkpoints.push({
+          managerAccount: manager.address,
+          roundId: miner.roundId,
+          authId: BigInt(0),
+        });
       }
     }
+    
+    if (checkpoints.length === 0) return;
+    await bulkCheckpoint(checkpoints);
   };
 
   const handleBulkClaimOre = async () => {
     const selected = managersWithDeployers.filter(m => selectedManagers.has(m.address.toBase58()));
+    const claims: { managerAccount: PublicKey; authId: bigint }[] = [];
+    
     for (const manager of selected) {
       const miner = getMinerForManager(manager.address);
       if (miner && (miner.rewardsOre > BigInt(0) || miner.refinedOre > BigInt(0))) {
-        await claimOre(manager.address);
+        claims.push({
+          managerAccount: manager.address,
+          authId: BigInt(0),
+        });
       }
     }
+    
+    if (claims.length === 0) return;
+    await bulkClaimOre(claims);
   };
 
-  // Handle create autominer
+  // Handle create autominer (single or bulk)
   const handleCreateAutoMiner = async () => {
     if (!DEFAULT_DEPLOYER_PUBKEY) {
       setCreateError("Deployer pubkey not configured. Set NEXT_PUBLIC_DEPLOYER_PUBKEY in .env");
@@ -131,12 +175,26 @@ export default function Home() {
     try {
       setCreating(true);
       setCreateError(null);
+      setCreateProgress(null);
       const deployAuthority = new PublicKey(DEFAULT_DEPLOYER_PUBKEY);
-      await createAutoMiner(deployAuthority, BigInt(DEFAULT_DEPLOYER_BPS_FEE), BigInt(DEFAULT_DEPLOYER_FLAT_FEE));
+      
+      if (createCount === 1) {
+        await createAutoMiner(deployAuthority, BigInt(DEFAULT_DEPLOYER_BPS_FEE), BigInt(DEFAULT_DEPLOYER_FLAT_FEE));
+      } else {
+        await bulkCreateAutoMiners(
+          createCount,
+          deployAuthority,
+          BigInt(DEFAULT_DEPLOYER_BPS_FEE),
+          BigInt(DEFAULT_DEPLOYER_FLAT_FEE),
+          BigInt(1_000_000_000),
+          (completed, total) => setCreateProgress({ completed, total })
+        );
+      }
     } catch (err: any) {
       setCreateError(err.message);
     } finally {
       setCreating(false);
+      setCreateProgress(null);
     }
   };
 
@@ -211,7 +269,7 @@ export default function Home() {
                   onSelectAll={selectAll}
                   onDeselectAll={deselectAll}
                   onBulkDeposit={handleBulkDeposit}
-                  onBulkWithdraw={handleBulkWithdraw}
+                  onBulkWithdraw={handleBulkClaimSol}
                   onBulkCheckpoint={handleBulkCheckpoint}
                   onBulkClaimOre={handleBulkClaimOre}
                   totalAutodeployBalance={totalAutodeployBalance}
@@ -219,12 +277,11 @@ export default function Home() {
               )}
 
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {managers.map((manager) => {
+                {managersWithDeployers.map((manager) => {
                   const deployer = getDeployerForManager(manager.address);
                   const miner = getMinerForManager(manager.address);
                   const managerKey = manager.address.toBase58();
                   
-                  // Only show managers that have deployers (fully set up)
                   if (!deployer) return null;
 
                   return (
@@ -243,9 +300,7 @@ export default function Home() {
                       isSelected={selectedManagers.has(managerKey)}
                       onToggleSelect={() => toggleSelection(managerKey)}
                       onDeposit={(authId, amount) => depositAutodeployBalance(manager.address, authId, amount)}
-                      onWithdraw={(authId, rewardsSol, autodeployBalance) => 
-                        withdrawAll(manager.address, authId, rewardsSol, autodeployBalance)
-                      }
+                      onClaimSol={() => claimSol(manager.address)}
                       onCheckpoint={(roundId) => checkpoint(manager.address, roundId)}
                       onClaimOre={() => claimOre(manager.address)}
                       onTransfer={(newAuthority) => transferManager(manager.address, newAuthority)}
@@ -256,11 +311,28 @@ export default function Home() {
                 {/* Create AutoMiner Card */}
                 <div className="bg-zinc-900/50 border border-dashed border-zinc-700 rounded-lg p-6 flex flex-col items-center justify-center min-h-[200px]">
                   <p className="text-zinc-500 mb-4 text-center">
-                    Create a new AutoMiner to start automated ORE mining
+                    Create AutoMiners to start automated ORE mining
                   </p>
                   {createError && (
                     <p className="text-red-400 text-sm mb-4 text-center">{createError}</p>
                   )}
+                  {createProgress && (
+                    <p className="text-purple-400 text-sm mb-4 text-center">
+                      Creating {createProgress.completed} of {createProgress.total}...
+                    </p>
+                  )}
+                  <div className="flex items-center gap-3 mb-4">
+                    <label className="text-sm text-zinc-400">Count:</label>
+                    <input
+                      type="number"
+                      min="1"
+                      max="50"
+                      value={createCount}
+                      onChange={(e) => setCreateCount(Math.max(1, Math.min(50, parseInt(e.target.value) || 1)))}
+                      disabled={creating}
+                      className="w-20 px-2 py-1 bg-zinc-800 border border-zinc-700 rounded text-center text-sm"
+                    />
+                  </div>
                   <button
                     onClick={handleCreateAutoMiner}
                     disabled={creating || !DEFAULT_DEPLOYER_PUBKEY}
@@ -270,7 +342,9 @@ export default function Home() {
                         : 'bg-purple-600 hover:bg-purple-500'
                     }`}
                   >
-                    {creating ? "Creating..." : "+ Create AutoMiner"}
+                    {creating 
+                      ? (createProgress ? `Creating ${createProgress.completed}/${createProgress.total}...` : "Creating...") 
+                      : `+ Create ${createCount > 1 ? `${createCount} AutoMiners` : "AutoMiner"}`}
                   </button>
                   {!DEFAULT_DEPLOYER_PUBKEY && (
                     <p className="text-xs text-zinc-500 mt-2">

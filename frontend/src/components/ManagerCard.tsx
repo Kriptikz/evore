@@ -358,9 +358,9 @@ export function ManagerCard({
               </button>
               <button
                 onClick={handleClaimSol}
-                disabled={miner.rewardsSol === BigInt(0) || claimLoading !== null}
+                disabled={!miner.rewardsSol || miner.rewardsSol <= BigInt(0) || claimLoading !== null}
                 className={`flex-1 px-2 py-1.5 text-xs rounded ${
-                  miner.rewardsSol > BigInt(0) 
+                  miner.rewardsSol && miner.rewardsSol > BigInt(0)
                     ? 'bg-yellow-600 hover:bg-yellow-500 text-white' 
                     : 'bg-zinc-700 text-zinc-500 cursor-not-allowed'
                 }`}
@@ -369,9 +369,9 @@ export function ManagerCard({
               </button>
               <button
                 onClick={handleClaimOre}
-                disabled={miner.rewardsOre === BigInt(0) || claimLoading !== null}
+                disabled={!miner.rewardsOre || miner.rewardsOre <= BigInt(0) || claimLoading !== null}
                 className={`flex-1 px-2 py-1.5 text-xs rounded ${
-                  miner.rewardsOre > BigInt(0) 
+                  miner.rewardsOre && miner.rewardsOre > BigInt(0)
                     ? 'bg-purple-600 hover:bg-purple-500 text-white' 
                     : 'bg-zinc-700 text-zinc-500 cursor-not-allowed'
                 }`}
@@ -416,7 +416,7 @@ export function ManagerCard({
             <div className="flex justify-between">
               <span className="text-zinc-400">Max Per Round:</span>
               <span className="text-blue-400">
-                {deployer.maxPerRound === BigInt(0) ? 'Unlimited' : `${formatSol(deployer.maxPerRound)} SOL`}
+                {!deployer.maxPerRound || deployer.maxPerRound <= BigInt(0) ? 'Unlimited' : `${formatSol(deployer.maxPerRound)} SOL`}
               </span>
             </div>
             <div className="flex justify-between">
@@ -447,7 +447,7 @@ export function ManagerCard({
             <button
               onClick={() => setShowWithdraw(true)}
               className="flex-1 px-3 py-1.5 text-sm bg-orange-600 hover:bg-orange-500 rounded"
-              disabled={deployer.autodeployBalance === BigInt(0)}
+              disabled={!deployer.autodeployBalance || deployer.autodeployBalance <= BigInt(0)}
             >
               Withdraw
             </button>

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState, useRef } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
-import { Keypair, PublicKey, Transaction } from "@solana/web3.js";
+import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { getDeployerPda, getManagedMinerAuthPda, getOreMinerPda, getOreBoardPda } from "@/lib/pda";
 import { Manager, Deployer, decodeManager, decodeDeployer } from "@/lib/accounts";
 import {
@@ -18,6 +18,10 @@ import {
   mmCreateMinerInstruction,
 } from "@/lib/instructions";
 import { EVORE_PROGRAM_ID, MANAGER_DISCRIMINATOR } from "@/lib/constants";
+
+// Max instructions per transaction to avoid transaction size limits
+// This is conservative to account for varying instruction sizes
+const MAX_INSTRUCTIONS_PER_TX = 6;
 
 interface ManagerAccount {
   address: PublicKey;
@@ -77,7 +81,7 @@ export function useEvore() {
     }
   }, [connection, publicKey]);
 
-  // Fetch all managers owned by the connected wallet
+  // Fetch all managers owned by the connected wallet using optimized GPA
   const fetchManagers = useCallback(async () => {
     if (!publicKey) {
       setManagers([]);
@@ -87,9 +91,17 @@ export function useEvore() {
     try {
       setLoading(true);
       
-      // Get all manager accounts where authority matches wallet
+      // Manager account size: 8 discriminator + 32 authority = 40 bytes
+      const MANAGER_SIZE = 40;
+      
+      // Get all manager accounts using optimized filters:
+      // 1. DataSize filter (most efficient, applied server-side first)
+      // 2. Discriminator filter
+      // 3. Authority filter
       const accounts = await connection.getProgramAccounts(EVORE_PROGRAM_ID, {
         filters: [
+          // Filter by data size first (most efficient)
+          { dataSize: MANAGER_SIZE },
           // Filter by discriminator (Manager = 100)
           {
             memcmp: {
@@ -122,7 +134,7 @@ export function useEvore() {
     }
   }, [connection, publicKey]);
 
-  // Fetch deployer for each manager
+  // Fetch deployer for each manager using bulk RPC calls
   const fetchDeployers = useCallback(async () => {
     if (managers.length === 0) {
       setDeployers([]);
@@ -130,33 +142,52 @@ export function useEvore() {
     }
 
     try {
-      const deployerPromises = managers.map(async (manager) => {
+      // Build arrays of addresses to fetch in bulk
+      const deployerPdas: PublicKey[] = [];
+      const authPdas: PublicKey[] = [];
+      const managerMap: Map<string, { deployerPda: PublicKey; authPda: PublicKey; manager: typeof managers[0] }> = new Map();
+
+      for (const manager of managers) {
         const [deployerPda] = getDeployerPda(manager.address);
-        // Funds are now held in managed_miner_auth PDA (auth_id 0)
         const [authPda] = getManagedMinerAuthPda(manager.address, BigInt(0));
+        
+        deployerPdas.push(deployerPda);
+        authPdas.push(authPda);
+        managerMap.set(deployerPda.toBase58(), { deployerPda, authPda, manager });
+      }
+
+      // Batch fetch all deployer accounts (single RPC call)
+      const deployerAccounts = await connection.getMultipleAccountsInfo(deployerPdas);
+      
+      // Batch fetch all auth balances (single RPC call using getMultipleAccountsInfo)
+      const authAccounts = await connection.getMultipleAccountsInfo(authPdas);
+
+      // Process results
+      const results: DeployerAccount[] = [];
+      for (let i = 0; i < deployerPdas.length; i++) {
+        const deployerAccount = deployerAccounts[i];
+        const authAccount = authAccounts[i];
+        const deployerPda = deployerPdas[i];
+        const authPda = authPdas[i];
+
+        if (!deployerAccount) continue;
 
         try {
-          const accountInfo = await connection.getAccountInfo(deployerPda);
-          if (!accountInfo) return null;
+          const data = decodeDeployer(Buffer.from(deployerAccount.data));
+          const balance = authAccount?.lamports ?? 0;
 
-          const data = decodeDeployer(Buffer.from(accountInfo.data));
-          
-          // Get balance from managed_miner_auth PDA
-          const balance = await connection.getBalance(authPda);
-
-          return {
+          results.push({
             address: deployerPda,
             data,
             autodeployBalance: BigInt(balance),
             authPdaAddress: authPda,
-          };
+          });
         } catch {
-          return null;
+          // Failed to decode, skip
         }
-      });
+      }
 
-      const results = await Promise.all(deployerPromises);
-      setDeployers(results.filter((d): d is DeployerAccount => d !== null));
+      setDeployers(results);
     } catch (err) {
       console.error("Error fetching deployers:", err);
     }
@@ -188,7 +219,7 @@ export function useEvore() {
     }
   }, [connection]);
 
-  // Fetch miner accounts for each manager (auth_id 0)
+  // Fetch miner accounts for each manager (auth_id 0) using bulk RPC call
   const fetchMiners = useCallback(async () => {
     if (managers.length === 0) {
       setMiners(new Map());
@@ -196,16 +227,31 @@ export function useEvore() {
     }
 
     try {
-      const newMiners = new Map<string, MinerAccount>();
-      
+      // Build array of miner PDAs to fetch in bulk
+      const minerPdas: PublicKey[] = [];
+      const managerKeys: string[] = [];
+
       for (const manager of managers) {
         const [managedMinerAuthPda] = getManagedMinerAuthPda(manager.address, BigInt(0));
         const [oreMinerPda] = getOreMinerPda(managedMinerAuthPda);
+        minerPdas.push(oreMinerPda);
+        managerKeys.push(manager.address.toBase58());
+      }
+
+      // Batch fetch all miner accounts (single RPC call)
+      const minerAccounts = await connection.getMultipleAccountsInfo(minerPdas);
+
+      // Process results
+      const newMiners = new Map<string, MinerAccount>();
+      
+      for (let i = 0; i < minerPdas.length; i++) {
+        const accountInfo = minerAccounts[i];
+        const oreMinerPda = minerPdas[i];
+        const managerKey = managerKeys[i];
+
+        if (!accountInfo) continue;
 
         try {
-          const accountInfo = await connection.getAccountInfo(oreMinerPda);
-          if (!accountInfo) continue;
-
           const data = Buffer.from(accountInfo.data);
           // ORE Miner layout:
           // 8 bytes discriminator
@@ -236,7 +282,7 @@ export function useEvore() {
           const refinedOre = data.readBigUInt64LE(8 + 32 + 200 + 200 + 8 + 8 + 8 + 8 + 16 + 8 + 8);
           const roundId = data.readBigUInt64LE(8 + 32 + 200 + 200 + 8 + 8 + 8 + 8 + 16 + 8 + 8 + 8);
           
-          newMiners.set(manager.address.toBase58(), {
+          newMiners.set(managerKey, {
             address: oreMinerPda,
             authority: authority,
             roundId,
@@ -247,7 +293,7 @@ export function useEvore() {
             refinedOre,
           });
         } catch (err) {
-          console.error("Error fetching miner for", manager.address.toBase58(), err);
+          console.error("Error parsing miner for", managerKey, err);
         }
       }
 
@@ -342,6 +388,67 @@ export function useEvore() {
     return signature;
   }, [connection, publicKey, sendTransaction, fetchManagers, fetchDeployers, fetchMiners]);
 
+  // Bulk create multiple AutoMiners
+  // Batches 3 AutoMiners per transaction (each is 3 instructions = 9 per tx)
+  const AUTOMINERS_PER_TX = 3;
+  
+  const bulkCreateAutoMiners = useCallback(async (
+    count: number,
+    deployAuthority: PublicKey,
+    bpsFee: bigint,
+    flatFee: bigint = BigInt(0),
+    maxPerRound: bigint = BigInt(1_000_000_000),
+    onProgress?: (completed: number, total: number) => void
+  ): Promise<string[]> => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (count <= 0) throw new Error("Count must be positive");
+
+    const signatures: string[] = [];
+    let created = 0;
+    
+    while (created < count) {
+      // How many to create in this batch (up to 3)
+      const batchSize = Math.min(AUTOMINERS_PER_TX, count - created);
+      const keypairs: Keypair[] = [];
+      
+      const tx = new Transaction();
+      
+      // Add instructions for each AutoMiner in the batch
+      for (let i = 0; i < batchSize; i++) {
+        const managerKeypair = Keypair.generate();
+        keypairs.push(managerKeypair);
+        
+        tx.add(createManagerInstruction(publicKey, managerKeypair.publicKey));
+        tx.add(createDeployerInstruction(publicKey, managerKeypair.publicKey, deployAuthority, bpsFee, flatFee, maxPerRound));
+        tx.add(mmCreateMinerInstruction(publicKey, managerKeypair.publicKey, BigInt(0)));
+      }
+      
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = publicKey;
+
+      // Partially sign with all manager keypairs in this batch
+      for (const keypair of keypairs) {
+        tx.partialSign(keypair);
+      }
+
+      const signature = await sendTransaction(tx, connection);
+      await connection.confirmTransaction(signature, "confirmed");
+      signatures.push(signature);
+      
+      created += batchSize;
+      
+      if (onProgress) {
+        onProgress(created, count);
+      }
+    }
+    
+    await fetchManagers();
+    await fetchDeployers();
+    await fetchMiners();
+    return signatures;
+  }, [connection, publicKey, sendTransaction, fetchManagers, fetchDeployers, fetchMiners]);
+
   // Update a deployer
   const updateDeployer = useCallback(async (
     managerAccount: PublicKey,
@@ -368,7 +475,48 @@ export function useEvore() {
     return signature;
   }, [connection, publicKey, sendTransaction, fetchDeployers]);
 
-  // Bulk update multiple deployers in a single transaction
+  // Helper to send batched transactions, splitting if necessary
+  const sendBatchedTransactions = useCallback(async (
+    instructions: TransactionInstruction[],
+    onProgress?: (completed: number, total: number) => void
+  ): Promise<string[]> => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (instructions.length === 0) throw new Error("No instructions to send");
+
+    const signatures: string[] = [];
+    const batches: TransactionInstruction[][] = [];
+    
+    // Split instructions into batches
+    for (let i = 0; i < instructions.length; i += MAX_INSTRUCTIONS_PER_TX) {
+      batches.push(instructions.slice(i, i + MAX_INSTRUCTIONS_PER_TX));
+    }
+
+    // Send each batch
+    for (let i = 0; i < batches.length; i++) {
+      const batch = batches[i];
+      const tx = new Transaction();
+      
+      for (const ix of batch) {
+        tx.add(ix);
+      }
+      
+      const { blockhash } = await connection.getLatestBlockhash();
+      tx.recentBlockhash = blockhash;
+      tx.feePayer = publicKey;
+
+      const signature = await sendTransaction(tx, connection);
+      await connection.confirmTransaction(signature, "confirmed");
+      signatures.push(signature);
+      
+      if (onProgress) {
+        onProgress(i + 1, batches.length);
+      }
+    }
+
+    return signatures;
+  }, [connection, publicKey, sendTransaction]);
+
+  // Bulk update multiple deployers, splitting into multiple transactions if needed
   const bulkUpdateDeployers = useCallback(async (
     managerAccounts: PublicKey[],
     newDeployAuthority: PublicKey,
@@ -381,23 +529,102 @@ export function useEvore() {
     if (!publicKey) throw new Error("Wallet not connected");
     if (managerAccounts.length === 0) throw new Error("No managers to update");
 
-    const tx = new Transaction();
+    const instructions: TransactionInstruction[] = managerAccounts.map(managerAccount =>
+      updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee, newExpectedBpsFee, newExpectedFlatFee, newMaxPerRound)
+    );
     
-    for (const managerAccount of managerAccounts) {
-      const ix = updateDeployerInstruction(publicKey, managerAccount, newDeployAuthority, newBpsFee, newFlatFee, newExpectedBpsFee, newExpectedFlatFee, newMaxPerRound);
-      tx.add(ix);
-    }
-    
-    const { blockhash } = await connection.getLatestBlockhash();
-    tx.recentBlockhash = blockhash;
-    tx.feePayer = publicKey;
-
-    const signature = await sendTransaction(tx, connection);
-    await connection.confirmTransaction(signature, "confirmed");
+    const signatures = await sendBatchedTransactions(instructions);
     
     await fetchDeployers();
-    return signature;
-  }, [connection, publicKey, sendTransaction, fetchDeployers]);
+    return signatures;
+  }, [publicKey, sendBatchedTransactions, fetchDeployers]);
+
+  // Bulk deposit to multiple managers, splitting into multiple transactions if needed
+  const bulkDepositAutodeployBalance = useCallback(async (
+    managerAccounts: PublicKey[],
+    authId: bigint,
+    amount: bigint
+  ) => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (managerAccounts.length === 0) throw new Error("No managers to deposit to");
+
+    const instructions: TransactionInstruction[] = managerAccounts.map(managerAccount =>
+      depositAutodeployBalanceInstruction(publicKey, managerAccount, authId, amount)
+    );
+    
+    const signatures = await sendBatchedTransactions(instructions);
+    
+    await fetchDeployers();
+    return signatures;
+  }, [publicKey, sendBatchedTransactions, fetchDeployers]);
+
+  // Bulk withdraw from multiple managers, splitting into multiple transactions if needed
+  const bulkWithdrawAutodeployBalance = useCallback(async (
+    withdrawals: { managerAccount: PublicKey; authId: bigint; amount: bigint }[]
+  ) => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (withdrawals.length === 0) throw new Error("No managers to withdraw from");
+
+    const instructions: TransactionInstruction[] = withdrawals.map(({ managerAccount, authId, amount }) =>
+      withdrawAutodeployBalanceInstruction(publicKey, managerAccount, authId, amount)
+    );
+    
+    const signatures = await sendBatchedTransactions(instructions);
+    
+    await fetchDeployers();
+    return signatures;
+  }, [publicKey, sendBatchedTransactions, fetchDeployers]);
+
+  // Bulk checkpoint multiple miners, splitting into multiple transactions if needed
+  const bulkCheckpoint = useCallback(async (
+    checkpoints: { managerAccount: PublicKey; roundId: bigint; authId: bigint }[]
+  ) => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (checkpoints.length === 0) throw new Error("No miners to checkpoint");
+
+    const instructions: TransactionInstruction[] = checkpoints.map(({ managerAccount, roundId, authId }) =>
+      mmCheckpointInstruction(publicKey, managerAccount, roundId, authId)
+    );
+    
+    const signatures = await sendBatchedTransactions(instructions);
+    
+    await fetchMiners();
+    return signatures;
+  }, [publicKey, sendBatchedTransactions, fetchMiners]);
+
+  // Bulk claim SOL from multiple miners, splitting into multiple transactions if needed
+  const bulkClaimSol = useCallback(async (
+    claims: { managerAccount: PublicKey; authId: bigint }[]
+  ) => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (claims.length === 0) throw new Error("No miners to claim SOL from");
+
+    const instructions: TransactionInstruction[] = claims.map(({ managerAccount, authId }) =>
+      mmClaimSolInstruction(publicKey, managerAccount, authId)
+    );
+    
+    const signatures = await sendBatchedTransactions(instructions);
+    
+    await fetchMiners();
+    return signatures;
+  }, [publicKey, sendBatchedTransactions, fetchMiners]);
+
+  // Bulk claim ORE from multiple miners, splitting into multiple transactions if needed
+  const bulkClaimOre = useCallback(async (
+    claims: { managerAccount: PublicKey; authId: bigint }[]
+  ) => {
+    if (!publicKey) throw new Error("Wallet not connected");
+    if (claims.length === 0) throw new Error("No miners to claim ORE from");
+
+    const instructions: TransactionInstruction[] = claims.map(({ managerAccount, authId }) =>
+      mmClaimOreInstruction(publicKey, managerAccount, authId)
+    );
+    
+    const signatures = await sendBatchedTransactions(instructions);
+    
+    await fetchMiners();
+    return signatures;
+  }, [publicKey, sendBatchedTransactions, fetchMiners]);
 
   // Deposit to autodeploy balance (to managed_miner_auth PDA)
   const depositAutodeployBalance = useCallback(async (
@@ -627,14 +854,20 @@ export function useEvore() {
     createManager,
     createDeployer,
     createAutoMiner,
+    bulkCreateAutoMiners,
     updateDeployer,
     bulkUpdateDeployers,
     depositAutodeployBalance,
     withdrawAutodeployBalance,
+    bulkDepositAutodeployBalance,
+    bulkWithdrawAutodeployBalance,
     withdrawAll,
     checkpoint,
+    bulkCheckpoint,
     claimSol,
+    bulkClaimSol,
     claimOre,
+    bulkClaimOre,
     transferManager,
   };
 }

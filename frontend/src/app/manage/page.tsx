@@ -23,9 +23,14 @@ export default function ManagePage() {
     bulkUpdateDeployers,
     depositAutodeployBalance,
     withdrawAutodeployBalance,
+    bulkDepositAutodeployBalance,
+    bulkWithdrawAutodeployBalance,
     checkpoint,
+    bulkCheckpoint,
     claimSol,
+    bulkClaimSol,
     claimOre,
+    bulkClaimOre,
     transferManager,
   } = useEvore();
 
@@ -56,60 +61,110 @@ export default function ManagePage() {
     });
   };
 
+  // Sort managers by claimable ORE (descending - most ORE first)
+  const sortedManagers = [...managers].sort((a, b) => {
+    const minerA = miners.get(a.address.toBase58());
+    const minerB = miners.get(b.address.toBase58());
+    const oreA = (minerA?.rewardsOre || BigInt(0)) + (minerA?.refinedOre || BigInt(0));
+    const oreB = (minerB?.rewardsOre || BigInt(0)) + (minerB?.refinedOre || BigInt(0));
+    // Sort descending (most ORE first)
+    if (oreB > oreA) return 1;
+    if (oreB < oreA) return -1;
+    return 0;
+  });
+
   const selectAll = () => {
-    setSelectedManagers(new Set(managers.map(m => m.address.toBase58())));
+    setSelectedManagers(new Set(sortedManagers.map(m => m.address.toBase58())));
   };
 
   const deselectAll = () => {
     setSelectedManagers(new Set());
   };
 
-  // Bulk action handlers
+  // Bulk action handlers - all now use batched transactions that auto-split if needed
   const handleBulkDeposit = async (authId: bigint, amount: bigint) => {
     const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
-    for (const manager of selected) {
-      await depositAutodeployBalance(manager.address, authId, amount);
-    }
+    if (selected.length === 0) return;
+    
+    await bulkDepositAutodeployBalance(
+      selected.map(m => m.address),
+      authId,
+      amount
+    );
   };
 
   const handleBulkWithdraw = async () => {
     const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    const withdrawals: { managerAccount: PublicKey; authId: bigint; amount: bigint }[] = [];
+    
     for (const manager of selected) {
       const deployer = getDeployerForManager(manager.address);
       if (deployer && deployer.autodeployBalance > BigInt(0)) {
-        await withdrawAutodeployBalance(manager.address, BigInt(0), deployer.autodeployBalance);
+        withdrawals.push({
+          managerAccount: manager.address,
+          authId: BigInt(0),
+          amount: deployer.autodeployBalance,
+        });
       }
     }
+    
+    if (withdrawals.length === 0) return;
+    await bulkWithdrawAutodeployBalance(withdrawals);
   };
 
   const handleBulkCheckpoint = async () => {
     const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    const checkpoints: { managerAccount: PublicKey; roundId: bigint; authId: bigint }[] = [];
+    
     for (const manager of selected) {
       const miner = getMinerForManager(manager.address);
       if (miner && board?.roundId && miner.checkpointId < miner.roundId && miner.roundId < board.roundId) {
-        await checkpoint(manager.address, miner.roundId);
+        checkpoints.push({
+          managerAccount: manager.address,
+          roundId: miner.roundId,
+          authId: BigInt(0),
+        });
       }
     }
+    
+    if (checkpoints.length === 0) return;
+    await bulkCheckpoint(checkpoints);
   };
 
   const handleBulkClaimSol = async () => {
     const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    const claims: { managerAccount: PublicKey; authId: bigint }[] = [];
+    
     for (const manager of selected) {
       const miner = getMinerForManager(manager.address);
       if (miner && miner.rewardsSol > BigInt(0)) {
-        await claimSol(manager.address);
+        claims.push({
+          managerAccount: manager.address,
+          authId: BigInt(0),
+        });
       }
     }
+    
+    if (claims.length === 0) return;
+    await bulkClaimSol(claims);
   };
 
   const handleBulkClaimOre = async () => {
     const selected = managers.filter(m => selectedManagers.has(m.address.toBase58()));
+    const claims: { managerAccount: PublicKey; authId: bigint }[] = [];
+    
     for (const manager of selected) {
       const miner = getMinerForManager(manager.address);
       if (miner && miner.rewardsOre > BigInt(0)) {
-        await claimOre(manager.address);
+        claims.push({
+          managerAccount: manager.address,
+          authId: BigInt(0),
+        });
       }
     }
+    
+    if (claims.length === 0) return;
+    await bulkClaimOre(claims);
   };
 
   const handleBulkUpdate = async (deployAuthority: PublicKey, bpsFee: bigint, flatFee: bigint, maxPerRound: bigint) => {
@@ -118,7 +173,7 @@ export default function ManagePage() {
     const managersWithDeployers = selected.filter(m => getDeployerForManager(m.address));
     if (managersWithDeployers.length === 0) return;
     
-    // Batch all updates into a single transaction
+    // Batch updates - will auto-split into multiple transactions if needed
     await bulkUpdateDeployers(
       managersWithDeployers.map(m => m.address),
       deployAuthority,
@@ -194,10 +249,10 @@ export default function ManagePage() {
               <h2 className="text-xl font-semibold">Your Managers</h2>
               
               {/* Bulk Action Bar */}
-              {managers.length > 0 && (
+              {sortedManagers.length > 0 && (
                 <BulkActionBar
                   selectedCount={selectedManagers.size}
-                  totalCount={managers.length}
+                  totalCount={sortedManagers.length}
                   onSelectAll={selectAll}
                   onDeselectAll={deselectAll}
                   onBulkDeposit={handleBulkDeposit}
@@ -210,7 +265,7 @@ export default function ManagePage() {
               )}
               
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                {managers.map((manager) => {
+                {sortedManagers.map((manager) => {
                   const deployer = getDeployerForManager(manager.address);
                   const miner = getMinerForManager(manager.address);
                   const managerKey = manager.address.toBase58();

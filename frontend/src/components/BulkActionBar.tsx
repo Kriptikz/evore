@@ -187,9 +187,9 @@ export function BulkActionBar({
             <button
               onClick={handleBulkWithdraw}
               disabled={loading !== null}
-              className="px-3 py-1.5 text-sm bg-orange-600 hover:bg-orange-500 rounded disabled:opacity-50"
+              className="px-3 py-1.5 text-sm bg-yellow-600 hover:bg-yellow-500 rounded disabled:opacity-50"
             >
-              {loading === "withdraw" ? "..." : "Withdraw All"}
+              {loading === "withdraw" ? "..." : "Claim SOL All"}
             </button>
           )}
           {onBulkCheckpoint && (

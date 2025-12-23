@@ -23,8 +23,8 @@ export {
 
 // Frontend-specific constants from environment
 export const DEFAULT_DEPLOYER_PUBKEY = process.env.NEXT_PUBLIC_DEPLOYER_PUBKEY || "";
-export const DEFAULT_DEPLOYER_BPS_FEE = parseInt(process.env.NEXT_PUBLIC_DEPLOYER_BPS_FEE || "500"); // Default 5% (500 bps)
-export const DEFAULT_DEPLOYER_FLAT_FEE = parseInt(process.env.NEXT_PUBLIC_DEPLOYER_FLAT_FEE || "0"); // Default 0 lamports
+export const DEFAULT_DEPLOYER_BPS_FEE = parseInt(process.env.NEXT_PUBLIC_DEPLOYER_BPS_FEE || "0"); // Default 5% (500 bps)
+export const DEFAULT_DEPLOYER_FLAT_FEE = parseInt(process.env.NEXT_PUBLIC_DEPLOYER_FLAT_FEE || "715"); // Default 715 lamports
 
 // Stats server URL (for when using stats-server instead of direct RPC)
 export const STATS_SERVER_URL = process.env.NEXT_PUBLIC_STATS_SERVER_URL || "http://localhost:3001";
