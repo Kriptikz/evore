@@ -226,3 +226,18 @@ pub enum ConfirmationResult {
     /// Timed out waiting for confirmation
     Timeout,
 }
+
+/// A failed batch of miners that needs handling
+#[derive(Debug)]
+pub struct FailedBatch {
+    /// The miners that were in the failed transaction
+    pub miners: Vec<MinerTask>,
+    /// The transaction signature that failed
+    pub signature: Signature,
+    /// Type of transaction that failed
+    pub tx_type: TxType,
+    /// Round ID
+    pub round_id: u64,
+    /// Error message if available
+    pub error: Option<String>,
+}

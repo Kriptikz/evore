@@ -296,4 +296,75 @@ impl MinerCache {
             .find(|m| &m.deployer_address == deployer_address)
             .map(|m| m.miner_address)
     }
+
+    /// Refresh a single miner's data (for error recovery)
+    /// Returns the updated cached miner if found
+    pub fn refresh_single(
+        &mut self,
+        rpc_client: &RpcClient,
+        miner_address: &Pubkey,
+    ) -> Result<Option<CachedMiner>, CrankError> {
+        // Get existing cached miner to know the auth address
+        let cached = match self.miners.get(miner_address) {
+            Some(m) => m.clone(),
+            None => {
+                warn!("Cannot refresh unknown miner: {}", miner_address);
+                return Ok(None);
+            }
+        };
+
+        info!("[MinerCache] Refreshing single miner: {} (auth: {})", miner_address, cached.authority);
+
+        // Fetch both miner account and auth account
+        let accounts = rpc_client
+            .get_multiple_accounts(&[*miner_address, cached.authority])
+            .map_err(|e| CrankError::Rpc(format!("Failed to fetch miner accounts: {}", e)))?;
+
+        let miner_account = accounts.get(0).and_then(|a| a.as_ref());
+        let auth_account = accounts.get(1).and_then(|a| a.as_ref());
+        let auth_balance = auth_account.map(|a| a.lamports).unwrap_or(0);
+
+        let updated = if let Some(account) = miner_account {
+            match Miner::try_from_bytes(&account.data) {
+                Ok(miner) => {
+                    let has_deployed = miner.deployed.iter().any(|&d| d > 0);
+                    CachedMiner {
+                        miner_address: *miner_address,
+                        authority: cached.authority,
+                        deployer_address: cached.deployer_address,
+                        manager_address: cached.manager_address,
+                        checkpoint_id: miner.checkpoint_id,
+                        round_id: miner.round_id,
+                        has_deployed,
+                        auth_balance,
+                        rewards_sol: miner.rewards_sol,
+                        exists: true,
+                    }
+                }
+                Err(e) => {
+                    warn!("Failed to parse miner {}: {:?}", miner_address, e);
+                    CachedMiner {
+                        auth_balance,
+                        exists: false,
+                        ..cached
+                    }
+                }
+            }
+        } else {
+            // Miner doesn't exist (anymore?)
+            CachedMiner {
+                auth_balance,
+                exists: false,
+                ..cached
+            }
+        };
+
+        info!(
+            "[MinerCache] Refreshed miner {} | balance: {} | round_id: {} | deployed: {} | checkpoint_id: {}",
+            miner_address, updated.auth_balance, updated.round_id, updated.has_deployed, updated.checkpoint_id
+        );
+
+        self.miners.insert(*miner_address, updated.clone());
+        Ok(Some(updated))
+    }
 }

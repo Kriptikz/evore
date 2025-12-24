@@ -4,7 +4,7 @@
 
 use tokio::sync::{broadcast, mpsc};
 
-use super::types::{BatchedTx, MinerTask, PendingConfirmation, SignedTx};
+use super::types::{BatchedTx, FailedBatch, MinerTask, PendingConfirmation, SignedTx};
 
 /// Channel capacity constants
 pub const MINER_CHANNEL_SIZE: usize = 1000;
@@ -57,6 +57,12 @@ pub struct PipelineChannels {
     pub to_confirmation: mpsc::Sender<PendingConfirmation>,
     pub from_confirmation: mpsc::Receiver<PendingConfirmation>,
     
+    // === Failure handling ===
+    
+    /// Failed batches for refresh and retry
+    pub to_failure_handler: mpsc::Sender<FailedBatch>,
+    pub from_failure_handler: mpsc::Receiver<FailedBatch>,
+    
     // === Control signals ===
     
     /// Broadcast when a new round is detected
@@ -80,6 +86,7 @@ impl PipelineChannels {
         let (to_tx_processor, from_tx_processor) = mpsc::channel(TX_CHANNEL_SIZE);
         let (to_tx_sender, from_tx_sender) = mpsc::channel(TX_CHANNEL_SIZE);
         let (to_confirmation, from_confirmation) = mpsc::channel(CONFIRMATION_CHANNEL_SIZE);
+        let (to_failure_handler, from_failure_handler) = mpsc::channel(TX_CHANNEL_SIZE);
         
         let (round_changed, _) = broadcast::channel(16);
         let (shutdown, _) = broadcast::channel(1);
@@ -105,6 +112,8 @@ impl PipelineChannels {
             from_tx_sender,
             to_confirmation,
             from_confirmation,
+            to_failure_handler,
+            from_failure_handler,
             round_changed,
             shutdown,
         }
@@ -143,6 +152,7 @@ pub struct ChannelSenders {
     pub to_tx_processor: mpsc::Sender<BatchedTx>,
     pub to_tx_sender: mpsc::Sender<SignedTx>,
     pub to_confirmation: mpsc::Sender<PendingConfirmation>,
+    pub to_failure_handler: mpsc::Sender<FailedBatch>,
     pub round_changed: broadcast::Sender<u64>,
     pub shutdown: broadcast::Sender<()>,
 }
@@ -161,6 +171,7 @@ impl ChannelSenders {
             to_tx_processor: channels.to_tx_processor.clone(),
             to_tx_sender: channels.to_tx_sender.clone(),
             to_confirmation: channels.to_confirmation.clone(),
+            to_failure_handler: channels.to_failure_handler.clone(),
             round_changed: channels.round_changed.clone(),
             shutdown: channels.shutdown.clone(),
         }

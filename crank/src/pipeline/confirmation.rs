@@ -18,7 +18,7 @@ use crate::sender::TxSender;
 
 use super::channels::ChannelSenders;
 use super::shared_state::SharedState;
-use super::types::{MinerTask, PendingConfirmation, TxType};
+use super::types::{FailedBatch, MinerTask, PendingConfirmation, TxType};
 
 /// Maximum signatures per batch check
 const MAX_BATCH_SIZE: usize = 200;
@@ -98,6 +98,18 @@ pub async fn run(
                             TxType::FeeUpdate => {
                                 shared.stats.increment(&shared.stats.fee_updates_failed);
                             }
+                        }
+
+                        // Send to failure handler for intelligent retry
+                        let failed_batch = FailedBatch {
+                            miners: confirmation.miners,
+                            signature: sig,
+                            tx_type: confirmation.tx_type,
+                            round_id: confirmation.round_id,
+                            error: Some("Timeout".to_string()),
+                        };
+                        if let Err(e) = senders.to_failure_handler.send(failed_batch).await {
+                            error!("[Confirmation] Failed to send timeout to failure handler: {}", e);
                         }
                     }
                 }
@@ -182,23 +194,26 @@ pub async fn run(
                                                 TxType::Deploy => {
                                                     shared.stats.increment(&shared.stats.deploys_failed);
                                                     shared.stats.add(&shared.stats.miners_deploy_failed, miner_count);
-
-                                                    // Retry miners
-                                                    for miner in confirmation.miners {
-                                                        if miner.can_retry() {
-                                                            let _ = senders.to_deployment_check.send(miner.with_retry()).await;
-                                                        }
-                                                    }
                                                 }
                                                 TxType::Checkpoint => {
                                                     shared.stats.increment(&shared.stats.checkpoints_failed);
                                                     shared.stats.add(&shared.stats.miners_checkpoint_failed, miner_count);
-                                                    // No retry for checkpoints
                                                 }
                                                 TxType::FeeUpdate => {
                                                     shared.stats.increment(&shared.stats.fee_updates_failed);
-                                                    // No retry for fee updates
                                                 }
+                                            }
+
+                                            // Send to failure handler for intelligent retry
+                                            let failed_batch = FailedBatch {
+                                                miners: confirmation.miners,
+                                                signature: *sig,
+                                                tx_type: confirmation.tx_type,
+                                                round_id: confirmation.round_id,
+                                                error: None, // We don't have error details from signature status
+                                            };
+                                            if let Err(e) = senders.to_failure_handler.send(failed_batch).await {
+                                                error!("[Confirmation] Failed to send to failure handler: {}", e);
                                             }
                                         }
                                     }

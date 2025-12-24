@@ -24,6 +24,7 @@ pub mod confirmation;
 pub mod deployer_batcher;
 pub mod deployment_check;
 pub mod expected_fee_updater;
+pub mod failure_handler;
 pub mod fee_check;
 pub mod lut_check;
 pub mod lut_creation;
@@ -114,6 +115,10 @@ pub async fn run_pipeline(
         &mut channels.from_confirmation,
         mpsc::channel(1).1,
     );
+    let failure_handler_rx = std::mem::replace(
+        &mut channels.from_failure_handler,
+        mpsc::channel(1).1,
+    );
 
     // Spawn all systems as tokio tasks
     let handles = vec![
@@ -198,6 +203,13 @@ pub async fn run_pipeline(
             senders.clone(),
             confirmation_rx,
             config.rpc_url.clone(),
+        )),
+        // Failure Handler (processes failed batches)
+        tokio::spawn(failure_handler::run(
+            shared.clone(),
+            senders.clone(),
+            failure_handler_rx,
+            rpc_client.clone(),
         )),
     ];
 
