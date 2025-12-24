@@ -68,12 +68,16 @@ export declare function mmClaimOreInstruction(
   authId?: bigint
 ): TransactionInstruction;
 
-// Deployer (manager authority)
+// Deployer (manager authority creates, both can update)
+// - Manager sets: expectedBpsFee, expectedFlatFee (max fees they accept), maxPerRound
+// - Deploy authority sets: bpsFee, flatFee (actual fees charged, must be <= expected)
 export declare function createDeployerInstruction(
   signer: PublicKey,
   manager: PublicKey,
   deployAuthority: PublicKey,
+  /** Max bps fee user accepts (deployer can charge up to this) */
   bpsFee: bigint,
+  /** Max flat fee user accepts (deployer can charge up to this) */
   flatFee?: bigint,
   maxPerRound?: bigint
 ): TransactionInstruction;
@@ -82,9 +86,13 @@ export declare function updateDeployerInstruction(
   signer: PublicKey,
   manager: PublicKey,
   newDeployAuthority: PublicKey,
+  /** Actual bps fee (deploy authority only, must be <= expected) */
   newBpsFee: bigint,
+  /** Actual flat fee (deploy authority only, must be <= expected) */
   newFlatFee?: bigint,
+  /** Max bps fee user accepts (manager only) */
   newExpectedBpsFee?: bigint,
+  /** Max flat fee user accepts (manager only) */
   newExpectedFlatFee?: bigint,
   newMaxPerRound?: bigint
 ): TransactionInstruction;

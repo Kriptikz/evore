@@ -39,8 +39,8 @@ const {
  * @param {import("@solana/web3.js").PublicKey} signer - User's wallet (pays for account creation)
  * @param {import("@solana/web3.js").PublicKey} managerAccount - New keypair for manager (must also sign!)
  * @param {import("@solana/web3.js").PublicKey} deployAuthority - Platform's executor pubkey
- * @param {bigint} bpsFee - Platform's percentage fee in basis points
- * @param {bigint} flatFee - Platform's flat fee in lamports
+ * @param {bigint} bpsFee - Max bps fee user accepts (deployer can charge up to this)
+ * @param {bigint} flatFee - Max flat fee user accepts (deployer can charge up to this)
  * @returns {import("@solana/web3.js").TransactionInstruction[]}
  */
 function buildCreateAutoMinerInstructions(
@@ -64,8 +64,8 @@ function buildCreateAutoMinerInstructions(
  * @param {import("@solana/web3.js").PublicKey} signer - User's wallet
  * @param {import("@solana/web3.js").PublicKey} managerAccount - New keypair for manager (must also sign!)
  * @param {import("@solana/web3.js").PublicKey} deployAuthority - Platform's executor pubkey
- * @param {bigint} bpsFee - Platform's percentage fee in basis points
- * @param {bigint} flatFee - Platform's flat fee in lamports
+ * @param {bigint} bpsFee - Max bps fee user accepts (deployer can charge up to this)
+ * @param {bigint} flatFee - Max flat fee user accepts (deployer can charge up to this)
  * @param {bigint} depositAmount - Initial SOL deposit in lamports
  * @returns {import("@solana/web3.js").TransactionInstruction[]}
  */

@@ -1,11 +1,14 @@
 import { PublicKey, TransactionInstruction } from "@solana/web3.js";
 
 // Setup
+// bpsFee and flatFee are the max fees user accepts (deployer can charge up to these)
 export declare function buildCreateAutoMinerInstructions(
   signer: PublicKey,
   managerAccount: PublicKey,
   deployAuthority: PublicKey,
+  /** Max bps fee user accepts */
   bpsFee: bigint,
+  /** Max flat fee user accepts */
   flatFee?: bigint
 ): TransactionInstruction[];
 
@@ -13,7 +16,9 @@ export declare function buildSetupAutoMinerInstructions(
   signer: PublicKey,
   managerAccount: PublicKey,
   deployAuthority: PublicKey,
+  /** Max bps fee user accepts */
   bpsFee: bigint,
+  /** Max flat fee user accepts */
   flatFee: bigint,
   depositAmount: bigint
 ): TransactionInstruction[];

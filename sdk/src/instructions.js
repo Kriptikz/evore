@@ -386,8 +386,8 @@ function mmClaimOreInstruction(signer, manager, authId = 0n) {
  * @param {PublicKey} signer - Manager authority
  * @param {PublicKey} manager - Manager account
  * @param {PublicKey} deployAuthority - The authority that will execute autodeploys
- * @param {bigint} bpsFee - Percentage fee in basis points (1000 = 10%)
- * @param {bigint} flatFee - Flat fee in lamports (added on top of bpsFee)
+ * @param {bigint} bpsFee - Max bps fee the user accepts (deployer can charge up to this)
+ * @param {bigint} flatFee - Max flat fee in lamports the user accepts (deployer can charge up to this)
  * @param {bigint} maxPerRound - Maximum lamports to deploy per round (0 = unlimited)
  * @returns {TransactionInstruction}
  */
@@ -415,15 +415,15 @@ function createDeployerInstruction(signer, manager, deployAuthority, bpsFee, fla
 
 /**
  * Creates an UpdateDeployer instruction
- * - Manager authority: can update deploy_authority, bps_fee, flat_fee, max_per_round
- * - Deploy authority: can update deploy_authority, expected_bps_fee, expected_flat_fee
+ * - Manager authority: can update deploy_authority, expected_bps_fee, expected_flat_fee, max_per_round
+ * - Deploy authority: can update deploy_authority, bps_fee, flat_fee
  * @param {PublicKey} signer - Manager authority or deploy authority
  * @param {PublicKey} manager - Manager account
  * @param {PublicKey} newDeployAuthority - New deploy authority
- * @param {bigint} newBpsFee - New percentage fee in basis points (manager only)
- * @param {bigint} newFlatFee - New flat fee in lamports (manager only)
- * @param {bigint} newExpectedBpsFee - Expected bps_fee (deploy authority only, 0 = accept any)
- * @param {bigint} newExpectedFlatFee - Expected flat_fee (deploy authority only, 0 = accept any)
+ * @param {bigint} newBpsFee - Actual bps fee charged (deploy authority only, must be <= expected)
+ * @param {bigint} newFlatFee - Actual flat fee charged (deploy authority only, must be <= expected)
+ * @param {bigint} newExpectedBpsFee - Max bps fee user accepts (manager only, 0 = accept any)
+ * @param {bigint} newExpectedFlatFee - Max flat fee user accepts (manager only, 0 = accept any)
  * @param {bigint} newMaxPerRound - Maximum lamports to deploy per round (manager only, 0 = unlimited)
  * @returns {TransactionInstruction}
  */

@@ -8,9 +8,13 @@ export interface Manager {
 export interface Deployer {
   managerKey: PublicKey;
   deployAuthority: PublicKey;
+  /** Actual bps fee charged (set by deploy authority, must be <= expectedBpsFee) */
   bpsFee: bigint;
+  /** Actual flat fee charged (set by deploy authority, must be <= expectedFlatFee) */
   flatFee: bigint;
+  /** Max bps fee user accepts (set by manager) */
   expectedBpsFee: bigint;
+  /** Max flat fee user accepts (set by manager) */
   expectedFlatFee: bigint;
   maxPerRound: bigint;
 }
