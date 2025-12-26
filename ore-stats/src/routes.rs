@@ -210,13 +210,15 @@ pub async fn get_miner(
     State(state): State<Arc<AppState>>,
     Path(pubkey): Path<String>,
 ) -> Result<Json<MinerResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let authority = pubkey.parse::<Pubkey>().map_err(|_| {
+    // Validate pubkey format
+    let _ = pubkey.parse::<Pubkey>().map_err(|_| {
         (StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid pubkey".to_string() }))
     })?;
     
     let cache = state.miners_cache.read().await;
     
-    match cache.get(&authority) {
+    // Look up by String key (BTreeMap is keyed by authority string)
+    match cache.get(&pubkey) {
         Some(miner) => {
             let total_deployed: u64 = miner.deployed.iter().sum();
             Ok(Json(MinerResponse {
@@ -238,7 +240,7 @@ pub async fn get_miner(
     }
 }
 
-/// GET /miners - All miners (paginated)
+/// GET /miners - All miners (paginated, sorted alphabetically by authority)
 pub async fn get_miners(
     State(state): State<Arc<AppState>>,
     Query(params): Query<PaginationParams>,
@@ -249,6 +251,7 @@ pub async fn get_miners(
     
     let cache = state.miners_cache.read().await;
     
+    // BTreeMap is already sorted by key (authority string), just paginate
     let miners: Vec<MinerResponse> = cache
         .values()
         .skip(offset)

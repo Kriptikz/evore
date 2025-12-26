@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -35,7 +35,8 @@ pub struct AppState {
     pub board_cache: Arc<RwLock<Option<Board>>>,
     pub treasury_cache: Arc<RwLock<Option<Treasury>>>,
     pub round_cache: Arc<RwLock<Option<LiveRound>>>,
-    pub miners_cache: Arc<RwLock<HashMap<Pubkey, Miner>>>,
+    /// Miners cache sorted by authority (base58 string) for consistent pagination
+    pub miners_cache: Arc<RwLock<BTreeMap<String, Miner>>>,
     pub miners_last_slot: Arc<RwLock<u64>>,
     
     // Slot cache (updated by WebSocket)
@@ -76,7 +77,7 @@ impl AppState {
             board_cache: Arc::new(RwLock::new(None)),
             treasury_cache: Arc::new(RwLock::new(None)),
             round_cache: Arc::new(RwLock::new(None)),
-            miners_cache: Arc::new(RwLock::new(HashMap::new())),
+            miners_cache: Arc::new(RwLock::new(BTreeMap::new())),
             miners_last_slot: Arc::new(RwLock::new(0)),
             slot_cache: Arc::new(RwLock::new(0)),
             ore_holders_cache: Arc::new(RwLock::new(HashMap::new())),

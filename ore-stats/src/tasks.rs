@@ -5,7 +5,7 @@
 //! - Round transition detection
 //! - Metrics snapshots
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -151,11 +151,12 @@ async fn fetch_all_miners(state: &AppState) -> anyhow::Result<usize> {
         helius.get_all_ore_miners(Some(5000)).await?
     };
     
-    let mut miners_map = HashMap::new();
+    // Use BTreeMap with String keys for sorted pagination
+    let mut miners_map = BTreeMap::new();
     
     for acc in &accounts {
         if let Some((authority, miner)) = parse_miner_account(acc) {
-            miners_map.insert(authority, miner);
+            miners_map.insert(authority.to_string(), miner);
         }
     }
     
@@ -184,7 +185,8 @@ async fn fetch_miners_changed_since(state: &AppState, since_slot: u64) -> anyhow
     
     for acc in &accounts {
         if let Some((authority, miner)) = parse_miner_account(acc) {
-            cache.insert(authority, miner);
+            // Insert with String key for sorted BTreeMap
+            cache.insert(authority.to_string(), miner);
             count += 1;
         }
     }

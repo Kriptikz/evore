@@ -255,8 +255,9 @@ pub async fn subscribe_to_program_accounts(
             }
             
             // Always update miner cache (for any round - keeps cache fresh)
+            // BTreeMap keyed by authority string for sorted pagination
             let mut cache = state.miners_cache.write().await;
-            cache.insert(miner.authority, *miner);
+            cache.insert(miner.authority.to_string(), *miner);
         }
     }
     
