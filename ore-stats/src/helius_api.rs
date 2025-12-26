@@ -41,8 +41,15 @@ pub struct HeliusApi {
 
 impl HeliusApi {
     pub fn new(rpc_url: impl Into<String>) -> Self {
+        let url = rpc_url.into();
+        let full_url = if url.starts_with("http") {
+            url
+        } else {
+            format!("https://{}", url)
+        };
+        
         Self {
-            rpc_url: rpc_url.into(),
+            rpc_url: full_url,
             client: Client::new(),
             last_request_at: Instant::now(),
         }
