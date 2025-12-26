@@ -241,11 +241,6 @@ pub async fn subscribe_to_program_accounts(
                             let _ = state.deployment_broadcast.send(
                                 LiveBroadcastData::Deployment(deployment)
                             );
-                            
-                            tracing::debug!(
-                                "New deployment: miner={} square={} amount={} slot={}",
-                                &miner_pubkey[..8], square_id, amount, slot
-                            );
                         }
                     }
                 }
