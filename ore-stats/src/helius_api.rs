@@ -1331,6 +1331,7 @@ impl HeliusApi {
     ) -> Result<Vec<TokenBalance>, HeliusError> {
         let mut all_balances = Vec::new();
         let mut cursor: Option<String> = None;
+        let mut page_num = 0u32;
 
         let mint_bytes = ore_mint.to_bytes();
         let mint_b64 = base64::Engine::encode(
@@ -1339,6 +1340,7 @@ impl HeliusApi {
         );
 
         loop {
+            page_num += 1;
             let page = self
                 .get_program_accounts_v2(
                     &spl_token::ID,
@@ -1360,6 +1362,8 @@ impl HeliusApi {
                 )
                 .await?;
 
+            let page_count = page.accounts.len();
+            
             // Parse full token account data
             for acc in &page.accounts {
                 if let Some(balance) = Self::parse_token_balance_from_full_account(acc) {
@@ -1367,7 +1371,17 @@ impl HeliusApi {
                 }
             }
 
+            tracing::debug!(
+                "ORE token holders page {}: {} accounts fetched, {} total so far, cursor: {}",
+                page_num,
+                page_count,
+                all_balances.len(),
+                page.cursor.is_some()
+            );
+
+            // Continue until cursor is null (end of pagination)
             if page.cursor.is_none() {
+                tracing::info!("ORE token holders pagination complete: {} pages, {} holders", page_num, all_balances.len());
                 break;
             }
             cursor = page.cursor;
