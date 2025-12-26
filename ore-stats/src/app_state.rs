@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use chrono::Utc;
 use evore::ore_api::{AutomationStrategy, Board, Miner, Round, Treasury};
@@ -9,6 +10,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::app_rpc::AppRpc;
 use crate::clickhouse::ClickHouseClient;
+use crate::helius_api::HeliusApi;
 
 // ============================================================================
 // Application State
@@ -16,6 +18,9 @@ use crate::clickhouse::ClickHouseClient;
 
 /// Central application state shared across all handlers and background tasks.
 pub struct AppState {
+    // Server start time for uptime tracking
+    pub start_time: Instant,
+    
     // Database connections
     pub clickhouse: Arc<ClickHouseClient>,
     pub postgres: sqlx::Pool<sqlx::Postgres>,
@@ -23,11 +28,15 @@ pub struct AppState {
     // RPC client
     pub rpc: Arc<AppRpc>,
     
+    // Helius API for bulk fetching (miners, token holders)
+    pub helius: Arc<RwLock<HeliusApi>>,
+    
     // Live caches (updated by polling task)
     pub board_cache: Arc<RwLock<Option<Board>>>,
     pub treasury_cache: Arc<RwLock<Option<Treasury>>>,
     pub round_cache: Arc<RwLock<Option<LiveRound>>>,
     pub miners_cache: Arc<RwLock<HashMap<Pubkey, Miner>>>,
+    pub miners_last_slot: Arc<RwLock<u64>>,
     
     // Slot cache (updated by WebSocket)
     pub slot_cache: Arc<RwLock<u64>>,
@@ -46,24 +55,33 @@ impl AppState {
         clickhouse: Arc<ClickHouseClient>,
         postgres: sqlx::Pool<sqlx::Postgres>,
         rpc: Arc<AppRpc>,
+        helius: Arc<RwLock<HeliusApi>>,
     ) -> Self {
         let (round_tx, _) = broadcast::channel(100);
         let (deployment_tx, _) = broadcast::channel(1000);
         
         Self {
+            start_time: Instant::now(),
             clickhouse,
             postgres,
             rpc,
+            helius,
             board_cache: Arc::new(RwLock::new(None)),
             treasury_cache: Arc::new(RwLock::new(None)),
             round_cache: Arc::new(RwLock::new(None)),
             miners_cache: Arc::new(RwLock::new(HashMap::new())),
+            miners_last_slot: Arc::new(RwLock::new(0)),
             slot_cache: Arc::new(RwLock::new(0)),
             ore_holders_cache: Arc::new(RwLock::new(HashMap::new())),
             ore_holders_last_slot: Arc::new(RwLock::new(0)),
             round_broadcast: round_tx,
             deployment_broadcast: deployment_tx,
         }
+    }
+    
+    /// Get server uptime in seconds
+    pub fn uptime_seconds(&self) -> u64 {
+        self.start_time.elapsed().as_secs()
     }
     
     /// Subscribe to round updates for SSE

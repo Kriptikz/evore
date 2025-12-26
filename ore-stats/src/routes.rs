@@ -366,8 +366,7 @@ pub async fn get_metrics(
         .map(|r| r.round_id)
         .unwrap_or(0);
     
-    // TODO: Add proper uptime tracking
-    let uptime_seconds = 0;
+    let uptime_seconds = state.uptime_seconds();
     
     Json(MetricsResponse {
         uptime_seconds,

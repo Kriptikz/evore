@@ -107,6 +107,7 @@ async fn main() -> anyhow::Result<()> {
         clickhouse.clone(),
         postgres.clone(),
         rpc.clone(),
+        helius.clone(),
     ));
     
     // ========== Background Tasks ==========
@@ -122,6 +123,22 @@ async fn main() -> anyhow::Result<()> {
     let round_broadcast_handle = ws_manager.spawn_round_broadcaster(state.clone());
     tracing::info!("Round broadcaster started");
     
+    // Program account subscription for SSE deployments
+    let program_sub_state = state.clone();
+    let program_sub_url = rpc_url.clone();
+    let program_sub_handle = tokio::spawn(async move {
+        loop {
+            tracing::info!("Starting ORE program account subscription for SSE...");
+            if let Err(e) = websocket::subscribe_to_program_accounts(&program_sub_url, program_sub_state.clone()).await {
+                tracing::error!("Program account subscription error: {}, reconnecting in 5s...", e);
+            } else {
+                tracing::warn!("Program account subscription ended unexpectedly, reconnecting...");
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
+    });
+    tracing::info!("Program account subscription started");
+    
     // ORE token cache
     let token_cache = Arc::new(OreTokenCache::new(
         helius.clone(),
@@ -131,9 +148,13 @@ async fn main() -> anyhow::Result<()> {
     let token_cache_handle = token_cache.spawn_update_task();
     tracing::info!("ORE token cache started");
     
-    // RPC polling task
+    // RPC polling task (Board, Treasury, Round every 2 seconds)
     let polling_handle = tasks::spawn_rpc_polling(state.clone());
     tracing::info!("RPC polling started");
+    
+    // Miners polling task (full load then incremental every 30 seconds)
+    let miners_handle = tasks::spawn_miners_polling(state.clone());
+    tracing::info!("Miners polling started");
     
     // Metrics snapshot task
     let metrics_handle = tasks::spawn_metrics_snapshot(state.clone());
@@ -198,8 +219,10 @@ async fn main() -> anyhow::Result<()> {
     // Cleanup (won't reach here normally)
     slot_handle.abort();
     round_broadcast_handle.abort();
+    program_sub_handle.abort();
     token_cache_handle.abort();
     polling_handle.abort();
+    miners_handle.abort();
     metrics_handle.abort();
     
     Ok(())

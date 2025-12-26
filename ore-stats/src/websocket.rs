@@ -121,7 +121,7 @@ async fn subscribe_to_slot(
 /// Subscribe to ORE program account changes
 /// Used for SSE deployment broadcasting
 pub async fn subscribe_to_program_accounts(
-    ws_url: &str,
+    rpc_url: &str,
     state: Arc<AppState>,
 ) -> Result<()> {
     use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
@@ -130,7 +130,18 @@ pub async fn subscribe_to_program_accounts(
     use solana_account_decoder_client_types::UiAccountEncoding;
     use steel::AccountDeserialize;
     
-    let client = PubsubClient::new(ws_url).await?;
+    // Convert RPC URL to WebSocket URL
+    let ws_url = if rpc_url.starts_with("wss://") || rpc_url.starts_with("ws://") {
+        rpc_url.to_string()
+    } else if rpc_url.starts_with("https://") {
+        rpc_url.replace("https://", "wss://")
+    } else if rpc_url.starts_with("http://") {
+        rpc_url.replace("http://", "ws://")
+    } else {
+        format!("wss://{}", rpc_url)
+    };
+    
+    let client = PubsubClient::new(&ws_url).await?;
     
     let config = RpcProgramAccountsConfig {
         filters: None,
