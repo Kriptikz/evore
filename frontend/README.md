@@ -18,11 +18,16 @@ Web interface for managing Evore autodeploy accounts.
 
 2. Set environment variables (create `.env.local`):
    ```bash
-   # RPC URL (defaults to devnet)
-   NEXT_PUBLIC_RPC_URL=https://api.devnet.solana.com
+   # ORE Stats API URL (REQUIRED - primary data source for all reads)
+   NEXT_PUBLIC_API_URL=https://your-ore-stats-domain.com
    
-   # Stats server URL (optional, for future use)
-   NEXT_PUBLIC_STATS_SERVER_URL=http://localhost:3001
+   # RPC URL (for wallet transactions only - use basic/free endpoint)
+   NEXT_PUBLIC_RPC_URL=https://api.mainnet-beta.solana.com
+   
+   # Deployer settings for AutoMiner creation
+   NEXT_PUBLIC_DEPLOYER_PUBKEY=your_deployer_pubkey
+   NEXT_PUBLIC_DEPLOYER_BPS_FEE=500
+   NEXT_PUBLIC_DEPLOYER_FLAT_FEE=715
    ```
 
 3. Run development server:
@@ -80,8 +85,27 @@ src/
 - **Deposit**: Add SOL to fund autodeploys
 - **Withdraw**: Remove SOL from the autodeploy balance
 
-## Stats Server Integration
+## ORE Stats API Integration
 
-The frontend is designed to work with a stats-server for optimized data fetching. When `NEXT_PUBLIC_STATS_SERVER_URL` is set, certain queries will use the stats API instead of direct RPC calls.
+The frontend uses the ore-stats API (`NEXT_PUBLIC_API_URL`) for **all read operations**:
+- ORE accounts (Board, Round, Treasury, Miners)
+- EVORE accounts (Managers, Deployers, Auth balances) [Phase 1b]
+- SOL balances, ORE token balances
+- Admin dashboard operations
 
-Currently, the frontend uses direct RPC for all queries. Stats server integration will be added in a future update.
+The wallet RPC (`NEXT_PUBLIC_RPC_URL`) is **only used for transactions**:
+- Getting latest blockhash
+- Sending transactions
+- Confirming transactions
+
+This architecture reduces RPC costs and improves performance through server-side caching.
+
+## Admin Dashboard
+
+Access the admin dashboard at `/admin` to:
+- View server metrics and uptime
+- Monitor RPC usage and errors
+- Manage IP blacklist
+- View real-time performance data
+
+Admin authentication uses a password set via `ADMIN_PASSWORD` environment variable on the ore-stats server.
