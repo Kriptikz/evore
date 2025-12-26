@@ -161,9 +161,8 @@ pub async fn subscribe_to_program_accounts(
     
     tracing::info!("ORE program subscription established");
     
-    // Track unique miners per round for live count
-    let mut current_round_id: u64 = 0;
-    let mut round_miners: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Initialize round ID from state (may have been set by RPC polling)
+    let mut current_round_id: u64 = *state.pending_round_id.read().await;
     
     while let Some(response) = stream.next().await {
         let slot = response.context.slot;
@@ -182,56 +181,85 @@ pub async fn subscribe_to_program_accounts(
         
         // Try to parse as Round
         if let Ok(round) = Round::try_from_bytes(&data) {
-            // Check if new round started
-            if round.id != current_round_id {
+            // Only process if this is a NEW round (id > current)
+            // Ignore old rounds from checkpoints
+            if round.id > current_round_id {
+                tracing::info!("New round detected: {} -> {}", current_round_id, round.id);
                 current_round_id = round.id;
-                round_miners.clear();
-                tracing::info!("New round detected: {}", round.id);
+                
+                // Update state and clear deployment tracking for new round
+                *state.pending_round_id.write().await = round.id;
+                state.pending_deployments.write().await.clear();
             }
             
-            // Update round cache
-            if let Some(board) = state.board_cache.read().await.as_ref() {
-                let mut live_round = LiveRound::from_board_and_round(board, round);
-                live_round.unique_miners = round_miners.len() as u32;
-                
-                let mut cache = state.round_cache.write().await;
-                *cache = Some(live_round);
+            // Only update round cache if this is the current round
+            if round.id == current_round_id {
+                if let Some(board) = state.board_cache.read().await.as_ref() {
+                    let pending = state.pending_deployments.read().await;
+                    let mut live_round = LiveRound::from_board_and_round(board, round);
+                    live_round.unique_miners = pending.len() as u32;
+                    drop(pending);
+                    
+                    let mut cache = state.round_cache.write().await;
+                    *cache = Some(live_round);
+                }
             }
+            // Ignore old round updates (checkpoints, etc.)
         }
         // Try to parse as Miner
         else if let Ok(miner) = Miner::try_from_bytes(&data) {
-            // Check if this miner deployed in current round
-            if miner.round_id == current_round_id {
+            // Only process if this miner deployed in the current round
+            if miner.round_id == current_round_id && current_round_id > 0 {
                 let miner_pubkey = miner.authority.to_string();
-                let is_new = round_miners.insert(miner_pubkey.clone());
                 
-                // Find which square they deployed to
+                // Get pending deployments for this miner
+                let mut pending = state.pending_deployments.write().await;
+                let miner_squares = pending
+                    .entry(miner_pubkey.clone())
+                    .or_insert_with(std::collections::HashMap::new);
+                
+                // Check each square for NEW deployments
                 for (square_id, &amount) in miner.deployed.iter().enumerate() {
                     if amount > 0 {
-                        let deployment = LiveDeployment {
-                            round_id: current_round_id,
-                            miner_pubkey: miner_pubkey.clone(),
-                            square_id: square_id as u8,
-                            amount,
-                            slot,
-                        };
+                        let square_id_u8 = square_id as u8;
                         
-                        // Broadcast deployment
-                        let _ = state.deployment_broadcast.send(
-                            LiveBroadcastData::Deployment(deployment)
-                        );
+                        // Only broadcast if this is a NEW deployment on this square
+                        // (miner can only deploy once per square per round)
+                        if !miner_squares.contains_key(&square_id_u8) {
+                            // Record this deployment with slot (for Phase 2 finalization)
+                            miner_squares.insert(square_id_u8, (amount, slot));
+                            
+                            let deployment = LiveDeployment {
+                                round_id: current_round_id,
+                                miner_pubkey: miner_pubkey.clone(),
+                                square_id: square_id_u8,
+                                amount,
+                                slot,
+                            };
+                            
+                            // Broadcast deployment
+                            let _ = state.deployment_broadcast.send(
+                                LiveBroadcastData::Deployment(deployment)
+                            );
+                            
+                            tracing::debug!(
+                                "New deployment: miner={} square={} amount={} slot={}",
+                                &miner_pubkey[..8], square_id, amount, slot
+                            );
+                        }
                     }
                 }
                 
-                // Update unique miners count if new
-                if is_new {
-                    if let Some(round) = state.round_cache.write().await.as_mut() {
-                        round.unique_miners = round_miners.len() as u32;
-                    }
+                // Update unique miners count
+                let unique_count = pending.len();
+                drop(pending);
+                
+                if let Some(round) = state.round_cache.write().await.as_mut() {
+                    round.unique_miners = unique_count as u32;
                 }
             }
             
-            // Update miner cache
+            // Always update miner cache (for any round - keeps cache fresh)
             let mut cache = state.miners_cache.write().await;
             cache.insert(miner.authority, *miner);
         }

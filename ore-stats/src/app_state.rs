@@ -48,6 +48,13 @@ pub struct AppState {
     // SSE broadcast channels
     pub round_broadcast: broadcast::Sender<LiveBroadcastData>,
     pub deployment_broadcast: broadcast::Sender<LiveBroadcastData>,
+    
+    // Per-round deployment tracking for Phase 2 finalization
+    // Maps: miner_pubkey -> { square_id -> (amount, slot) }
+    // Tracks when each square was deployed for accurate slot data
+    // Cleared on new round, used during round finalization
+    pub pending_deployments: Arc<RwLock<HashMap<String, HashMap<u8, (u64, u64)>>>>,
+    pub pending_round_id: Arc<RwLock<u64>>,
 }
 
 impl AppState {
@@ -76,6 +83,8 @@ impl AppState {
             ore_holders_last_slot: Arc::new(RwLock::new(0)),
             round_broadcast: round_tx,
             deployment_broadcast: deployment_tx,
+            pending_deployments: Arc::new(RwLock::new(HashMap::new())),
+            pending_round_id: Arc::new(RwLock::new(0)),
         }
     }
     

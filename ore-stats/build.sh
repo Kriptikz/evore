@@ -14,8 +14,18 @@ cargo build --release -p ore-stats
 
 echo "Creating deploy directory..."
 mkdir -p "$DEPLOY_DIR"
+mkdir -p "$DEPLOY_DIR/backups"
 
-echo "Copying binary..."
+# Backup existing binary if it exists
+if [ -f "$DEPLOY_DIR/ore-stats" ]; then
+    TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
+    BACKUP_NAME="ore-stats_$TIMESTAMP"
+    echo "Backing up existing binary to backups/$BACKUP_NAME..."
+    mv "$DEPLOY_DIR/ore-stats" "$DEPLOY_DIR/backups/$BACKUP_NAME"
+    echo "✓ Backup created: $DEPLOY_DIR/backups/$BACKUP_NAME"
+fi
+
+echo "Copying new binary..."
 cp "$WORKSPACE_DIR/target/release/ore-stats" "$DEPLOY_DIR/"
 
 # Copy example env if it doesn't exist
@@ -61,4 +71,8 @@ echo "  ./ore-stats"
 echo ""
 echo "Or with systemd (recommended for production):"
 echo "  sudo systemctl start ore-stats"
+echo ""
+echo "To rollback to a previous version:"
+echo "  ls $DEPLOY_DIR/backups/  # list available backups"
+echo "  cp $DEPLOY_DIR/backups/<backup_name> $DEPLOY_DIR/ore-stats"
 
