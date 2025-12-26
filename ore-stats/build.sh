@@ -38,6 +38,9 @@ if [ ! -f "$DEPLOY_DIR/.env" ]; then
 # Server
 PORT=3000
 
+# Admin Authentication (REQUIRED - server will panic without this)
+ADMIN_PASSWORD=your_secure_admin_password_here
+
 # Solana RPC (Helius recommended)
 RPC_URL=mainnet.helius-rpc.com/?api-key=YOUR_API_KEY
 

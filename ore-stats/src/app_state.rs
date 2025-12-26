@@ -21,6 +21,9 @@ pub struct AppState {
     // Server start time for uptime tracking
     pub start_time: Instant,
     
+    // Admin password hash (Argon2, hashed at startup from ADMIN_PASSWORD env)
+    pub admin_password_hash: String,
+    
     // Database connections
     pub clickhouse: Arc<ClickHouseClient>,
     pub postgres: sqlx::Pool<sqlx::Postgres>,
@@ -60,6 +63,7 @@ pub struct AppState {
 
 impl AppState {
     pub fn new(
+        admin_password_hash: String,
         clickhouse: Arc<ClickHouseClient>,
         postgres: sqlx::Pool<sqlx::Postgres>,
         rpc: Arc<AppRpc>,
@@ -70,6 +74,7 @@ impl AppState {
         
         Self {
             start_time: Instant::now(),
+            admin_password_hash,
             clickhouse,
             postgres,
             rpc,

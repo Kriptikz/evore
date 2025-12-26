@@ -20,6 +20,8 @@ use tokio::sync::RwLock;
 use tower_http::cors::{CorsLayer, Any};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
+mod admin_auth;
+mod admin_routes;
 mod app_state;
 mod app_error;
 mod app_rpc;
@@ -101,9 +103,18 @@ async fn main() -> anyhow::Result<()> {
     
     let helius = Arc::new(RwLock::new(HeliusApi::new(rpc_url.clone())));
     
+    // ========== Admin Password ==========
+    
+    let admin_password = env::var("ADMIN_PASSWORD")
+        .expect("ADMIN_PASSWORD must be set - this is required for admin authentication");
+    let admin_password_hash = admin_auth::hash_password(&admin_password)
+        .expect("Failed to hash admin password");
+    tracing::info!("Admin password hashed and ready");
+    
     // ========== Application State ==========
     
     let state = Arc::new(AppState::new(
+        admin_password_hash,
         clickhouse.clone(),
         postgres.clone(),
         rpc.clone(),
@@ -190,6 +201,9 @@ async fn main() -> anyhow::Result<()> {
         // SSE streams
         .route("/sse/rounds", get(sse::sse_rounds))
         .route("/sse/deployments", get(sse::sse_deployments))
+        
+        // Admin routes (nested under /admin)
+        .nest("/admin", admin_routes::admin_router(state.clone()))
         
         // State
         .with_state(state.clone())

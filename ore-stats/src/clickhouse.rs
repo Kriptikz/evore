@@ -217,6 +217,133 @@ impl ClickHouseClient {
         Ok(())
     }
     
+    // ========== RPC Metrics Queries ==========
+    
+    /// Get RPC metrics summary for the last N hours, grouped by provider and method.
+    pub async fn get_rpc_summary(&self, hours: u32) -> Result<Vec<RpcSummaryRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    program,
+                    provider,
+                    method,
+                    sum(total_requests) AS total_requests,
+                    sum(success_count) AS success_count,
+                    sum(error_count) AS error_count,
+                    sum(timeout_count) AS timeout_count,
+                    sum(rate_limited_count) AS rate_limited_count,
+                    avg(avg_duration_ms) AS avg_duration_ms,
+                    max(max_duration_ms) AS max_duration_ms,
+                    sum(total_request_bytes) AS total_request_bytes,
+                    sum(total_response_bytes) AS total_response_bytes
+                FROM rpc_metrics_hourly
+                WHERE hour > now() - INTERVAL ? HOUR
+                GROUP BY program, provider, method
+                ORDER BY total_requests DESC
+            "#)
+            .bind(hours)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get RPC metrics by provider for the last N hours.
+    pub async fn get_rpc_by_provider(&self, hours: u32) -> Result<Vec<RpcProviderRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    program,
+                    provider,
+                    sum(total_requests) AS total_requests,
+                    sum(success_count) AS success_count,
+                    sum(error_count) AS error_count,
+                    sum(rate_limited_count) AS rate_limited_count,
+                    avg(avg_duration_ms) AS avg_duration_ms,
+                    sum(total_request_bytes) AS total_request_bytes,
+                    sum(total_response_bytes) AS total_response_bytes
+                FROM rpc_metrics_hourly
+                WHERE hour > now() - INTERVAL ? HOUR
+                GROUP BY program, provider
+                ORDER BY total_requests DESC
+            "#)
+            .bind(hours)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get RPC errors for the last N hours.
+    pub async fn get_rpc_errors(&self, hours: u32, limit: u32) -> Result<Vec<RpcErrorRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    timestamp,
+                    program,
+                    provider,
+                    method,
+                    status,
+                    error_code,
+                    error_message,
+                    duration_ms
+                FROM rpc_requests
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                  AND status != 'success'
+                ORDER BY timestamp DESC
+                LIMIT ?
+            "#)
+            .bind(hours)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get RPC metrics time series for the last N hours (minute granularity).
+    pub async fn get_rpc_timeseries(&self, hours: u32) -> Result<Vec<RpcTimeseriesRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    minute,
+                    sum(total_requests) AS total_requests,
+                    sum(success_count) AS success_count,
+                    sum(error_count) AS error_count,
+                    avg(avg_duration_ms) AS avg_duration_ms
+                FROM rpc_metrics_minute
+                WHERE minute > now() - INTERVAL ? HOUR
+                GROUP BY minute
+                ORDER BY minute ASC
+            "#)
+            .bind(hours)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get daily RPC summary for the last N days.
+    pub async fn get_rpc_daily(&self, days: u32) -> Result<Vec<RpcDailyRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    day,
+                    program,
+                    provider,
+                    total_requests,
+                    success_count,
+                    error_count,
+                    rate_limited_count,
+                    avg_duration_ms,
+                    total_request_bytes,
+                    total_response_bytes
+                FROM rpc_metrics_daily
+                WHERE day > today() - INTERVAL ? DAY
+                ORDER BY day DESC, total_requests DESC
+            "#)
+            .bind(days)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
     // ========== Rate Limit Events ==========
     
     /// Insert a rate limit event.
@@ -506,6 +633,79 @@ pub struct AutomationStateInsert {
     pub strategy: u8,
     pub mask: u64,
     pub last_updated_slot: u64,
+}
+
+// ============================================================================
+// RPC Metrics Query Results
+// ============================================================================
+
+/// Summary row for RPC metrics (grouped by program, provider, method).
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RpcSummaryRow {
+    pub program: String,
+    pub provider: String,
+    pub method: String,
+    pub total_requests: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub timeout_count: u64,
+    pub rate_limited_count: u64,
+    pub avg_duration_ms: f64,
+    pub max_duration_ms: u32,
+    pub total_request_bytes: u64,
+    pub total_response_bytes: u64,
+}
+
+/// Provider-level summary row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RpcProviderRow {
+    pub program: String,
+    pub provider: String,
+    pub total_requests: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub rate_limited_count: u64,
+    pub avg_duration_ms: f64,
+    pub total_request_bytes: u64,
+    pub total_response_bytes: u64,
+}
+
+/// Individual RPC error row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RpcErrorRow {
+    pub timestamp: String, // DateTime64 comes as string
+    pub program: String,
+    pub provider: String,
+    pub method: String,
+    pub status: String,
+    pub error_code: String,
+    pub error_message: String,
+    pub duration_ms: u32,
+}
+
+/// Time series row for RPC metrics (minute granularity).
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RpcTimeseriesRow {
+    pub minute: String, // DateTime comes as string
+    pub total_requests: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub avg_duration_ms: f64,
+}
+
+/// Daily summary row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RpcDailyRow {
+    pub day: String, // Date comes as string
+    pub program: String,
+    pub provider: String,
+    pub total_requests: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub rate_limited_count: u64,
+    pub avg_duration_ms: f64,
+    pub total_request_bytes: u64,
+    pub total_response_bytes: u64,
 }
 
 #[cfg(test)]
