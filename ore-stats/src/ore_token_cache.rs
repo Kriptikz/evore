@@ -49,15 +49,27 @@ impl OreTokenCache {
     pub async fn initial_load(&self) -> Result<usize> {
         tracing::info!("Starting initial load of ORE token holders...");
         
-        // Get current slot before fetch (for tracking)
+        // Get current slot before fetch (for tracking incremental updates)
         let current_slot = *self.slot_cache.read().await;
+        
+        if current_slot == 0 {
+            tracing::warn!("Slot cache is 0 - WebSocket may not be connected yet. Incremental updates won't work until next full load.");
+        }
         
         let balances = {
             let mut helius = self.helius.write().await;
             helius.get_ore_token_balances(&ore_mint(), Some(5000)).await?
         };
         
-        tracing::info!("Loaded {} ORE token holders", balances.len());
+        // Get slot after fetch for more accurate tracking
+        let sync_slot_value = *self.slot_cache.read().await;
+        let final_slot = if sync_slot_value > current_slot { sync_slot_value } else { current_slot };
+        
+        tracing::info!(
+            "Loaded {} ORE token holders at slot {} (will use changedSinceSlot for future updates)",
+            balances.len(),
+            final_slot
+        );
         
         // Update cache
         let mut cache = self.holders.write().await;
@@ -68,7 +80,7 @@ impl OreTokenCache {
         
         // Update last sync slot
         let mut sync_slot = self.last_sync_slot.write().await;
-        *sync_slot = current_slot;
+        *sync_slot = final_slot;
         
         Ok(balances.len())
     }
@@ -78,7 +90,8 @@ impl OreTokenCache {
         let since_slot = *self.last_sync_slot.read().await;
         
         if since_slot == 0 {
-            // No initial load done yet
+            // No initial load done yet, or slot wasn't available
+            tracing::debug!("Skipping incremental update - no valid sync slot yet");
             return Ok(0);
         }
         
@@ -90,6 +103,13 @@ impl OreTokenCache {
             return Ok(0);
         }
         
+        tracing::debug!(
+            "Fetching ORE token holders changed since slot {} (current: {}, delta: {} slots)",
+            since_slot,
+            current_slot,
+            current_slot - since_slot
+        );
+        
         let changes = {
             let mut helius = self.helius.write().await;
             helius.get_ore_token_balances_changed_since(&ore_mint(), since_slot, Some(5000)).await?
@@ -99,6 +119,7 @@ impl OreTokenCache {
             // Update sync slot even if no changes
             let mut sync_slot = self.last_sync_slot.write().await;
             *sync_slot = current_slot;
+            tracing::debug!("No ORE token holder changes since slot {}", since_slot);
             return Ok(0);
         }
         
