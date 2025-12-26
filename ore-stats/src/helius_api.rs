@@ -1,6 +1,7 @@
 use std::{mem, time::Duration};
 
 use base64::Engine as _;
+use tracing;
 use evore::ore_api::{self, Automate, Deploy, OreInstruction, AutomationStrategy};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -20,8 +21,8 @@ pub enum HeliusError {
     #[error("rpc error: {0}")]
     Rpc(String),
 
-    #[error("invalid rpc response")]
-    InvalidResponse,
+    #[error("invalid rpc response: {0}")]
+    InvalidResponse(String),
 
     #[error("program error: {0}")]
     Program(#[from] ProgramError),
@@ -157,7 +158,16 @@ impl HeliusApi {
             .json()
             .await?;
 
-        let result = resp.result.ok_or(HeliusError::InvalidResponse)?;
+        if let Some(err) = resp.error {
+            return Err(HeliusError::InvalidResponse(format!(
+                "code: {}, message: {}, data: {:?}",
+                err.code, err.message, err.data
+            )));
+        }
+
+        let result = resp.result.ok_or_else(|| {
+            HeliusError::InvalidResponse("result is null with no error".to_string())
+        })?;
 
         Ok(AddressTransactionsPage {
             transactions: result.data,
@@ -1101,6 +1111,8 @@ impl HeliusApi {
             ]
         });
 
+        tracing::debug!("getProgramAccountsV2 request to {}: {}", self.rpc_url, body);
+
         let resp: RpcResponse<GetProgramAccountsV2Result> = self
             .client
             .post(&self.rpc_url)
@@ -1111,7 +1123,16 @@ impl HeliusApi {
             .json()
             .await?;
 
-        let result = resp.result.ok_or(HeliusError::InvalidResponse)?;
+        if let Some(err) = resp.error {
+            return Err(HeliusError::InvalidResponse(format!(
+                "code: {}, message: {}, data: {:?}",
+                err.code, err.message, err.data
+            )));
+        }
+
+        let result = resp.result.ok_or_else(|| {
+            HeliusError::InvalidResponse("result is null with no error".to_string())
+        })?;
 
         Ok(GetProgramAccountsV2Page {
             accounts: result.accounts,
@@ -1336,15 +1357,14 @@ impl HeliusApi {
                                 encoding: Some("base64".to_string()),
                             },
                         ],
-                        // Fetch only owner (32 bytes) + amount (8 bytes)
-                        data_slice: Some(DataSlice { offset: 32, length: 40 }),
+                        data_slice: None, // Helius v2 doesn't support dataSlice
                     },
                 )
                 .await?;
 
-            // Parse the sliced data
+            // Parse full token account data
             for acc in &page.accounts {
-                if let Some(balance) = Self::parse_token_balance_from_slice(acc) {
+                if let Some(balance) = Self::parse_token_balance_from_full_account(acc) {
                     all_balances.push(balance);
                 }
             }
@@ -1392,13 +1412,13 @@ impl HeliusApi {
                                 encoding: Some("base64".to_string()),
                             },
                         ],
-                        data_slice: Some(DataSlice { offset: 32, length: 40 }),
+                        data_slice: None, // Helius v2 doesn't support dataSlice
                     },
                 )
                 .await?;
 
             for acc in &page.accounts {
-                if let Some(balance) = Self::parse_token_balance_from_slice(acc) {
+                if let Some(balance) = Self::parse_token_balance_from_full_account(acc) {
                     all_balances.push(balance);
                 }
             }
@@ -1412,8 +1432,13 @@ impl HeliusApi {
         Ok(all_balances)
     }
 
-    /// Parse owner + amount from a sliced token account (40 bytes: owner[32] + amount[8])
-    fn parse_token_balance_from_slice(acc: &ProgramAccountV2) -> Option<TokenBalance> {
+    /// Parse owner + amount from full token account data (165 bytes)
+    /// Token account layout:
+    /// - [0..32]: mint pubkey
+    /// - [32..64]: owner pubkey  
+    /// - [64..72]: amount (u64 little-endian)
+    /// - [72..]: state, delegate, etc.
+    fn parse_token_balance_from_full_account(acc: &ProgramAccountV2) -> Option<TokenBalance> {
         // Data format: [base64_data, "base64"]
         let data_b64 = acc.account.data.first()?;
         let data = base64::Engine::decode(
@@ -1421,16 +1446,16 @@ impl HeliusApi {
             data_b64,
         ).ok()?;
 
-        if data.len() < 40 {
+        if data.len() < 72 {
             return None;
         }
 
-        // First 32 bytes: owner pubkey
-        let owner_bytes: [u8; 32] = data[0..32].try_into().ok()?;
+        // Bytes 32-64: owner pubkey
+        let owner_bytes: [u8; 32] = data[32..64].try_into().ok()?;
         let owner = Pubkey::from(owner_bytes);
 
-        // Next 8 bytes: amount (little-endian u64)
-        let amount_bytes: [u8; 8] = data[32..40].try_into().ok()?;
+        // Bytes 64-72: amount (little-endian u64)
+        let amount_bytes: [u8; 8] = data[64..72].try_into().ok()?;
         let amount = u64::from_le_bytes(amount_bytes);
 
         // Token account pubkey
@@ -1555,6 +1580,15 @@ pub struct AddressTransactionsPage {
     pub pagination_token: Option<String>,
 }
 
+/// RPC error from JSON-RPC response
+#[derive(Debug, Deserialize)]
+struct RpcError {
+    pub code: i64,
+    pub message: String,
+    #[serde(default)]
+    pub data: Option<Value>,
+}
+
 /// JSON-RPC envelope
 #[derive(Debug, Deserialize)]
 struct RpcResponse<T> {
@@ -1562,8 +1596,8 @@ struct RpcResponse<T> {
     pub id: Value,
     #[serde(default)]
     pub result: Option<T>,
-    // you can add `error` if you want to model RPC errors explicitly:
-    // pub error: Option<RpcError>,
+    #[serde(default)]
+    pub error: Option<RpcError>,
 }
 
 /// Shape of the `result` for getTransactionsForAddress.
