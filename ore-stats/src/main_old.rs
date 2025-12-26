@@ -5,7 +5,7 @@ use sqlx::{sqlite::SqliteConnectOptions, Pool, Sqlite};
 use thiserror::Error;
 use axum::{body::Body, extract::{Path, Query, State}, http::{Request, Response, StatusCode}, middleware::{self, Next}, response::{sse, Sse}, routing::get, Json, Router};
 use const_crypto::ed25519;
-use ore_api::{consts::{BOARD, ROUND, TREASURY_ADDRESS}, state::{round_pda, Board, Miner, Round, Treasury}};
+use evore::ore_api::{BOARD, ROUND, TREASURY_ADDRESS, round_pda, Board, Miner, Round, Treasury};
 use serde::{Deserialize, Serialize};
 use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_client::{nonblocking::rpc_client::RpcClient, rpc_filter::RpcFilterType};
@@ -18,16 +18,16 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Env
 use crate::{app_state::{AppBoard, AppLiveDeployment, AppMiner, AppRound, AppState, AppTreasury, LiveBroadcastData}, database::{get_deployments_by_round, DbMinerSnapshot, DbTreasury, GetDeployment, MinerLeaderboardRow, MinerOreLeaderboardRow, MinerTotalsRow, RoundRow}, rpc::{infer_refined_ore, update_data_system, watch_live_board}};
 
 /// Program id for const pda derivations
-const PROGRAM_ID: [u8; 32] = unsafe { *(&ore_api::id() as *const Pubkey as *const [u8; 32]) };
+const PROGRAM_ID_BYTES: [u8; 32] = evore::ore_api::PROGRAM_ID.to_bytes();
 
 
 /// The address of the board account.
 pub const BOARD_ADDRESS: Pubkey =
-    Pubkey::new_from_array(ed25519::derive_program_address(&[BOARD], &PROGRAM_ID).0);
+    Pubkey::new_from_array(ed25519::derive_program_address(&[BOARD], &PROGRAM_ID_BYTES).0);
 
 /// The address of the square account.
 pub const ROUND_ADDRESS: Pubkey =
-    Pubkey::new_from_array(ed25519::derive_program_address(&[ROUND], &PROGRAM_ID).0);
+    Pubkey::new_from_array(ed25519::derive_program_address(&[ROUND], &PROGRAM_ID_BYTES).0);
 
 pub mod app_state;
 pub mod rpc;
@@ -119,7 +119,7 @@ async fn main() -> anyhow::Result<()> {
 
     let mut miners = vec![];
     if let Ok(miners_data_raw) = connection.get_program_accounts_with_config(
-        &ore_api::id(),
+        &evore::ore_api::id(),
         solana_client::rpc_config::RpcProgramAccountsConfig { 
             filters: Some(vec![RpcFilterType::DataSize(size_of::<Miner>() as u64 + 8)]),
             account_config: solana_client::rpc_config::RpcAccountInfoConfig {

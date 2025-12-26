@@ -1,6 +1,6 @@
 use std::{collections::HashMap, sync::Arc};
 
-use ore_api::state::{Board, Miner, Round, Treasury};
+use evore::ore_api::{Board, Miner, Round, Treasury};
 use serde::{Deserialize, Serialize};
 use sqlx::{Pool, Sqlite};
 use tokio::sync::{broadcast, RwLock};

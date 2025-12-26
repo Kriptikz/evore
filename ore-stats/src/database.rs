@@ -1,4 +1,4 @@
-use ore_api::state::Treasury;
+use evore::ore_api::Treasury;
 use serde::{Deserialize, Serialize};
 use sqlx::{prelude::FromRow, Pool, Sqlite};
 use tokio::time::Instant;

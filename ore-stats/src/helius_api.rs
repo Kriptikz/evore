@@ -1,7 +1,7 @@
 use std::{mem, time::Duration};
 
 use base64::Engine as _;
-use ore_api::{prelude::{Automate, Deploy, OreInstruction}, state::{self, AutomationStrategy}};
+use evore::ore_api::{self, Automate, Deploy, OreInstruction, AutomationStrategy};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -63,7 +63,7 @@ impl HeliusApi {
         pagination_token: Option<String>,
     ) -> Result<RoundTransactionsPage, HeliusError> {
         // Derive the round PDA from the round id using ore-api.
-        let (round_pda, _bump) = state::round_pda(round_id);
+        let (round_pda, _bump) = ore_api::round_pda(round_id);
 
         let page = self
             .get_transactions_for_address(&round_pda, pagination_token.clone(), Some(100), None, None, None)
@@ -198,7 +198,7 @@ impl HeliusApi {
         let mut cache = prev_cache.unwrap_or_else(|| AutomationCache::new(*authority));
 
         // Automation PDA derived from authority
-        let (automation_pda, _bump) = ore_api::state::automation_pda(*authority);
+        let (automation_pda, _bump) = ore_api::automation_pda(*authority);
 
         // Helper: decode an Automate ix and return (Automate struct, executor, is_close)
         fn decode_automate_from_ix(
@@ -217,7 +217,7 @@ impl HeliusApi {
                 .get(program_id_index)
                 .ok_or_else(|| HeliusError::Decode("programIdIndex out of range".into()))?;
 
-            if *program_id != ore_api::ID {
+            if *program_id != ore_api::PROGRAM_ID {
                 return Ok(None);
             }
 
@@ -930,7 +930,7 @@ impl HeliusApi {
                     .get(program_id_index)
                     .ok_or_else(|| HeliusError::Decode("programIdIndex out of range".into()))?;
 
-                if *program_id != ore_api::ID {
+                if *program_id != ore_api::PROGRAM_ID {
                     return Ok(None);
                 }
 
@@ -1079,6 +1079,11 @@ impl HeliusApi {
             opts.insert("filters".to_string(), json!(options.filters));
         }
 
+        // Data slice for partial account data
+        if let Some(slice) = &options.data_slice {
+            opts.insert("dataSlice".to_string(), json!(slice));
+        }
+
         let body = json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -1119,7 +1124,7 @@ impl HeliusApi {
         loop {
             let page = self
                 .get_program_accounts_v2(
-                    &ore_api::ID,
+                    &ore_api::PROGRAM_ID,
                     GetProgramAccountsV2Options {
                         encoding: Some("base64".to_string()),
                         limit: Some(limit_per_page.unwrap_or(5000)),
@@ -1128,9 +1133,10 @@ impl HeliusApi {
                         filters: vec![
                             // Filter by Miner account size (discriminator + data)
                             ProgramAccountFilter::DataSize {
-                                data_size: std::mem::size_of::<ore_api::state::Miner>() as u64 + 8,
+                                data_size: std::mem::size_of::<ore_api::Miner>() as u64 + 8,
                             },
                         ],
+                        data_slice: None,
                     },
                 )
                 .await?;
@@ -1159,15 +1165,16 @@ impl HeliusApi {
         loop {
             let page = self
                 .get_program_accounts_v2(
-                    &ore_api::ID,
+                    &ore_api::PROGRAM_ID,
                     GetProgramAccountsV2Options {
                         encoding: Some("base64".to_string()),
                         limit: Some(limit_per_page.unwrap_or(5000)),
                         cursor: cursor.clone(),
                         changed_since_slot: Some(since_slot),
                         filters: vec![ProgramAccountFilter::DataSize {
-                            data_size: std::mem::size_of::<ore_api::state::Miner>() as u64 + 8,
+                            data_size: std::mem::size_of::<ore_api::Miner>() as u64 + 8,
                         }],
+                        data_slice: None,
                     },
                 )
                 .await?;
@@ -1221,6 +1228,7 @@ impl HeliusApi {
                                 encoding: Some("base64".to_string()),
                             },
                         ],
+                        data_slice: None,
                     },
                 )
                 .await?;
@@ -1270,6 +1278,7 @@ impl HeliusApi {
                                 encoding: Some("base64".to_string()),
                             },
                         ],
+                        data_slice: None,
                     },
                 )
                 .await?;
@@ -1284,6 +1293,159 @@ impl HeliusApi {
 
         Ok(all_accounts)
     }
+
+    /// Fetch all ORE token holders with optimized dataSlice.
+    /// Only fetches owner (32 bytes) + amount (8 bytes) = 40 bytes per account.
+    /// Token account layout: [mint:32][owner:32][amount:8][...]
+    /// With dataSlice offset=32, length=40, we get owner+amount only.
+    pub async fn get_ore_token_balances(
+        &mut self,
+        ore_mint: &Pubkey,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<TokenBalance>, HeliusError> {
+        let mut all_balances = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        let mint_bytes = ore_mint.to_bytes();
+        let mint_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &mint_bytes,
+        );
+
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &spl_token::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(5000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: None,
+                        filters: vec![
+                            ProgramAccountFilter::DataSize { data_size: 165 },
+                            ProgramAccountFilter::Memcmp {
+                                offset: 0,
+                                bytes: mint_b64.clone(),
+                                encoding: Some("base64".to_string()),
+                            },
+                        ],
+                        // Fetch only owner (32 bytes) + amount (8 bytes)
+                        data_slice: Some(DataSlice { offset: 32, length: 40 }),
+                    },
+                )
+                .await?;
+
+            // Parse the sliced data
+            for acc in &page.accounts {
+                if let Some(balance) = Self::parse_token_balance_from_slice(acc) {
+                    all_balances.push(balance);
+                }
+            }
+
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+
+        Ok(all_balances)
+    }
+
+    /// Fetch ORE token balances that changed since a given slot.
+    /// Uses dataSlice for efficiency.
+    pub async fn get_ore_token_balances_changed_since(
+        &mut self,
+        ore_mint: &Pubkey,
+        since_slot: u64,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<TokenBalance>, HeliusError> {
+        let mut all_balances = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        let mint_bytes = ore_mint.to_bytes();
+        let mint_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &mint_bytes,
+        );
+
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &spl_token::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(5000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: Some(since_slot),
+                        filters: vec![
+                            ProgramAccountFilter::DataSize { data_size: 165 },
+                            ProgramAccountFilter::Memcmp {
+                                offset: 0,
+                                bytes: mint_b64.clone(),
+                                encoding: Some("base64".to_string()),
+                            },
+                        ],
+                        data_slice: Some(DataSlice { offset: 32, length: 40 }),
+                    },
+                )
+                .await?;
+
+            for acc in &page.accounts {
+                if let Some(balance) = Self::parse_token_balance_from_slice(acc) {
+                    all_balances.push(balance);
+                }
+            }
+
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+
+        Ok(all_balances)
+    }
+
+    /// Parse owner + amount from a sliced token account (40 bytes: owner[32] + amount[8])
+    fn parse_token_balance_from_slice(acc: &ProgramAccountV2) -> Option<TokenBalance> {
+        // Data format: [base64_data, "base64"]
+        let data_b64 = acc.account.data.first()?;
+        let data = base64::Engine::decode(
+            &base64::engine::general_purpose::STANDARD,
+            data_b64,
+        ).ok()?;
+
+        if data.len() < 40 {
+            return None;
+        }
+
+        // First 32 bytes: owner pubkey
+        let owner_bytes: [u8; 32] = data[0..32].try_into().ok()?;
+        let owner = Pubkey::from(owner_bytes);
+
+        // Next 8 bytes: amount (little-endian u64)
+        let amount_bytes: [u8; 8] = data[32..40].try_into().ok()?;
+        let amount = u64::from_le_bytes(amount_bytes);
+
+        // Token account pubkey
+        let token_account = Pubkey::try_from(acc.pubkey.as_str()).ok()?;
+
+        Some(TokenBalance {
+            token_account,
+            owner,
+            amount,
+        })
+    }
+}
+
+/// Parsed token balance from sliced account data
+#[derive(Debug, Clone)]
+pub struct TokenBalance {
+    /// The token account address
+    pub token_account: Pubkey,
+    /// The owner of this token account
+    pub owner: Pubkey,
+    /// The token amount (raw, not UI amount)
+    pub amount: u64,
 }
 
 // ============================================================================
@@ -1303,6 +1465,15 @@ pub struct GetProgramAccountsV2Options {
     pub changed_since_slot: Option<u64>,
     /// Filters to apply (memcmp, dataSize)
     pub filters: Vec<ProgramAccountFilter>,
+    /// Data slice to fetch only part of account data
+    pub data_slice: Option<DataSlice>,
+}
+
+/// Data slice for fetching partial account data
+#[derive(Debug, Clone, Serialize)]
+pub struct DataSlice {
+    pub offset: u64,
+    pub length: u64,
 }
 
 /// Filter types for getProgramAccountsV2
@@ -1506,7 +1677,7 @@ fn decode_ore_deploy_ix(
         .get(program_id_index)
         .ok_or_else(|| HeliusError::Decode("programIdIndex out of range".into()))?;
 
-    if *program_id != ore_api::ID {
+    if *program_id != ore_api::PROGRAM_ID {
         return Ok(None);
     }
 

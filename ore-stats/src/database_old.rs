@@ -1,4 +1,4 @@
-use ore_api::state::{Round, Treasury};
+use evore::ore_api::{Round, Treasury};
 use serde::{Deserialize, Serialize};
 use sqlx::{prelude::FromRow, Pool, QueryBuilder, Sqlite};
 use tokio::time::Instant;

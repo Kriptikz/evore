@@ -3,7 +3,7 @@ use std::{collections::{HashMap, HashSet}, time::Duration, u64};
 use anyhow::{anyhow, Result};
 use chrono::Utc;
 use const_crypto::ed25519;
-use ore_api::{consts::{BOARD, ROUND, TREASURY_ADDRESS}, state::{round_pda, AutomationStrategy, Board, Miner, Round, Treasury}};
+use evore::ore_api::{BOARD, ROUND, TREASURY_ADDRESS, round_pda, AutomationStrategy, Board, Miner, Round, Treasury};
 use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_client::{nonblocking::rpc_client::RpcClient, rpc_filter::RpcFilterType};
 use solana_sdk::{commitment_config::{CommitmentConfig, CommitmentLevel}, keccak::hashv};
@@ -13,15 +13,15 @@ use tokio::time::Instant;
 use crate::{app_state::{AppDeployedSquare, AppDeployment, AppRound, AutomationCache, ReconstructedAutomation, ReconstructedRound}, helius_api::{HeliusApi, ParsedDeployment, ResetEvent}};
 
 /// Program id for const pda derivations
-const PROGRAM_ID: [u8; 32] = unsafe { *(&ore_api::id() as *const Pubkey as *const [u8; 32]) };
+const PROGRAM_ID_BYTES: [u8; 32] = evore::ore_api::PROGRAM_ID.to_bytes();
 
 /// The address of the board account.
 pub const BOARD_ADDRESS: Pubkey =
-    Pubkey::new_from_array(ed25519::derive_program_address(&[BOARD], &PROGRAM_ID).0);
+    Pubkey::new_from_array(ed25519::derive_program_address(&[BOARD], &PROGRAM_ID_BYTES).0);
 
 /// The address of the square account.
 pub const ROUND_ADDRESS: Pubkey =
-    Pubkey::new_from_array(ed25519::derive_program_address(&[ROUND], &PROGRAM_ID).0);
+    Pubkey::new_from_array(ed25519::derive_program_address(&[ROUND], &PROGRAM_ID_BYTES).0);
 
 pub const RATE_LIMIT: u128 = 200;
 
@@ -100,7 +100,7 @@ impl AppRPC {
         self.last_request_at = Instant::now();
         let mut miners: Vec<Miner> = vec![];
         match self.connection.get_program_accounts_with_config(
-            &ore_api::id(),
+            &evore::ore_api::id(),
             solana_client::rpc_config::RpcProgramAccountsConfig { 
                 filters: Some(vec![RpcFilterType::DataSize(size_of::<Miner>() as u64 + 8)]),
                 account_config: solana_client::rpc_config::RpcAccountInfoConfig {
@@ -131,7 +131,7 @@ impl AppRPC {
 
     pub async fn reconstruct_round_by_id(&mut self, round_id: u64) -> Result<ReconstructedRound> {
         // Derive the on-chain round PDA
-        let (round_pda, _bump) = ore_api::state::round_pda(round_id);
+        let (round_pda, _bump) = evore::ore_api::round_pda(round_id);
         println!("Round address: {}", round_pda.to_string());
 
         let mut round = AppRound {
@@ -361,6 +361,15 @@ impl AppRPC {
                         ])
                         .0;
                         pd.squares = generate_random_mask(num_squares, &r);
+                    }
+                    AutomationStrategy::Discretionary => {
+                        // Discretionary strategy - executor decides squares at deploy time
+                        // For now, treat same as Preferred using mask
+                        let mut squares = [false; 25];
+                        for i in 0..25 {
+                            squares[i] = (auto.mask & (1 << i)) != 0;
+                        }
+                        pd.squares = squares;
                     }
                 }
             } else {

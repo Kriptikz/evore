@@ -1,11 +1,149 @@
-use std::{collections::HashMap, sync::Arc};
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use chrono::Utc;
-use ore_api::state::{AutomationStrategy, Board, Miner, Round, Treasury};
+use evore::ore_api::{AutomationStrategy, Board, Miner, Round, Treasury};
 use serde::{Deserialize, Serialize};
-use sqlx::{Pool, Sqlite};
 use steel::Pubkey;
 use tokio::sync::{broadcast, RwLock};
+
+use crate::app_rpc::AppRpc;
+use crate::clickhouse::ClickHouseClient;
+
+// ============================================================================
+// Application State
+// ============================================================================
+
+/// Central application state shared across all handlers and background tasks.
+pub struct AppState {
+    // Database connections
+    pub clickhouse: Arc<ClickHouseClient>,
+    pub postgres: sqlx::Pool<sqlx::Postgres>,
+    
+    // RPC client
+    pub rpc: Arc<AppRpc>,
+    
+    // Live caches (updated by polling task)
+    pub board_cache: Arc<RwLock<Option<Board>>>,
+    pub treasury_cache: Arc<RwLock<Option<Treasury>>>,
+    pub round_cache: Arc<RwLock<Option<LiveRound>>>,
+    pub miners_cache: Arc<RwLock<HashMap<Pubkey, Miner>>>,
+    
+    // Slot cache (updated by WebSocket)
+    pub slot_cache: Arc<RwLock<u64>>,
+    
+    // ORE token holders cache (updated periodically)
+    pub ore_holders_cache: Arc<RwLock<HashMap<Pubkey, u64>>>,
+    pub ore_holders_last_slot: Arc<RwLock<u64>>,
+    
+    // SSE broadcast channels
+    pub round_broadcast: broadcast::Sender<LiveBroadcastData>,
+    pub deployment_broadcast: broadcast::Sender<LiveBroadcastData>,
+}
+
+impl AppState {
+    pub fn new(
+        clickhouse: Arc<ClickHouseClient>,
+        postgres: sqlx::Pool<sqlx::Postgres>,
+        rpc: Arc<AppRpc>,
+    ) -> Self {
+        let (round_tx, _) = broadcast::channel(100);
+        let (deployment_tx, _) = broadcast::channel(1000);
+        
+        Self {
+            clickhouse,
+            postgres,
+            rpc,
+            board_cache: Arc::new(RwLock::new(None)),
+            treasury_cache: Arc::new(RwLock::new(None)),
+            round_cache: Arc::new(RwLock::new(None)),
+            miners_cache: Arc::new(RwLock::new(HashMap::new())),
+            slot_cache: Arc::new(RwLock::new(0)),
+            ore_holders_cache: Arc::new(RwLock::new(HashMap::new())),
+            ore_holders_last_slot: Arc::new(RwLock::new(0)),
+            round_broadcast: round_tx,
+            deployment_broadcast: deployment_tx,
+        }
+    }
+    
+    /// Subscribe to round updates for SSE
+    pub fn subscribe_rounds(&self) -> broadcast::Receiver<LiveBroadcastData> {
+        self.round_broadcast.subscribe()
+    }
+    
+    /// Subscribe to deployment updates for SSE
+    pub fn subscribe_deployments(&self) -> broadcast::Receiver<LiveBroadcastData> {
+        self.deployment_broadcast.subscribe()
+    }
+}
+
+// ============================================================================
+// Live Data Types
+// ============================================================================
+
+/// Live round data with unique miners tracking
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveRound {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub slots_remaining: i64,
+    pub deployed: [u64; 25],
+    pub count: [u64; 25],
+    pub total_deployed: u64,
+    pub unique_miners: u32,
+}
+
+impl LiveRound {
+    pub fn from_board_and_round(board: &Board, round: &Round) -> Self {
+        Self {
+            round_id: round.id,
+            start_slot: board.start_slot,
+            end_slot: board.end_slot,
+            slots_remaining: 0, // Will be calculated with current slot
+            deployed: round.deployed,
+            count: round.count,
+            total_deployed: round.total_deployed,
+            unique_miners: round.total_miners as u32,
+        }
+    }
+    
+    pub fn update_slots_remaining(&mut self, current_slot: u64) {
+        self.slots_remaining = self.end_slot.saturating_sub(current_slot) as i64;
+    }
+}
+
+/// Data broadcast over SSE channels
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", content = "data")]
+pub enum LiveBroadcastData {
+    /// Round state update (throttled to ~500ms)
+    Round(LiveRound),
+    
+    /// Single deployment event
+    Deployment(LiveDeployment),
+    
+    /// Winning square announcement at round end
+    WinningSquare {
+        round_id: u64,
+        winning_square: u8,
+        motherlode_hit: bool,
+    },
+}
+
+/// Live deployment from WebSocket
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiveDeployment {
+    pub round_id: u64,
+    pub miner_pubkey: String,
+    pub square_id: u8,
+    pub amount: u64,
+    pub slot: u64,
+}
+
+// ============================================================================
+// Existing Types (kept for compatibility)
+// ============================================================================
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppMiner {

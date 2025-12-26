@@ -1,0 +1,30 @@
+[Unit]
+Description=ore-stats - Live ORE mining data server
+After=network.target postgresql.service clickhouse-server.service
+Wants=postgresql.service clickhouse-server.service
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/programs/ore-stats
+ExecStart=/root/programs/ore-stats/ore-stats
+Restart=always
+RestartSec=5
+
+# Environment
+EnvironmentFile=/root/programs/ore-stats/.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ore-stats
+
+# Security
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/root/programs/ore-stats
+
+[Install]
+WantedBy=multi-user.target
+

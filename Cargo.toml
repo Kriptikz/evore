@@ -4,6 +4,7 @@ members = [
     "program",
     "bot",
     "crank",
+    "ore-stats",
 ]
 
 [workspace.package]

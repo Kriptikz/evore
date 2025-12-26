@@ -83,6 +83,57 @@ pub enum OreAccount {
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
+pub struct Automation {
+    /// The amount of SOL to deploy on each territory per round.
+    pub amount: u64,
+
+    /// The authority of this automation account.
+    pub authority: Pubkey,
+
+    /// The amount of SOL this automation has left.
+    pub balance: u64,
+
+    /// The executor of this automation account.
+    pub executor: Pubkey,
+
+    /// The amount of SOL the executor should receive in fees.
+    pub fee: u64,
+
+    /// The strategy this automation uses.
+    pub strategy: u64,
+
+    /// The mask of squares this automation should deploy to if preferred strategy.
+    /// If strategy is Random, first bit is used to determine how many squares to deploy to.
+    pub mask: u64,
+
+    /// Whether or not to auto-reload SOL winnings into the automation balance.
+    pub reload: u64,
+}
+
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, IntoPrimitive, TryFromPrimitive)]
+pub enum AutomationStrategy {
+    Random = 0,
+    Preferred = 1,
+    Discretionary = 2,
+}
+
+impl AutomationStrategy {
+    pub fn from_u64(value: u64) -> Self {
+        Self::try_from(value as u8).unwrap()
+    }
+}
+
+impl Automation {
+    pub fn pda(&self) -> (Pubkey, u8) {
+        miner_pda(self.authority)
+    }
+}
+
+account!(OreAccount, Automation);
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]
 pub struct Board {
     /// The current round number.
     pub round_id: u64,
@@ -186,6 +237,60 @@ pub struct Round {
 }
 
 account!(OreAccount, Round);
+
+impl Round {
+  pub fn pda(&self) -> (Pubkey, u8) {
+      round_pda(self.id)
+  }
+
+  pub fn rng(&self) -> Option<u64> {
+      if self.slot_hash == [0; 32] || self.slot_hash == [u8::MAX; 32] {
+          return None;
+      }
+      let r1 = u64::from_le_bytes(self.slot_hash[0..8].try_into().unwrap());
+      let r2 = u64::from_le_bytes(self.slot_hash[8..16].try_into().unwrap());
+      let r3 = u64::from_le_bytes(self.slot_hash[16..24].try_into().unwrap());
+      let r4 = u64::from_le_bytes(self.slot_hash[24..32].try_into().unwrap());
+      let r = r1 ^ r2 ^ r3 ^ r4;
+      Some(r)
+  }
+
+  pub fn winning_square(&self, rng: u64) -> usize {
+      (rng % 25) as usize
+  }
+
+  pub fn top_miner_sample(&self, rng: u64, winning_square: usize) -> u64 {
+      if self.deployed[winning_square] == 0 {
+          return 0;
+      }
+      rng.reverse_bits() % self.deployed[winning_square]
+  }
+
+  pub fn calculate_total_winnings(&self, winning_square: usize) -> u64 {
+      let mut total_winnings = 0;
+      for (i, &deployed) in self.deployed.iter().enumerate() {
+          if i != winning_square {
+              total_winnings += deployed;
+          }
+      }
+      total_winnings
+  }
+
+  pub fn is_split_reward(&self, rng: u64) -> bool {
+      // One out of four rounds get split rewards.
+      let rng = rng.reverse_bits().to_le_bytes();
+      let r1 = u16::from_le_bytes(rng[0..2].try_into().unwrap());
+      let r2 = u16::from_le_bytes(rng[2..4].try_into().unwrap());
+      let r3 = u16::from_le_bytes(rng[4..6].try_into().unwrap());
+      let r4 = u16::from_le_bytes(rng[6..8].try_into().unwrap());
+      let r = r1 ^ r2 ^ r3 ^ r4;
+      r % 2 == 0
+  }
+
+  pub fn did_hit_motherlode(&self, rng: u64) -> bool {
+      rng.reverse_bits() % 625 == 0
+  }
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Pod, Zeroable, Serialize, Deserialize)]

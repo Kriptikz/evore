@@ -1,7 +1,7 @@
 
 use std::{env, str::FromStr, time::Duration};
 
-use ore_api::{consts::{SPLIT_ADDRESS, TREASURY_ADDRESS}, state::{round_pda, Board, Miner, Round, Treasury}};
+use evore::ore_api::{TREASURY_ADDRESS, round_pda, Board, Miner, Round, Treasury};
 use serde::Deserialize;
 use solana_account_decoder_client_types::UiAccountEncoding;
 use solana_client::{nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcClient}, rpc_config::RpcAccountInfoConfig, rpc_filter::RpcFilterType};
@@ -117,7 +117,7 @@ pub async fn update_data_system(connection: RpcClient, app_state: AppState) {
 
                     let mut miners: Vec<AppMiner> = vec![];
                     if let Ok(miners_data_raw) = connection.get_program_accounts_with_config(
-                        &ore_api::id(),
+                        &evore::ore_api::id(),
                         solana_client::rpc_config::RpcProgramAccountsConfig { 
                             filters: Some(vec![RpcFilterType::DataSize(size_of::<Miner>() as u64 + 8)]),
                             account_config: solana_client::rpc_config::RpcAccountInfoConfig {
@@ -536,11 +536,11 @@ pub async fn watch_live_board(rpc_url: &str, app_state: AppState) {
                     sort_results: None,
                 };
                 let mut live_round_id = 0;
-                if let Ok((mut accounts_stream, accounts_stream_unsub)) = ps_client.program_subscribe(&ore_api::id(), Some(config)).await {
+                if let Ok((mut accounts_stream, accounts_stream_unsub)) = ps_client.program_subscribe(&evore::ore_api::id(), Some(config)).await {
                     while let Some(account_data) = accounts_stream.next().await {
                         let data_ctx = account_data.context;
                         if let Some(data) = account_data.value.account.data.decode() {
-                            if let Ok(data) = ore_api::state::Round::try_from_bytes(&data) {
+                            if let Ok(data) = evore::ore_api::Round::try_from_bytes(&data) {
                                 if data.id > live_round_id {
                                     live_round_id = data.id;
                                     let mut w = app_state.live_deployments.write().await;
@@ -558,7 +558,7 @@ pub async fn watch_live_board(rpc_url: &str, app_state: AppState) {
                                     // got an old board for some reason, maybe a checkpoint or
                                     // something
                                 }
-                            } else if let Ok(miner) = ore_api::state::Miner::try_from_bytes(&data) {
+                            } else if let Ok(miner) = evore::ore_api::Miner::try_from_bytes(&data) {
                                 if miner.round_id == live_round_id {
                                     let deployment_data = AppLiveDeployment {
                                         round: miner.round_id,
