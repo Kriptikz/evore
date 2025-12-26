@@ -1136,7 +1136,7 @@ impl HeliusApi {
 
         Ok(GetProgramAccountsV2Page {
             accounts: result.accounts,
-            cursor: result.cursor,
+            cursor: result.pagination_key,
         })
     }
 
@@ -1573,11 +1573,14 @@ pub struct GetProgramAccountsV2Page {
 
 /// Internal response structure for v2
 #[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
 struct GetProgramAccountsV2Result {
     #[serde(default)]
     accounts: Vec<ProgramAccountV2>,
     #[serde(default)]
-    cursor: Option<String>,
+    pagination_key: Option<String>,
+    #[serde(default)]
+    total_results: Option<u64>,
 }
 
 /// The page we return to the rest of the app.
