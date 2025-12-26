@@ -26,5 +26,38 @@ export const DEFAULT_DEPLOYER_PUBKEY = process.env.NEXT_PUBLIC_DEPLOYER_PUBKEY |
 export const DEFAULT_DEPLOYER_BPS_FEE = parseInt(process.env.NEXT_PUBLIC_DEPLOYER_BPS_FEE || "0"); // Default 5% (500 bps)
 export const DEFAULT_DEPLOYER_FLAT_FEE = parseInt(process.env.NEXT_PUBLIC_DEPLOYER_FLAT_FEE || "715"); // Default 715 lamports
 
-// Stats server URL (for when using stats-server instead of direct RPC)
-export const STATS_SERVER_URL = process.env.NEXT_PUBLIC_STATS_SERVER_URL || "http://localhost:3001";
+// ============================================================================
+// API Configuration
+// ============================================================================
+
+/**
+ * ORE Stats API URL - primary data source for ALL reads:
+ * - ORE accounts (Board, Round, Treasury, Miners)
+ * - EVORE accounts (Managers, Deployers, Auth balances) [Phase 1b]
+ * - SOL balances
+ * - ORE token balances
+ * - Admin operations
+ * 
+ * The frontend should NEVER make direct RPC calls for reading data.
+ * All reads go through ore-stats for caching, rate limiting, and efficiency.
+ */
+export const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:3000";
+
+/**
+ * Rate limiting - respect ore-stats server limits.
+ * The API client enforces these limits to avoid 429 errors.
+ */
+export const API_RATE_LIMIT = {
+  requestsPerSecond: 2,
+  minDelayMs: 500,
+};
+
+/**
+ * NOTE: RPC_URL (in WalletProvider) is ONLY for transaction operations:
+ * - getLatestBlockhash
+ * - sendTransaction  
+ * - confirmTransaction
+ * 
+ * It's required by wallet-adapter but should be a minimal/free endpoint.
+ * Use Solana's public RPC or a basic plan - no heavy reads go through it.
+ */
