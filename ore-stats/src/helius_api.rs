@@ -1160,9 +1160,7 @@ impl HeliusApi {
                         changed_since_slot: None,
                         filters: vec![
                             // Filter by Miner account size (discriminator + data)
-                            ProgramAccountFilter::DataSize {
-                                data_size: std::mem::size_of::<ore_api::Miner>() as u64 + 8,
-                            },
+                            ProgramAccountFilter::DataSize(std::mem::size_of::<ore_api::Miner>() as u64 + 8),
                         ],
                         data_slice: None,
                     },
@@ -1199,9 +1197,9 @@ impl HeliusApi {
                         limit: Some(limit_per_page.unwrap_or(5000)),
                         cursor: cursor.clone(),
                         changed_since_slot: Some(since_slot),
-                        filters: vec![ProgramAccountFilter::DataSize {
-                            data_size: std::mem::size_of::<ore_api::Miner>() as u64 + 8,
-                        }],
+                        filters: vec![ProgramAccountFilter::DataSize(
+                            std::mem::size_of::<ore_api::Miner>() as u64 + 8,
+                        )],
                         data_slice: None,
                     },
                 )
@@ -1248,13 +1246,13 @@ impl HeliusApi {
                         changed_since_slot: None,
                         filters: vec![
                             // Token account size: 165 bytes
-                            ProgramAccountFilter::DataSize { data_size: 165 },
+                            ProgramAccountFilter::DataSize(165),
                             // Mint address at offset 0
-                            ProgramAccountFilter::Memcmp {
+                            ProgramAccountFilter::Memcmp(MemcmpFilter {
                                 offset: 0,
                                 bytes: mint_b64.clone(),
                                 encoding: Some("base64".to_string()),
-                            },
+                            }),
                         ],
                         data_slice: None,
                     },
@@ -1299,12 +1297,12 @@ impl HeliusApi {
                         cursor: cursor.clone(),
                         changed_since_slot: Some(since_slot),
                         filters: vec![
-                            ProgramAccountFilter::DataSize { data_size: 165 },
-                            ProgramAccountFilter::Memcmp {
+                            ProgramAccountFilter::DataSize(165),
+                            ProgramAccountFilter::Memcmp(MemcmpFilter {
                                 offset: 0,
                                 bytes: mint_b64.clone(),
                                 encoding: Some("base64".to_string()),
-                            },
+                            }),
                         ],
                         data_slice: None,
                     },
@@ -1350,12 +1348,12 @@ impl HeliusApi {
                         cursor: cursor.clone(),
                         changed_since_slot: None,
                         filters: vec![
-                            ProgramAccountFilter::DataSize { data_size: 165 },
-                            ProgramAccountFilter::Memcmp {
+                            ProgramAccountFilter::DataSize(165),
+                            ProgramAccountFilter::Memcmp(MemcmpFilter {
                                 offset: 0,
                                 bytes: mint_b64.clone(),
                                 encoding: Some("base64".to_string()),
-                            },
+                            }),
                         ],
                         data_slice: None, // Helius v2 doesn't support dataSlice
                     },
@@ -1405,12 +1403,12 @@ impl HeliusApi {
                         cursor: cursor.clone(),
                         changed_since_slot: Some(since_slot),
                         filters: vec![
-                            ProgramAccountFilter::DataSize { data_size: 165 },
-                            ProgramAccountFilter::Memcmp {
+                            ProgramAccountFilter::DataSize(165),
+                            ProgramAccountFilter::Memcmp(MemcmpFilter {
                                 offset: 0,
                                 bytes: mint_b64.clone(),
                                 encoding: Some("base64".to_string()),
-                            },
+                            }),
                         ],
                         data_slice: None, // Helius v2 doesn't support dataSlice
                     },
@@ -1510,20 +1508,21 @@ pub struct DataSlice {
 
 /// Filter types for getProgramAccountsV2
 #[derive(Debug, Clone, Serialize)]
-#[serde(untagged)]
+#[serde(rename_all = "camelCase")]
 pub enum ProgramAccountFilter {
     /// Filter by exact data size
-    DataSize {
-        #[serde(rename = "dataSize")]
-        data_size: u64,
-    },
+    DataSize(u64),
     /// Filter by memory comparison at offset
-    Memcmp {
-        offset: u64,
-        bytes: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        encoding: Option<String>,
-    },
+    Memcmp(MemcmpFilter),
+}
+
+/// Memcmp filter details
+#[derive(Debug, Clone, Serialize)]
+pub struct MemcmpFilter {
+    pub offset: u64,
+    pub bytes: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub encoding: Option<String>,
 }
 
 /// A single account from getProgramAccountsV2 response
