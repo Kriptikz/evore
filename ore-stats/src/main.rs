@@ -77,7 +77,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| "ore_stats".to_string());
     
     let clickhouse: Arc<ClickHouseClient> = Arc::new(
-        ClickHouseClient::new(&clickhouse_url, &clickhouse_user, &clickhouse_password, &clickhouse_db)
+        ClickHouseClient::new(&clickhouse_url, &clickhouse_db, &clickhouse_user, &clickhouse_password)
     );
     tracing::info!("Connected to ClickHouse at {}", clickhouse_url);
     
