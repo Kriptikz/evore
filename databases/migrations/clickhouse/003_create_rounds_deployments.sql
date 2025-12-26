@@ -2,61 +2,65 @@
 -- Core mining data - append-only, immutable after insert
 
 -- Rounds table (one row per finalized round)
+-- Populated from:
+--   1. Live tracker (real-time as rounds finalize) - full data
+--   2. External API backfill (historical rounds) - some fields defaulted
 CREATE TABLE IF NOT EXISTS ore_stats.rounds (
     round_id UInt64,
     
     -- Round timing
-    expires_at UInt64,          -- slot when round expires
+    expires_at UInt64,          -- slot when round expires (backfill: ts + 24h in slots)
     start_slot UInt64,          -- first deployment slot (0 if unknown)
     end_slot UInt64,            -- last deployment slot (0 if unknown)
     
     -- Hash data
-    slot_hash FixedString(32),  -- 32 bytes raw
-    winning_square UInt8,       -- 0-99, calculated from slot_hash
+    slot_hash FixedString(32),  -- 32 bytes raw (backfill: all zeros)
+    winning_square UInt8,       -- 0-24, from slot_hash or API
     
     -- Participants
-    rent_payer String,          -- pubkey who initialized the round
-    top_miner String,           -- pubkey selected as top miner (random weighted or split)
-    top_miner_reward UInt64,    -- lamports bonus for top miner
+    rent_payer LowCardinality(String),  -- pubkey who initialized round (backfill: empty)
+    top_miner LowCardinality(String),   -- pubkey selected as top miner
+    top_miner_reward UInt64,    -- lamports bonus (backfill: 100000000000 = 1 ORE)
     
     -- Round totals (all in lamports)
     total_deployed UInt64,      -- total SOL deployed by all miners
     total_vaulted UInt64,       -- total SOL vaulted this round  
-    total_winnings UInt64,      -- total rewards distributed
+    total_winnings UInt64,      -- total SOL rewards distributed
     
-    -- Motherlode (round-specific, may be distributed)
-    motherlode_balance UInt64,  -- motherlode size at round end
-    motherlode_hit UInt8,       -- 0 or 1
+    -- Motherlode
+    motherlode UInt64,          -- motherlode size at round end
+    motherlode_hit UInt8,       -- 0 or 1 (backfill: 1 if motherlode > 0)
     
     -- Stats
-    total_deployments UInt32,   -- count of deployment entries
-    unique_miners UInt32,       -- count of unique miners
+    total_deployments UInt32,   -- count of deployment entries (0 until reconstructed)
+    unique_miners UInt32,       -- count of unique miners (num_winners from API)
     
-    -- Metadata
-    finalized_at DateTime64(3) DEFAULT now64(3)
-) ENGINE = ReplacingMergeTree(finalized_at)
+    -- Source tracking
+    source LowCardinality(String) DEFAULT 'live',  -- 'live' or 'backfill'
+    
+    -- Timestamp (from external API ts field or now())
+    created_at DateTime64(3) DEFAULT now64(3)
+) ENGINE = ReplacingMergeTree(created_at)
 ORDER BY round_id;
 
--- Deployments table (one row per miner deployment per round)
+-- Deployments table (one row per miner per square per round)
+-- LowCardinality for miner_pubkey creates internal dictionary automatically
 CREATE TABLE IF NOT EXISTS ore_stats.deployments (
     round_id UInt64,
-    miner_pubkey String,        -- base58 pubkey (easier for queries/display)
+    miner_pubkey LowCardinality(String),  -- base58 pubkey (auto-dictionary)
     
     -- Deployment data
-    square_id UInt8,            -- which square (0-99)
+    square_id UInt8,            -- which square (0-24)
     amount UInt64,              -- SOL deployed (lamports)
     deployed_slot UInt64,       -- 0 if unknown from websocket mismatch
     
-    -- Miner state at deployment (for historical tracking)
-    unclaimed_ore UInt64,       -- miner's unclaimed ore at time of deployment
-    
     -- Calculated rewards (at finalization)
     ore_earned UInt64,          -- ORE reward (atomic units)
-    sol_earned UInt64,          -- SOL reward (lamports, from top miner bonus or motherlode)
+    sol_earned UInt64,          -- SOL reward (lamports)
     
     -- Flags
     is_winner UInt8,            -- 0 or 1, deployed on winning square
-    is_top_miner UInt8,         -- 0 or 1, selected as top miner (random weighted or split)
+    is_top_miner UInt8,         -- 0 or 1, selected as top miner
     
     -- Timestamp
     recorded_at DateTime64(3) DEFAULT now64(3)
@@ -64,17 +68,15 @@ CREATE TABLE IF NOT EXISTS ore_stats.deployments (
 PARTITION BY intDiv(round_id, 10000)  -- ~10k rounds per partition
 ORDER BY (round_id, miner_pubkey, square_id);
 
--- Treasury snapshots (historical treasury state)
--- Can take multiple snapshots, keyed by auto-increment id
+-- Treasury snapshots (historical treasury state, live tracking)
 CREATE TABLE IF NOT EXISTS ore_stats.treasury_snapshots (
-    -- Treasury state
     balance UInt64,             -- current treasury balance (lamports)
     motherlode UInt64,          -- current motherlode (lamports)
     total_staked UInt64,        -- total ORE staked
     total_unclaimed UInt64,     -- total unclaimed ORE
     total_refined UInt64,       -- total refined ORE
     
-    -- Optional round association (0 if not tied to a specific round)
+    -- Optional round association (0 if periodic snapshot, round_id if at round end)
     round_id UInt64 DEFAULT 0,
     
     -- Timestamp
@@ -83,10 +85,11 @@ CREATE TABLE IF NOT EXISTS ore_stats.treasury_snapshots (
 PARTITION BY toYYYYMM(created_at)
 ORDER BY created_at;
 
--- Miner snapshots (point-in-time miner state, stored at round end)
+-- Miner snapshots (point-in-time miner state, live tracking only)
+-- NOT used for historical backfill
 CREATE TABLE IF NOT EXISTS ore_stats.miner_snapshots (
-    round_id UInt64,            -- which round this snapshot is for
-    miner_pubkey String,        -- base58 pubkey
+    round_id UInt64,
+    miner_pubkey LowCardinality(String),
     
     -- Miner state at round end
     unclaimed_ore UInt64,       -- unclaimed ORE (atomic units)
@@ -100,16 +103,20 @@ CREATE TABLE IF NOT EXISTS ore_stats.miner_snapshots (
 PARTITION BY intDiv(round_id, 10000)
 ORDER BY (round_id, miner_pubkey);
 
+-- ============================================================================
+-- HISTORICAL BACKFILL TABLES (only used for reconstructing past rounds)
+-- These are NOT populated during live operation
+-- ============================================================================
+
 -- Raw transactions for historical round reconstruction
--- Store once, never re-fetch from RPC
+-- Store once per round during backfill, never re-fetch from RPC
 CREATE TABLE IF NOT EXISTS ore_stats.raw_transactions (
-    -- Transaction identification
     signature String,           -- base58 transaction signature (unique)
     slot UInt64,
     block_time Int64,           -- unix timestamp (can be 0 if not available)
     
-    -- Round association (if known, 0 otherwise)
-    round_id UInt64 DEFAULT 0,
+    -- Round association
+    round_id UInt64,
     
     -- Transaction type for quick filtering
     tx_type LowCardinality(String),  -- 'deploy', 'automate', 'reset', 'claim', 'other'
@@ -117,35 +124,32 @@ CREATE TABLE IF NOT EXISTS ore_stats.raw_transactions (
     -- The raw transaction JSON (compressed)
     raw_json String CODEC(ZSTD(3)),
     
-    -- Parsed key fields for indexing (extracted from raw_json)
-    signer String,              -- first signer pubkey
-    authority String DEFAULT '',-- miner authority if applicable
+    -- Parsed key fields for indexing
+    signer LowCardinality(String),
+    authority LowCardinality(String) DEFAULT '',  -- miner authority if applicable
     
     -- Metadata
     inserted_at DateTime64(3) DEFAULT now64(3)
 ) ENGINE = ReplacingMergeTree(inserted_at)
-PARTITION BY intDiv(slot, 1000000)  -- ~1M slots per partition (~5 days)
-ORDER BY (signature);
+PARTITION BY intDiv(round_id, 1000)  -- ~1k rounds per partition
+ORDER BY (round_id, signature);
 
--- Index for finding transactions by round
-ALTER TABLE ore_stats.raw_transactions ADD INDEX idx_round_id round_id TYPE minmax GRANULARITY 4;
+-- Index for finding transactions by type
+ALTER TABLE ore_stats.raw_transactions ADD INDEX IF NOT EXISTS idx_tx_type tx_type TYPE set(10) GRANULARITY 4;
 
--- Index for finding transactions by type within a slot range
-ALTER TABLE ore_stats.raw_transactions ADD INDEX idx_tx_type tx_type TYPE set(10) GRANULARITY 4;
-
--- Automation states (snapshot of miner automation config at round boundaries)
--- Used to quickly rebuild deployment calculations without re-fetching automate transactions
+-- Automation states for historical reconstruction
+-- Used to avoid re-fetching automate txns when rebuilding deployment calculations
+-- After first backfill, subsequent rounds use last known state + new automate txns
 CREATE TABLE IF NOT EXISTS ore_stats.automation_states (
-    -- Which miner and at what point in time
-    authority String,           -- miner authority pubkey
-    round_id UInt64,            -- automation state as of the START of this round
+    authority LowCardinality(String),  -- miner authority pubkey
+    round_id UInt64,                   -- automation state as of START of this round
     
-    -- Automation config (matches AutomationCache/ReconstructedAutomation)
+    -- Automation config
     active UInt8,               -- 0 = closed/manual, 1 = open/automated
-    executor String,            -- who can execute the automation
+    executor LowCardinality(String),
     amount UInt64,              -- lamports per square
     fee UInt64,                 -- executor fee
-    strategy UInt8,             -- 0 = Preferred, 1 = Random
+    strategy UInt8,             -- 0 = Random, 1 = Preferred, 2 = Discretionary
     mask UInt64,                -- bitmask for squares (or num_squares for Random)
     
     -- Last known state update
@@ -156,8 +160,11 @@ CREATE TABLE IF NOT EXISTS ore_stats.automation_states (
 ) ENGINE = ReplacingMergeTree(created_at)
 ORDER BY (authority, round_id);
 
--- Miner totals (materialized view for fast all-time leaderboards)
--- Automatically updates when deployments are inserted
+-- ============================================================================
+-- MATERIALIZED VIEWS (auto-updated on insert)
+-- ============================================================================
+
+-- Miner totals (fast all-time leaderboards)
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.miner_totals_mv
 ENGINE = SummingMergeTree()
 ORDER BY miner_pubkey
@@ -192,16 +199,32 @@ AS SELECT
 FROM ore_stats.deployments
 GROUP BY day, miner_pubkey;
 
--- Dictionary for fast round lookups (avoids JOINs)
+-- Round daily summary (for overview charts)
+CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.round_daily_stats
+ENGINE = SummingMergeTree()
+PARTITION BY toYYYYMM(day)
+ORDER BY day
+AS SELECT
+    toDate(created_at) AS day,
+    count() AS rounds,
+    sum(total_deployed) AS total_deployed,
+    sum(total_winnings) AS total_winnings,
+    sum(unique_miners) AS total_miners
+FROM ore_stats.rounds
+GROUP BY day;
+
+-- ============================================================================
+-- DICTIONARY (for fast round lookups without JOINs)
+-- ============================================================================
+
 CREATE DICTIONARY IF NOT EXISTS ore_stats.rounds_dict (
     round_id UInt64,
-    expires_at UInt64,
     winning_square UInt8,
     top_miner String,
     top_miner_reward UInt64,
     total_deployed UInt64,
     total_winnings UInt64,
-    motherlode_balance UInt64,
+    motherlode UInt64,
     motherlode_hit UInt8,
     total_deployments UInt32,
     unique_miners UInt32
