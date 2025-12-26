@@ -1,5 +1,6 @@
-use std::{collections::HashMap, mem, time::Duration};
+use std::{mem, time::Duration};
 
+use base64::Engine as _;
 use ore_api::{prelude::{Automate, Deploy, OreInstruction}, state::{self, AutomationStrategy}};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -1027,6 +1028,340 @@ impl HeliusApi {
         Ok(best)
     }
 
+    /// Helius v2 getProgramAccounts with cursor-based pagination and filters.
+    ///
+    /// Benefits over standard getProgramAccounts:
+    /// - Configurable limits: 1-10,000 accounts per request
+    /// - Cursor-based pagination: prevents timeouts on large queries
+    /// - changedSinceSlot: incremental updates for real-time sync
+    ///
+    /// Rate limit: 25 RPS (Developer plan)
+    pub async fn get_program_accounts_v2(
+        &mut self,
+        program_id: &Pubkey,
+        options: GetProgramAccountsV2Options,
+    ) -> Result<GetProgramAccountsV2Page, HeliusError> {
+        // Enforce minimum rate limiting (40ms between calls = 25 RPS max)
+        if self.last_request_at.elapsed().as_millis() < 40 {
+            tokio::time::sleep(Duration::from_millis(
+                (40 - self.last_request_at.elapsed().as_millis()) as u64,
+            ))
+            .await;
+        }
+        self.last_request_at = Instant::now();
+
+        // Build the options object for Helius v2
+        let mut opts = serde_json::Map::new();
+
+        // Encoding (default to base64)
+        opts.insert(
+            "encoding".to_string(),
+            json!(options.encoding.as_deref().unwrap_or("base64")),
+        );
+
+        // Limit (1-10000)
+        if let Some(limit) = options.limit {
+            opts.insert("limit".to_string(), json!(limit.min(10000).max(1)));
+        }
+
+        // Cursor for pagination
+        if let Some(cursor) = &options.cursor {
+            opts.insert("cursor".to_string(), json!(cursor));
+        }
+
+        // changedSinceSlot for incremental updates
+        if let Some(slot) = options.changed_since_slot {
+            opts.insert("changedSinceSlot".to_string(), json!(slot));
+        }
+
+        // Filters (memcmp and/or dataSize)
+        if !options.filters.is_empty() {
+            opts.insert("filters".to_string(), json!(options.filters));
+        }
+
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getProgramAccountsV2",
+            "params": [
+                program_id.to_string(),
+                opts
+            ]
+        });
+
+        let resp: RpcResponse<GetProgramAccountsV2Result> = self
+            .client
+            .post(&self.rpc_url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?;
+
+        let result = resp.result.ok_or(HeliusError::InvalidResponse)?;
+
+        Ok(GetProgramAccountsV2Page {
+            accounts: result.accounts,
+            cursor: result.cursor,
+        })
+    }
+
+    /// Fetch all ORE miner accounts using getProgramAccountsV2.
+    /// Automatically paginates through all results.
+    pub async fn get_all_ore_miners(
+        &mut self,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        let mut all_accounts = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &ore_api::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(5000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: None,
+                        filters: vec![
+                            // Filter by Miner account size (discriminator + data)
+                            ProgramAccountFilter::DataSize {
+                                data_size: std::mem::size_of::<ore_api::state::Miner>() as u64 + 8,
+                            },
+                        ],
+                    },
+                )
+                .await?;
+
+            all_accounts.extend(page.accounts);
+
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+
+        Ok(all_accounts)
+    }
+
+    /// Fetch ORE miner accounts that changed since a given slot.
+    /// Used for incremental cache updates.
+    pub async fn get_ore_miners_changed_since(
+        &mut self,
+        since_slot: u64,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        let mut all_accounts = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &ore_api::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(5000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: Some(since_slot),
+                        filters: vec![ProgramAccountFilter::DataSize {
+                            data_size: std::mem::size_of::<ore_api::state::Miner>() as u64 + 8,
+                        }],
+                    },
+                )
+                .await?;
+
+            all_accounts.extend(page.accounts);
+
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+
+        Ok(all_accounts)
+    }
+
+    /// Fetch all ORE token holder accounts using getProgramAccountsV2.
+    /// Filters Token Program accounts by ORE mint address.
+    ///
+    /// Returns token accounts with owner and balance info.
+    pub async fn get_all_ore_token_holders(
+        &mut self,
+        ore_mint: &Pubkey,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        let mut all_accounts = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        // Token account layout: mint is at offset 0 (32 bytes)
+        let mint_bytes = ore_mint.to_bytes();
+        let mint_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &mint_bytes,
+        );
+
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &spl_token::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(5000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: None,
+                        filters: vec![
+                            // Token account size: 165 bytes
+                            ProgramAccountFilter::DataSize { data_size: 165 },
+                            // Mint address at offset 0
+                            ProgramAccountFilter::Memcmp {
+                                offset: 0,
+                                bytes: mint_b64.clone(),
+                                encoding: Some("base64".to_string()),
+                            },
+                        ],
+                    },
+                )
+                .await?;
+
+            all_accounts.extend(page.accounts);
+
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+
+        Ok(all_accounts)
+    }
+
+    /// Fetch ORE token accounts that changed since a given slot.
+    /// Used for incremental cache updates.
+    pub async fn get_ore_token_holders_changed_since(
+        &mut self,
+        ore_mint: &Pubkey,
+        since_slot: u64,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        let mut all_accounts = Vec::new();
+        let mut cursor: Option<String> = None;
+
+        let mint_bytes = ore_mint.to_bytes();
+        let mint_b64 = base64::Engine::encode(
+            &base64::engine::general_purpose::STANDARD,
+            &mint_bytes,
+        );
+
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &spl_token::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(5000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: Some(since_slot),
+                        filters: vec![
+                            ProgramAccountFilter::DataSize { data_size: 165 },
+                            ProgramAccountFilter::Memcmp {
+                                offset: 0,
+                                bytes: mint_b64.clone(),
+                                encoding: Some("base64".to_string()),
+                            },
+                        ],
+                    },
+                )
+                .await?;
+
+            all_accounts.extend(page.accounts);
+
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+
+        Ok(all_accounts)
+    }
+}
+
+// ============================================================================
+// Helius v2 Types
+// ============================================================================
+
+/// Options for getProgramAccountsV2
+#[derive(Debug, Clone, Default)]
+pub struct GetProgramAccountsV2Options {
+    /// Encoding for account data: "base64", "base58", "jsonParsed"
+    pub encoding: Option<String>,
+    /// Number of accounts per page (1-10000)
+    pub limit: Option<u32>,
+    /// Cursor for pagination (from previous response)
+    pub cursor: Option<String>,
+    /// Only return accounts that changed since this slot
+    pub changed_since_slot: Option<u64>,
+    /// Filters to apply (memcmp, dataSize)
+    pub filters: Vec<ProgramAccountFilter>,
+}
+
+/// Filter types for getProgramAccountsV2
+#[derive(Debug, Clone, Serialize)]
+#[serde(untagged)]
+pub enum ProgramAccountFilter {
+    /// Filter by exact data size
+    DataSize {
+        #[serde(rename = "dataSize")]
+        data_size: u64,
+    },
+    /// Filter by memory comparison at offset
+    Memcmp {
+        offset: u64,
+        bytes: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        encoding: Option<String>,
+    },
+}
+
+/// A single account from getProgramAccountsV2 response
+#[derive(Debug, Clone, Deserialize)]
+pub struct ProgramAccountV2 {
+    /// The account's public key
+    pub pubkey: String,
+    /// The account data
+    pub account: AccountDataV2,
+}
+
+/// Account data from v2 response
+#[derive(Debug, Clone, Deserialize)]
+pub struct AccountDataV2 {
+    /// Account data (format depends on encoding)
+    pub data: Vec<String>, // [data, encoding] for base64
+    /// Account owner program
+    pub owner: String,
+    /// Lamports balance
+    pub lamports: u64,
+    /// Is executable
+    pub executable: bool,
+    /// Rent epoch
+    #[serde(rename = "rentEpoch")]
+    pub rent_epoch: u64,
+}
+
+/// Page result from getProgramAccountsV2
+#[derive(Debug)]
+pub struct GetProgramAccountsV2Page {
+    pub accounts: Vec<ProgramAccountV2>,
+    pub cursor: Option<String>,
+}
+
+/// Internal response structure for v2
+#[derive(Debug, Deserialize, Default)]
+struct GetProgramAccountsV2Result {
+    #[serde(default)]
+    accounts: Vec<ProgramAccountV2>,
+    #[serde(default)]
+    cursor: Option<String>,
 }
 
 /// The page we return to the rest of the app.
