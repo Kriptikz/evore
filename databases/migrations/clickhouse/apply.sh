@@ -81,10 +81,10 @@ for file in "$SCRIPT_DIR"/*.sql; do
             -q "INSERT INTO ore_stats._migrations (version, name) VALUES ($version, '$filename')"
         
         echo "✓ Applied $filename"
-        ((APPLIED++))
+        APPLIED=$((APPLIED + 1))
     else
         echo "○ Skipping $filename (already applied)"
-        ((SKIPPED++))
+        SKIPPED=$((SKIPPED + 1))
     fi
 done
 
