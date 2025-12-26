@@ -150,17 +150,17 @@ async fn main() -> anyhow::Result<()> {
         .route("/board", get(routes::get_board))
         .route("/round", get(routes::get_round))
         .route("/miners", get(routes::get_miners))
-        .route("/miner/:pubkey", get(routes::get_miner))
+        .route("/miner/{pubkey}", get(routes::get_miner))
         
         // Live data
         .route("/live/round", get(routes::get_live_round))
         .route("/slot", get(routes::get_slot))
         
         // RPC proxy
-        .route("/balance/:pubkey", get(routes::get_balance))
+        .route("/balance/{pubkey}", get(routes::get_balance))
         
         // ORE token balances
-        .route("/ore-balance/:owner", get(routes::get_ore_balance))
+        .route("/ore-balance/{owner}", get(routes::get_ore_balance))
         .route("/ore-holders", get(routes::get_ore_holders))
         
         // Metrics
