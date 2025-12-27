@@ -120,6 +120,30 @@ impl HeliusApi {
         }
     }
     
+    /// Log paginated RPC call with filters to ClickHouse
+    fn log_filtered_success(&self, method: &str, target_type: &str, target_address: &str, page_num: u16, cursor: &str, filters_json: &str, duration_ms: u32, result_count: u32, response_size: u32) {
+        if let Some(ref ch) = self.clickhouse {
+            let insert = RpcRequestInsert::new(
+                "ore-stats",
+                &self.provider_name,
+                &self.api_key_id,
+                method,
+                target_type,
+            )
+            .with_target(target_address)
+            .with_pagination(page_num, cursor)
+            .with_filters(filters_json)
+            .success(duration_ms, result_count, response_size);
+            
+            let ch = ch.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ch.insert_rpc_metric(insert).await {
+                    tracing::warn!("Failed to log HeliusApi RPC metrics: {}", e);
+                }
+            });
+        }
+    }
+    
     /// Log error RPC call to ClickHouse
     fn log_error(&self, method: &str, target_type: &str, target_address: &str, duration_ms: u32, error: &str) {
         if let Some(ref ch) = self.clickhouse {
@@ -1248,7 +1272,15 @@ impl HeliusApi {
 
         let accounts_count = result.accounts.len() as u32;
         let cursor_str = options.cursor.as_deref().unwrap_or("");
-        self.log_paginated_success("getProgramAccountsV2", "program", &program_id.to_string(), 0, cursor_str, duration_ms, accounts_count, response_size);
+        
+        // Build filters JSON for logging
+        let filters_json = if options.filters.is_empty() {
+            String::new()
+        } else {
+            serde_json::to_string(&options.filters).unwrap_or_default()
+        };
+        
+        self.log_filtered_success("getProgramAccountsV2", "program", &program_id.to_string(), 0, cursor_str, &filters_json, duration_ms, accounts_count, response_size);
         
         Ok(GetProgramAccountsV2Page {
             accounts: result.accounts,

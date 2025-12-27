@@ -379,6 +379,7 @@ impl ClickHouseClient {
                     error_code,
                     error_message,
                     result_count,
+                    filters_json,
                     duration_ms,
                     request_size,
                     response_size
@@ -963,6 +964,10 @@ pub struct RpcRequestInsert {
     #[serde(default)]
     pub result_count: u32,            // Number of items returned
     
+    // Filter configuration (JSON for complex filters)
+    #[serde(default)]
+    pub filters_json: String,
+    
     // Timing
     pub duration_ms: u32,
     
@@ -1005,6 +1010,7 @@ impl RpcRequestInsert {
             error_code: String::new(),
             error_message: String::new(),
             result_count: 0,
+            filters_json: String::new(),
             duration_ms: 0,
             request_size: 0,
             response_size: 0,
@@ -1031,6 +1037,12 @@ impl RpcRequestInsert {
         self.is_paginated = 1;
         self.page_number = page;
         self.cursor = cursor.into();
+        self
+    }
+    
+    /// Set filter configuration as JSON string.
+    pub fn with_filters(mut self, filters_json: impl Into<String>) -> Self {
+        self.filters_json = filters_json.into();
         self
     }
     
@@ -1187,6 +1199,7 @@ pub struct RpcRequestRow {
     pub error_code: String,
     pub error_message: String,
     pub result_count: u32,
+    pub filters_json: String,
     pub duration_ms: u32,
     pub request_size: u32,
     pub response_size: u32,

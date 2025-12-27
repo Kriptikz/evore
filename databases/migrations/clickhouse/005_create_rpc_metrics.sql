@@ -32,6 +32,9 @@ CREATE TABLE IF NOT EXISTS ore_stats.rpc_requests (
     -- Result counts (for multi-result queries)
     result_count UInt32 DEFAULT 0,          -- Number of items returned
     
+    -- Filter configuration (JSON for complex filters like memcmp, dataSize)
+    filters_json String DEFAULT '',          -- JSON of filter config
+    
     -- Timing (milliseconds)
     duration_ms UInt32,
     

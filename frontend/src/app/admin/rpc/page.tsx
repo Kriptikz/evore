@@ -221,8 +221,8 @@ export default function RpcMetricsPage() {
                         <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Method</th>
                         <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Type</th>
                         <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Target</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Filters</th>
                         <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Provider</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Program</th>
                         <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Status</th>
                         <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Results</th>
                         <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Size</th>
@@ -258,8 +258,26 @@ export default function RpcMetricsPage() {
                             <td className="px-4 py-3 text-slate-400 font-mono text-sm" title={row.target_address}>
                               {truncateAddress(row.target_address) || "-"}
                             </td>
+                            <td className="px-4 py-3 text-slate-400 text-sm" title={row.filters_json || undefined}>
+                              {row.filters_json ? (
+                                <span className="px-2 py-1 text-xs rounded bg-cyan-500/20 text-cyan-400 cursor-help">
+                                  {(() => {
+                                    try {
+                                      const filters = JSON.parse(row.filters_json);
+                                      if (Array.isArray(filters)) {
+                                        return filters.map((f: { memcmp?: unknown; dataSize?: number }) => 
+                                          f.memcmp ? "memcmp" : f.dataSize ? `size:${f.dataSize}` : "?"
+                                        ).join(", ");
+                                      }
+                                      return "filters";
+                                    } catch {
+                                      return "filters";
+                                    }
+                                  })()}
+                                </span>
+                              ) : "-"}
+                            </td>
                             <td className="px-4 py-3 text-slate-300">{row.provider}</td>
-                            <td className="px-4 py-3 text-slate-400">{row.program}</td>
                             <td className="px-4 py-3">
                               <span className={`px-2 py-1 text-xs rounded ${
                                 row.status === "success" ? "bg-green-500/20 text-green-400" :

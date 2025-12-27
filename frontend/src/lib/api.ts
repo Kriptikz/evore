@@ -137,6 +137,7 @@ export interface RpcRequestRow {
   error_code: string;
   error_message: string;
   result_count: number;
+  filters_json: string; // JSON string of filters (memcmp, dataSize)
   duration_ms: number;
   request_size: number;
   response_size: number;
