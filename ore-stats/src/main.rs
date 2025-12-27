@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
+    middleware::from_fn_with_state,
     routing::get,
     Router,
 };
@@ -35,6 +36,7 @@ mod routes;
 mod rpc;
 mod sse;
 mod tasks;
+mod middleware;
 mod websocket;
 
 // Keep these for reference but don't compile:
@@ -101,7 +103,7 @@ async fn main() -> anyhow::Result<()> {
     
     // ========== Helius API for token holders ==========
     
-    let helius = Arc::new(RwLock::new(HeliusApi::new(rpc_url.clone())));
+    let helius = Arc::new(RwLock::new(HeliusApi::with_clickhouse(rpc_url.clone(), Some(clickhouse.clone()))));
     
     // ========== Admin Password ==========
     
@@ -124,7 +126,7 @@ async fn main() -> anyhow::Result<()> {
     // ========== Background Tasks ==========
     
     // WebSocket manager for slot tracking
-    let ws_manager = WebSocketManager::new(rpc_url.clone());
+    let ws_manager = WebSocketManager::with_clickhouse(rpc_url.clone(), Some(clickhouse.clone()));
     
     // Slot subscription
     let slot_handle = ws_manager.spawn_slot_subscription(state.slot_cache.clone());
@@ -137,10 +139,11 @@ async fn main() -> anyhow::Result<()> {
     // Program account subscription for SSE deployments
     let program_sub_state = state.clone();
     let program_sub_url = rpc_url.clone();
+    let program_sub_clickhouse = Some(clickhouse.clone());
     let program_sub_handle = tokio::spawn(async move {
         loop {
             tracing::info!("Starting ORE program account subscription for SSE...");
-            if let Err(e) = websocket::subscribe_to_program_accounts(&program_sub_url, program_sub_state.clone()).await {
+            if let Err(e) = websocket::subscribe_to_program_accounts(&program_sub_url, program_sub_state.clone(), program_sub_clickhouse.clone()).await {
                 tracing::error!("Program account subscription error: {}, reconnecting in 5s...", e);
             } else {
                 tracing::warn!("Program account subscription ended unexpectedly, reconnecting...");
@@ -205,6 +208,9 @@ async fn main() -> anyhow::Result<()> {
         // Admin routes (nested under /admin)
         .nest("/admin", admin_routes::admin_router(state.clone()))
         
+        // Apply request logging middleware
+        .layer(from_fn_with_state(state.clone(), middleware::request_logging_middleware))
+        
         // State
         .with_state(state.clone());
         
@@ -223,7 +229,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Listening on {}", addr);
     
     let listener = tokio::net::TcpListener::bind(addr).await?;
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     
     // Cleanup (won't reach here normally)
     slot_handle.abort();

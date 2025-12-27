@@ -1,4 +1,4 @@
-use std::{mem, time::Duration};
+use std::{mem, sync::Arc, time::Duration};
 
 use base64::Engine as _;
 use tracing;
@@ -12,6 +12,7 @@ use thiserror::Error;
 use tokio::time::Instant;
 
 use crate::app_state::{AutomationCache, ReconstructedAutomation};
+use crate::clickhouse::{ClickHouseClient, RpcRequestInsert};
 
 #[derive(Debug, Error)]
 pub enum HeliusError {
@@ -38,10 +39,19 @@ pub struct HeliusApi {
     rpc_url: String,
     client: Client,
     last_request_at: Instant,
+    
+    // Metrics tracking
+    clickhouse: Option<Arc<ClickHouseClient>>,
+    provider_name: String,
+    api_key_id: String,
 }
 
 impl HeliusApi {
     pub fn new(rpc_url: impl Into<String>) -> Self {
+        Self::with_clickhouse(rpc_url, None)
+    }
+    
+    pub fn with_clickhouse(rpc_url: impl Into<String>, clickhouse: Option<Arc<ClickHouseClient>>) -> Self {
         let url = rpc_url.into();
         let full_url = if url.starts_with("http") {
             url
@@ -49,10 +59,46 @@ impl HeliusApi {
             format!("https://{}", url)
         };
         
+        // Extract provider name from URL for metrics
+        let provider_name = extract_provider_name(&full_url);
+        
+        // Extract API key ID if present (for Helius URLs like xxx?api-key=abc)
+        let api_key_id = extract_api_key_id(&full_url);
+        
         Self {
             rpc_url: full_url,
             client: Client::new(),
             last_request_at: Instant::now(),
+            clickhouse,
+            provider_name,
+            api_key_id,
+        }
+    }
+    
+    /// Log RPC metrics to ClickHouse if configured
+    fn log_rpc_metrics(&self, method: &str, duration_ms: u32, status: &str, request_size: u32, response_size: u32, batch_size: u16) {
+        if let Some(ref ch) = self.clickhouse {
+            let insert = RpcRequestInsert {
+                program: "ore-stats".to_string(),
+                provider: self.provider_name.clone(),
+                api_key_id: self.api_key_id.clone(),
+                method: method.to_string(),
+                is_batch: if batch_size > 1 { 1 } else { 0 },
+                batch_size,
+                status: status.to_string(),
+                duration_ms,
+                request_size,
+                response_size,
+                rate_limit_remaining: -1,
+            };
+            
+            // Fire and forget - don't block on metrics logging
+            let ch = ch.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ch.insert_rpc_metric(insert).await {
+                    tracing::warn!("Failed to log HeliusApi RPC metrics: {}", e);
+                }
+            });
         }
     }
 
@@ -148,17 +194,26 @@ impl HeliusApi {
             ]
         });
 
-        let resp: RpcResponse<GetTransactionsResult> = self
+        let start = Instant::now();
+        let request_size = body.to_string().len() as u32;
+        
+        let response = self
             .client
             .post(&self.rpc_url)
             .json(&body)
             .send()
             .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .error_for_status()?;
+        
+        let response_bytes = response.bytes().await?;
+        let duration_ms = start.elapsed().as_millis() as u32;
+        let response_size = response_bytes.len() as u32;
+        
+        let resp: RpcResponse<GetTransactionsResult> = serde_json::from_slice(&response_bytes)
+            .map_err(|e| HeliusError::InvalidResponse(format!("JSON parse error: {}", e)))?;
 
         if let Some(err) = resp.error {
+            self.log_rpc_metrics("getTransactionsForAddress", duration_ms, "error", request_size, response_size, 1);
             return Err(HeliusError::InvalidResponse(format!(
                 "code: {}, message: {}, data: {:?}",
                 err.code, err.message, err.data
@@ -166,9 +221,12 @@ impl HeliusApi {
         }
 
         let result = resp.result.ok_or_else(|| {
+            self.log_rpc_metrics("getTransactionsForAddress", duration_ms, "error", request_size, response_size, 1);
             HeliusError::InvalidResponse("result is null with no error".to_string())
         })?;
 
+        self.log_rpc_metrics("getTransactionsForAddress", duration_ms, "success", request_size, response_size, 1);
+        
         Ok(AddressTransactionsPage {
             transactions: result.data,
             pagination_token: result.pagination_token,
@@ -1113,17 +1171,26 @@ impl HeliusApi {
 
         tracing::debug!("getProgramAccountsV2 request to {}: {}", self.rpc_url, body);
 
-        let resp: RpcResponse<GetProgramAccountsV2Result> = self
+        let start = Instant::now();
+        let request_size = body.to_string().len() as u32;
+        
+        let response = self
             .client
             .post(&self.rpc_url)
             .json(&body)
             .send()
             .await?
-            .error_for_status()?
-            .json()
-            .await?;
+            .error_for_status()?;
+        
+        let response_bytes = response.bytes().await?;
+        let duration_ms = start.elapsed().as_millis() as u32;
+        let response_size = response_bytes.len() as u32;
+
+        let resp: RpcResponse<GetProgramAccountsV2Result> = serde_json::from_slice(&response_bytes)
+            .map_err(|e| HeliusError::InvalidResponse(format!("JSON parse error: {}", e)))?;
 
         if let Some(err) = resp.error {
+            self.log_rpc_metrics("getProgramAccountsV2", duration_ms, "error", request_size, response_size, 1);
             return Err(HeliusError::InvalidResponse(format!(
                 "code: {}, message: {}, data: {:?}",
                 err.code, err.message, err.data
@@ -1131,9 +1198,14 @@ impl HeliusApi {
         }
 
         let result = resp.result.ok_or_else(|| {
+            self.log_rpc_metrics("getProgramAccountsV2", duration_ms, "error", request_size, response_size, 1);
             HeliusError::InvalidResponse("result is null with no error".to_string())
         })?;
 
+        // Log with batch_size = number of accounts returned
+        let accounts_count = result.accounts.len() as u16;
+        self.log_rpc_metrics("getProgramAccountsV2", duration_ms, "success", request_size, response_size, accounts_count.max(1));
+        
         Ok(GetProgramAccountsV2Page {
             accounts: result.accounts,
             cursor: result.pagination_key,
@@ -1720,6 +1792,47 @@ struct DecodedDeployIx {
 
 /// Decode a single ORE Deploy instruction into a structured form.
 /// Does NOT handle automation; that’s done at the app layer.
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/// Extract provider name from RPC URL for metrics
+fn extract_provider_name(url: &str) -> String {
+    if url.contains("helius") {
+        "helius".to_string()
+    } else if url.contains("quicknode") {
+        "quicknode".to_string()
+    } else if url.contains("alchemy") {
+        "alchemy".to_string()
+    } else if url.contains("triton") {
+        "triton".to_string()
+    } else if url.contains("rpcpool") {
+        "rpcpool".to_string()
+    } else if url.contains("localhost") || url.contains("127.0.0.1") {
+        "localhost".to_string()
+    } else {
+        "unknown".to_string()
+    }
+}
+
+/// Extract API key ID from URL (e.g., for Helius ?api-key=xxx)
+fn extract_api_key_id(url: &str) -> String {
+    // Look for api-key or api_key parameter
+    if let Some(idx) = url.find("api-key=").or_else(|| url.find("api_key=")) {
+        let start = idx + 8;
+        let end = url[start..].find('&').map(|i| start + i).unwrap_or(url.len());
+        let key = &url[start..end];
+        // Return first 8 chars as ID (don't log full key)
+        if key.len() >= 8 {
+            format!("{}...", &key[..8])
+        } else {
+            key.to_string()
+        }
+    } else {
+        String::new()
+    }
+}
+
 fn decode_ore_deploy_ix(
     ix: &Value,
     account_keys: &[Pubkey],

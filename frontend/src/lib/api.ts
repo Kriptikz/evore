@@ -105,6 +105,154 @@ export interface RpcDailyRow {
   total_response_bytes: number;
 }
 
+// WebSocket metrics types
+export interface WsEventRow {
+  timestamp: number; // milliseconds since epoch
+  program: string;
+  provider: string;
+  subscription_type: string;
+  subscription_key: string;
+  event: string;
+  error_message: string;
+  disconnect_reason: string;
+  uptime_seconds: number;
+  messages_received: number;
+  reconnect_count: number;
+}
+
+export interface WsThroughputSummary {
+  program: string;
+  provider: string;
+  subscription_type: string;
+  total_messages: number;
+  total_bytes: number;
+  avg_process_time_us: number;
+}
+
+// Server metrics types
+export interface ServerMetricsRow {
+  timestamp: number; // seconds since epoch
+  requests_total: number;
+  requests_success: number;
+  requests_error: number;
+  latency_p50: number;
+  latency_p95: number;
+  latency_p99: number;
+  latency_avg: number;
+  active_connections: number;
+  memory_used: number;
+  cache_hits: number;
+  cache_misses: number;
+}
+
+// Request logs types
+export interface RequestLogRow {
+  timestamp: number; // milliseconds since epoch
+  endpoint: string;
+  method: string;
+  status_code: number;
+  duration_ms: number;
+  client_ip: string;
+  user_agent: string;
+}
+
+export interface EndpointSummaryRow {
+  endpoint: string;
+  total_requests: number;
+  success_count: number;
+  error_count: number;
+  avg_duration_ms: number;
+  max_duration_ms: number;
+  p95_duration_ms: number;
+}
+
+export interface RateLimitEventRow {
+  timestamp: number; // milliseconds since epoch
+  client_ip: string;
+  endpoint: string;
+  requests_in_window: number;
+  window_seconds: number;
+}
+
+export interface IpActivityRow {
+  client_ip: string;
+  total_requests: number;
+  error_count: number;
+  rate_limit_count: number;
+  avg_duration_ms: number;
+}
+
+// Database size types
+export interface StorageSummary {
+  total_bytes: number;
+  total_rows: number;
+  clickhouse_bytes: number;
+  postgres_bytes: number;
+  compression_ratio: number;
+}
+
+export interface DatabaseSizeRow {
+  database: string;
+  bytes_on_disk: number;
+  total_rows: number;
+  table_count: number;
+}
+
+export interface DetailedTable {
+  database: string;
+  table: string;
+  bytes_on_disk: number;
+  bytes_uncompressed: number;
+  compression_ratio: number;
+  total_rows: number;
+  parts_count: number;
+  last_modified: string;
+  avg_row_size: number;
+}
+
+export interface TableEngineRow {
+  database: string;
+  table: string;
+  engine: string;
+  partition_key: string;
+  sorting_key: string;
+  primary_key: string;
+}
+
+export interface PostgresTableSize {
+  table_name: string;
+  total_size_bytes: number;
+  table_size_bytes: number;
+  index_size_bytes: number;
+  row_count: number;
+  avg_row_size: number;
+  dead_tuples: number;
+  last_vacuum: string | null;
+  last_analyze: string | null;
+}
+
+export interface ClickHouseSizes {
+  databases: DatabaseSizeRow[];
+  tables: DetailedTable[];
+  engines: TableEngineRow[];
+  total_bytes: number;
+  total_bytes_uncompressed: number;
+  total_rows: number;
+}
+
+export interface PostgresSizes {
+  database_name: string;
+  database_size_bytes: number;
+  table_sizes: PostgresTableSize[];
+  total_rows: number;
+}
+
+export interface DatabaseSizesResponse {
+  summary: StorageSummary;
+  clickhouse: ClickHouseSizes;
+  postgres: PostgresSizes;
+}
+
 // ORE data types (cached by ore-stats)
 export interface Board {
   round_id: number;
@@ -346,6 +494,44 @@ class ApiClient {
 
   async cleanupSessions(): Promise<{ message: string }> {
     return this.request("POST", "/admin/sessions/cleanup", { requireAuth: true });
+  }
+
+  // ========== WebSocket Metrics ==========
+
+  async getWsEvents(hours = 24, limit = 100): Promise<{ hours: number; events: WsEventRow[] }> {
+    return this.request("GET", `/admin/ws/events?hours=${hours}&limit=${limit}`, { requireAuth: true });
+  }
+
+  async getWsThroughput(hours = 24): Promise<{ hours: number; throughput: WsThroughputSummary[] }> {
+    return this.request("GET", `/admin/ws/throughput?hours=${hours}`, { requireAuth: true });
+  }
+
+  // ========== Server Metrics ==========
+
+  async getServerMetrics(hours = 24, limit = 100): Promise<{ hours: number; metrics: ServerMetricsRow[] }> {
+    return this.request("GET", `/admin/server/metrics?hours=${hours}&limit=${limit}`, { requireAuth: true });
+  }
+
+  // ========== Request Logs ==========
+
+  async getRequestLogs(hours = 24, limit = 100): Promise<{ hours: number; logs: RequestLogRow[] }> {
+    return this.request("GET", `/admin/requests/logs?hours=${hours}&limit=${limit}`, { requireAuth: true });
+  }
+
+  async getEndpointSummary(hours = 24): Promise<{ hours: number; endpoints: EndpointSummaryRow[] }> {
+    return this.request("GET", `/admin/requests/endpoints?hours=${hours}`, { requireAuth: true });
+  }
+
+  async getRateLimitEvents(hours = 24, limit = 100): Promise<{ hours: number; events: RateLimitEventRow[] }> {
+    return this.request("GET", `/admin/requests/rate-limits?hours=${hours}&limit=${limit}`, { requireAuth: true });
+  }
+
+  async getIpActivity(hours = 24, limit = 50): Promise<{ hours: number; activity: IpActivityRow[] }> {
+    return this.request("GET", `/admin/requests/ip-activity?hours=${hours}&limit=${limit}`, { requireAuth: true });
+  }
+
+  async getDatabaseSizes(): Promise<DatabaseSizesResponse> {
+    return this.request("GET", "/admin/database/sizes", { requireAuth: true });
   }
 }
 

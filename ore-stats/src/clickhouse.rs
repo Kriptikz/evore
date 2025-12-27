@@ -354,6 +354,300 @@ impl ClickHouseClient {
         Ok(())
     }
     
+    // ========== WebSocket Metrics ==========
+    
+    /// Insert a WebSocket event (connect/disconnect/error).
+    pub async fn insert_ws_event(&self, event: WsEventInsert) -> Result<(), ClickHouseError> {
+        let mut insert = self.client.insert("ws_events")?;
+        insert.write(&event).await?;
+        insert.end().await?;
+        Ok(())
+    }
+    
+    /// Insert WebSocket throughput sample.
+    pub async fn insert_ws_throughput(&self, sample: WsThroughputInsert) -> Result<(), ClickHouseError> {
+        let mut insert = self.client.insert("ws_throughput")?;
+        insert.write(&sample).await?;
+        insert.end().await?;
+        Ok(())
+    }
+    
+    /// Get WebSocket events for the last N hours.
+    pub async fn get_ws_events(&self, hours: u32, limit: u32) -> Result<Vec<WsEventRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    timestamp,
+                    program,
+                    provider,
+                    subscription_type,
+                    subscription_key,
+                    event,
+                    error_message,
+                    disconnect_reason,
+                    uptime_seconds,
+                    messages_received,
+                    reconnect_count
+                FROM ws_events
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                ORDER BY timestamp DESC
+                LIMIT ?
+            "#)
+            .bind(hours)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get WebSocket throughput summary for the last N hours.
+    pub async fn get_ws_throughput_summary(&self, hours: u32) -> Result<Vec<WsThroughputSummary>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    program,
+                    provider,
+                    subscription_type,
+                    sum(messages_received) AS total_messages,
+                    sum(bytes_received) AS total_bytes,
+                    avg(avg_process_time_us) AS avg_process_time_us
+                FROM ws_throughput
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                GROUP BY program, provider, subscription_type
+                ORDER BY total_messages DESC
+            "#)
+            .bind(hours)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    // ========== Server Metrics Queries ==========
+    
+    /// Get server metrics for the last N hours.
+    pub async fn get_server_metrics(&self, hours: u32, limit: u32) -> Result<Vec<ServerMetricsRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    timestamp,
+                    requests_total,
+                    requests_success,
+                    requests_error,
+                    latency_p50,
+                    latency_p95,
+                    latency_p99,
+                    latency_avg,
+                    active_connections,
+                    memory_used,
+                    cache_hits,
+                    cache_misses
+                FROM server_metrics
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                ORDER BY timestamp DESC
+                LIMIT ?
+            "#)
+            .bind(hours)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    // ========== Request Logs Queries ==========
+    
+    /// Get recent request logs.
+    pub async fn get_request_logs(&self, hours: u32, limit: u32) -> Result<Vec<RequestLogRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    timestamp,
+                    endpoint,
+                    method,
+                    status_code,
+                    duration_ms,
+                    client_ip,
+                    user_agent
+                FROM request_logs
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                ORDER BY timestamp DESC
+                LIMIT ?
+            "#)
+            .bind(hours)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get request logs summary by endpoint for the last N hours.
+    pub async fn get_endpoint_summary(&self, hours: u32) -> Result<Vec<EndpointSummaryRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    endpoint,
+                    count() AS total_requests,
+                    countIf(status_code < 400) AS success_count,
+                    countIf(status_code >= 400) AS error_count,
+                    avg(duration_ms) AS avg_duration_ms,
+                    max(duration_ms) AS max_duration_ms,
+                    quantile(0.95)(duration_ms) AS p95_duration_ms
+                FROM request_logs
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                GROUP BY endpoint
+                ORDER BY total_requests DESC
+            "#)
+            .bind(hours)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get rate limit events for the last N hours.
+    pub async fn get_rate_limit_events(&self, hours: u32, limit: u32) -> Result<Vec<RateLimitEventRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    timestamp,
+                    client_ip,
+                    endpoint,
+                    requests_in_window,
+                    window_seconds
+                FROM rate_limit_events
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                ORDER BY timestamp DESC
+                LIMIT ?
+            "#)
+            .bind(hours)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get IP activity summary for the last N hours.
+    pub async fn get_ip_activity(&self, hours: u32, limit: u32) -> Result<Vec<IpActivityRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    client_ip,
+                    sum(request_count) AS total_requests,
+                    sum(error_count) AS error_count,
+                    sum(rate_limit_count) AS rate_limit_count,
+                    avg(avg_duration_ms) AS avg_duration_ms
+                FROM ip_activity_hourly
+                WHERE hour > now() - INTERVAL ? HOUR
+                GROUP BY client_ip
+                ORDER BY total_requests DESC
+                LIMIT ?
+            "#)
+            .bind(hours)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    // ========== Database Size Queries ==========
+    
+    /// Get ClickHouse database sizes for all databases
+    pub async fn get_database_sizes(&self) -> Result<Vec<DatabaseSizeRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT
+                    database,
+                    sum(bytes_on_disk) AS bytes_on_disk,
+                    sum(rows) AS total_rows,
+                    count() AS table_count
+                FROM system.parts
+                WHERE active = 1
+                GROUP BY database
+                ORDER BY bytes_on_disk DESC
+            "#)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get ClickHouse table sizes for ore_stats database (legacy - use get_all_table_sizes)
+    pub async fn get_table_sizes(&self) -> Result<Vec<TableSizeRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT
+                    table,
+                    sum(bytes_on_disk) AS bytes_on_disk,
+                    sum(rows) AS total_rows,
+                    count() AS parts_count
+                FROM system.parts
+                WHERE active = 1 AND database = 'ore_stats'
+                GROUP BY table
+                ORDER BY bytes_on_disk DESC
+            "#)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get ALL table sizes across all our databases (ore_stats + crank)
+    pub async fn get_all_table_sizes(&self) -> Result<Vec<DetailedTableSizeRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT
+                    database,
+                    table,
+                    sum(bytes_on_disk) AS bytes_on_disk,
+                    sum(data_uncompressed_bytes) AS bytes_uncompressed,
+                    sum(rows) AS total_rows,
+                    count() AS parts_count,
+                    max(modification_time) AS last_modified
+                FROM system.parts
+                WHERE active = 1 AND database IN ('ore_stats', 'crank')
+                GROUP BY database, table
+                ORDER BY database, bytes_on_disk DESC
+            "#)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get ClickHouse storage engine info for tables
+    pub async fn get_table_engines(&self) -> Result<Vec<TableEngineRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT
+                    database,
+                    name AS table,
+                    engine,
+                    partition_key,
+                    sorting_key,
+                    primary_key
+                FROM system.tables
+                WHERE database IN ('ore_stats', 'crank')
+                ORDER BY database, name
+            "#)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get request stats for the last minute (for metrics snapshot)
+    pub async fn get_recent_request_stats(&self) -> Result<RecentRequestStats, ClickHouseError> {
+        let result: Option<RecentRequestStats> = self.client
+            .query(r#"
+                SELECT
+                    count() AS total,
+                    countIf(status_code >= 200 AND status_code < 400) AS success,
+                    countIf(status_code >= 400) AS errors,
+                    avg(duration_ms) AS avg_duration
+                FROM ore_stats.request_logs
+                WHERE timestamp > now64(3) - INTERVAL 1 MINUTE
+            "#)
+            .fetch_one()
+            .await
+            .ok();
+        
+        Ok(result.unwrap_or_default())
+    }
+    
     // ========== Raw Transactions (Historical Backfill Only) ==========
     
     /// Create an inserter for raw transactions.
@@ -434,7 +728,7 @@ pub struct RequestLog {
     pub method: String,
     pub status_code: u16,
     pub duration_ms: u32,
-    pub ip_hash: String,
+    pub client_ip: String,
     #[serde(default)]
     pub user_agent: String,
 }
@@ -600,7 +894,7 @@ pub struct RpcRequestInsert {
 /// Rate limit event for admin monitoring.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RateLimitEvent {
-    pub ip_hash: String,
+    pub client_ip: String,
     pub endpoint: String,
     pub requests_in_window: u32,
     pub window_seconds: u16,
@@ -711,6 +1005,189 @@ pub struct RpcDailyRow {
     pub total_response_bytes: u64,
 }
 
+// ============================================================================
+// WebSocket Metrics Types
+// ============================================================================
+
+/// WebSocket connection event (connect, disconnect, error, reconnecting)
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct WsEventInsert {
+    pub program: String,
+    pub provider: String,
+    pub subscription_type: String,  // 'account', 'slot', 'program'
+    #[serde(default)]
+    pub subscription_key: String,   // Pubkey or identifier being watched
+    pub event: String,              // 'connected', 'disconnected', 'error', 'reconnecting'
+    #[serde(default)]
+    pub error_message: String,
+    #[serde(default)]
+    pub disconnect_reason: String,  // 'timeout', 'server_closed', 'error', 'manual'
+    #[serde(default)]
+    pub uptime_seconds: u32,        // How long was this connection up
+    #[serde(default)]
+    pub messages_received: u64,     // Total messages on this connection
+    #[serde(default)]
+    pub reconnect_count: u16,       // How many times has this reconnected
+}
+
+/// WebSocket message throughput sample
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct WsThroughputInsert {
+    pub program: String,
+    pub provider: String,
+    pub subscription_type: String,
+    pub messages_received: u32,
+    pub bytes_received: u64,
+    #[serde(default)]
+    pub avg_process_time_us: u32,   // Microseconds to process message
+}
+
+/// Query result for WebSocket events
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct WsEventRow {
+    pub timestamp: i64,  // DateTime64(3) → milliseconds since epoch
+    pub program: String,
+    pub provider: String,
+    pub subscription_type: String,
+    pub subscription_key: String,
+    pub event: String,
+    pub error_message: String,
+    pub disconnect_reason: String,
+    pub uptime_seconds: u32,
+    pub messages_received: u64,
+    pub reconnect_count: u16,
+}
+
+/// Query result for WebSocket throughput summary
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct WsThroughputSummary {
+    pub program: String,
+    pub provider: String,
+    pub subscription_type: String,
+    pub total_messages: u64,
+    pub total_bytes: u64,
+    pub avg_process_time_us: f64,
+}
+
+// ============================================================================
+// Server Metrics Query Results
+// ============================================================================
+
+/// Query result for server metrics
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct ServerMetricsRow {
+    pub timestamp: u32,  // DateTime → seconds since epoch
+    pub requests_total: u64,
+    pub requests_success: u64,
+    pub requests_error: u64,
+    pub latency_p50: f32,
+    pub latency_p95: f32,
+    pub latency_p99: f32,
+    pub latency_avg: f32,
+    pub active_connections: u32,
+    pub memory_used: u64,
+    pub cache_hits: u64,
+    pub cache_misses: u64,
+}
+
+/// Query result for request logs
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RequestLogRow {
+    pub timestamp: i64,  // DateTime64(3) → milliseconds since epoch
+    pub endpoint: String,
+    pub method: String,
+    pub status_code: u16,
+    pub duration_ms: u32,
+    pub client_ip: String,
+    pub user_agent: String,
+}
+
+/// Query result for request log summary by endpoint
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct EndpointSummaryRow {
+    pub endpoint: String,
+    pub total_requests: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub avg_duration_ms: f64,
+    pub max_duration_ms: u32,
+    pub p95_duration_ms: f64,
+}
+
+/// Query result for rate limit events
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RateLimitEventRow {
+    pub timestamp: i64,  // DateTime64(3) → milliseconds since epoch
+    pub client_ip: String,
+    pub endpoint: String,
+    pub requests_in_window: u32,
+    pub window_seconds: u16,
+}
+
+/// Query result for IP activity summary
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct IpActivityRow {
+    pub client_ip: String,
+    pub total_requests: u64,
+    pub error_count: u64,
+    pub rate_limit_count: u64,
+    pub avg_duration_ms: f64,
+}
+
+// ============================================================================
+// Database Size Query Results
+// ============================================================================
+
+/// ClickHouse database size info
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct DatabaseSizeRow {
+    pub database: String,
+    pub bytes_on_disk: u64,
+    pub total_rows: u64,
+    pub table_count: u64,
+}
+
+/// ClickHouse table size info (legacy)
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct TableSizeRow {
+    pub table: String,
+    pub bytes_on_disk: u64,
+    pub total_rows: u64,
+    pub parts_count: u64,
+}
+
+/// Detailed ClickHouse table size with compression info
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct DetailedTableSizeRow {
+    pub database: String,
+    pub table: String,
+    pub bytes_on_disk: u64,
+    pub bytes_uncompressed: u64,
+    pub total_rows: u64,
+    pub parts_count: u64,
+    pub last_modified: u32,  // DateTime -> seconds since epoch
+}
+
+/// ClickHouse table engine info
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct TableEngineRow {
+    pub database: String,
+    pub table: String,
+    pub engine: String,
+    pub partition_key: String,
+    pub sorting_key: String,
+    pub primary_key: String,
+}
+
+/// Recent request statistics (for metrics snapshot)
+#[derive(Debug, Clone, Default, Row, Serialize, Deserialize)]
+pub struct RecentRequestStats {
+    pub total: u64,
+    pub success: u64,
+    pub errors: u64,
+    pub avg_duration: f32,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -722,7 +1199,7 @@ mod tests {
             method: "GET".to_string(),
             status_code: 200,
             duration_ms: 15,
-            ip_hash: "abc123".to_string(),
+            client_ip: "abc123".to_string(),
             user_agent: "test-agent".to_string(),
         };
         

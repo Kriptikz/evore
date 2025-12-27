@@ -462,6 +462,456 @@ pub async fn get_rpc_daily(
 }
 
 // ============================================================================
+// WebSocket Metrics Handlers
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct WsEventsResponse {
+    pub hours: u32,
+    pub events: Vec<crate::clickhouse::WsEventRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct WsThroughputResponse {
+    pub hours: u32,
+    pub throughput: Vec<crate::clickhouse::WsThroughputSummary>,
+}
+
+/// GET /admin/ws/events?hours=24&limit=100
+/// Get recent WebSocket events
+pub async fn get_ws_events(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<WsEventsResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    let limit = params.limit;
+    
+    let events = state.clickhouse
+        .get_ws_events(hours, limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get WS events: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get WS events".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(WsEventsResponse { hours, events }))
+}
+
+/// GET /admin/ws/throughput?hours=24
+/// Get WebSocket throughput summary
+pub async fn get_ws_throughput(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<WsThroughputResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    
+    let throughput = state.clickhouse
+        .get_ws_throughput_summary(hours)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get WS throughput: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get WS throughput".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(WsThroughputResponse { hours, throughput }))
+}
+
+// ============================================================================
+// Server Metrics Handlers
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct ServerMetricsResponse {
+    pub hours: u32,
+    pub metrics: Vec<crate::clickhouse::ServerMetricsRow>,
+}
+
+/// GET /admin/server/metrics?hours=24&limit=100
+/// Get recent server metrics snapshots
+pub async fn get_server_metrics(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<ServerMetricsResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    let limit = params.limit;
+    
+    let metrics = state.clickhouse
+        .get_server_metrics(hours, limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get server metrics: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get server metrics".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(ServerMetricsResponse { hours, metrics }))
+}
+
+// ============================================================================
+// Request Logs Handlers
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct RequestLogsResponse {
+    pub hours: u32,
+    pub logs: Vec<crate::clickhouse::RequestLogRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EndpointSummaryResponse {
+    pub hours: u32,
+    pub endpoints: Vec<crate::clickhouse::EndpointSummaryRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RateLimitEventsResponse {
+    pub hours: u32,
+    pub events: Vec<crate::clickhouse::RateLimitEventRow>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct IpActivityResponse {
+    pub hours: u32,
+    pub activity: Vec<crate::clickhouse::IpActivityRow>,
+}
+
+/// GET /admin/requests/logs?hours=24&limit=100
+/// Get recent request logs
+pub async fn get_request_logs(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<RequestLogsResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    let limit = params.limit;
+    
+    let logs = state.clickhouse
+        .get_request_logs(hours, limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get request logs: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get request logs".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(RequestLogsResponse { hours, logs }))
+}
+
+/// GET /admin/requests/endpoints?hours=24
+/// Get endpoint summary statistics
+pub async fn get_endpoint_summary(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<EndpointSummaryResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    
+    let endpoints = state.clickhouse
+        .get_endpoint_summary(hours)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get endpoint summary: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get endpoint summary".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(EndpointSummaryResponse { hours, endpoints }))
+}
+
+/// GET /admin/requests/rate-limits?hours=24&limit=100
+/// Get recent rate limit events
+pub async fn get_rate_limit_events(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<RateLimitEventsResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    let limit = params.limit;
+    
+    let events = state.clickhouse
+        .get_rate_limit_events(hours, limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get rate limit events: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get rate limit events".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(RateLimitEventsResponse { hours, events }))
+}
+
+/// GET /admin/requests/ip-activity?hours=24&limit=50
+/// Get IP activity summary
+pub async fn get_ip_activity(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<IpActivityResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    let limit = params.limit;
+    
+    let activity = state.clickhouse
+        .get_ip_activity(hours, limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get IP activity: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get IP activity".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(IpActivityResponse { hours, activity }))
+}
+
+// ============================================================================
+// Database Size Handlers
+// ============================================================================
+
+// ============================================================================
+// Database Size Types
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct DatabaseSizeResponse {
+    pub summary: StorageSummary,
+    pub clickhouse: ClickHouseSizes,
+    pub postgres: PostgresSizes,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StorageSummary {
+    pub total_bytes: u64,
+    pub total_rows: u64,
+    pub clickhouse_bytes: u64,
+    pub postgres_bytes: i64,
+    pub compression_ratio: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ClickHouseSizes {
+    pub databases: Vec<crate::clickhouse::DatabaseSizeRow>,
+    pub tables: Vec<DetailedTable>,
+    pub engines: Vec<crate::clickhouse::TableEngineRow>,
+    pub total_bytes: u64,
+    pub total_bytes_uncompressed: u64,
+    pub total_rows: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DetailedTable {
+    pub database: String,
+    pub table: String,
+    pub bytes_on_disk: u64,
+    pub bytes_uncompressed: u64,
+    pub compression_ratio: f64,
+    pub total_rows: u64,
+    pub parts_count: u64,
+    pub last_modified: String,
+    pub avg_row_size: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PostgresSizes {
+    pub database_name: String,
+    pub database_size_bytes: i64,
+    pub table_sizes: Vec<PostgresTableSize>,
+    pub total_rows: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PostgresTableSize {
+    pub table_name: String,
+    pub total_size_bytes: i64,
+    pub table_size_bytes: i64,
+    pub index_size_bytes: i64,
+    pub row_count: i64,
+    pub avg_row_size: f64,
+    pub dead_tuples: i64,
+    pub last_vacuum: Option<String>,
+    pub last_analyze: Option<String>,
+}
+
+/// GET /admin/database/sizes
+/// Comprehensive database storage metrics for production monitoring
+pub async fn get_database_sizes(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<DatabaseSizeResponse>, (StatusCode, Json<AuthError>)> {
+    // Get ClickHouse database-level sizes
+    let ch_databases = state.clickhouse
+        .get_database_sizes()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get ClickHouse database sizes: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    // Get detailed table sizes (all databases)
+    let ch_tables_raw = state.clickhouse
+        .get_all_table_sizes()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get ClickHouse table sizes: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    // Get table engine info
+    let ch_engines = state.clickhouse
+        .get_table_engines()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get ClickHouse table engines: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    // Transform to detailed tables with computed metrics
+    let ch_tables: Vec<DetailedTable> = ch_tables_raw.iter().map(|t| {
+        let compression_ratio = if t.bytes_on_disk > 0 {
+            t.bytes_uncompressed as f64 / t.bytes_on_disk as f64
+        } else {
+            0.0
+        };
+        let avg_row_size = if t.total_rows > 0 {
+            t.bytes_on_disk as f64 / t.total_rows as f64
+        } else {
+            0.0
+        };
+        
+        DetailedTable {
+            database: t.database.clone(),
+            table: t.table.clone(),
+            bytes_on_disk: t.bytes_on_disk,
+            bytes_uncompressed: t.bytes_uncompressed,
+            compression_ratio,
+            total_rows: t.total_rows,
+            parts_count: t.parts_count,
+            last_modified: chrono::DateTime::from_timestamp(t.last_modified as i64, 0)
+                .map(|dt| dt.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                .unwrap_or_else(|| "Unknown".to_string()),
+            avg_row_size,
+        }
+    }).collect();
+    
+    let ch_total_bytes: u64 = ch_databases.iter().map(|d| d.bytes_on_disk).sum();
+    let ch_total_rows: u64 = ch_databases.iter().map(|d| d.total_rows).sum();
+    let ch_total_uncompressed: u64 = ch_tables_raw.iter().map(|t| t.bytes_uncompressed).sum();
+    
+    // Get PostgreSQL database info
+    let pg_db_info: (String, i64) = sqlx::query_as(
+        "SELECT current_database()::text, pg_database_size(current_database())"
+    )
+        .fetch_one(&state.postgres)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get PostgreSQL database size: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("PostgreSQL error: {}", e) }),
+            )
+        })?;
+    
+    // Get detailed PostgreSQL table info
+    let pg_tables: Vec<(String, i64, i64, i64, i64, i64, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)> = sqlx::query_as(
+        r#"
+        SELECT 
+            relname::text AS table_name,
+            pg_total_relation_size(relid) AS total_size_bytes,
+            pg_table_size(relid) AS table_size_bytes,
+            pg_indexes_size(relid) AS index_size_bytes,
+            n_live_tup AS row_count,
+            n_dead_tup AS dead_tuples,
+            last_vacuum,
+            last_analyze
+        FROM pg_stat_user_tables
+        ORDER BY pg_total_relation_size(relid) DESC
+        "#
+    )
+        .fetch_all(&state.postgres)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get PostgreSQL table sizes: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("PostgreSQL error: {}", e) }),
+            )
+        })?;
+    
+    let pg_total_rows: i64 = pg_tables.iter().map(|t| t.4).sum();
+    
+    let pg_table_sizes: Vec<PostgresTableSize> = pg_tables
+        .into_iter()
+        .map(|(name, total, table, index, rows, dead, vacuum, analyze)| {
+            let avg_row_size = if rows > 0 {
+                table as f64 / rows as f64
+            } else {
+                0.0
+            };
+            PostgresTableSize {
+                table_name: name,
+                total_size_bytes: total,
+                table_size_bytes: table,
+                index_size_bytes: index,
+                row_count: rows,
+                avg_row_size,
+                dead_tuples: dead,
+                last_vacuum: vacuum.map(|v| v.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                last_analyze: analyze.map(|a| a.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+            }
+        })
+        .collect();
+    
+    // Calculate overall compression ratio
+    let overall_compression = if ch_total_bytes > 0 {
+        ch_total_uncompressed as f64 / ch_total_bytes as f64
+    } else {
+        0.0
+    };
+    
+    Ok(Json(DatabaseSizeResponse {
+        summary: StorageSummary {
+            total_bytes: ch_total_bytes + pg_db_info.1 as u64,
+            total_rows: ch_total_rows + pg_total_rows as u64,
+            clickhouse_bytes: ch_total_bytes,
+            postgres_bytes: pg_db_info.1,
+            compression_ratio: overall_compression,
+        },
+        clickhouse: ClickHouseSizes {
+            databases: ch_databases,
+            tables: ch_tables,
+            engines: ch_engines,
+            total_bytes: ch_total_bytes,
+            total_bytes_uncompressed: ch_total_uncompressed,
+            total_rows: ch_total_rows,
+        },
+        postgres: PostgresSizes {
+            database_name: pg_db_info.0,
+            database_size_bytes: pg_db_info.1,
+            table_sizes: pg_table_sizes,
+            total_rows: pg_total_rows,
+        },
+    }))
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 
@@ -482,6 +932,18 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/rpc/errors", get(get_rpc_errors))
         .route("/rpc/timeseries", get(get_rpc_timeseries))
         .route("/rpc/daily", get(get_rpc_daily))
+        // WebSocket metrics
+        .route("/ws/events", get(get_ws_events))
+        .route("/ws/throughput", get(get_ws_throughput))
+        // Server metrics
+        .route("/server/metrics", get(get_server_metrics))
+        // Request logs
+        .route("/requests/logs", get(get_request_logs))
+        .route("/requests/endpoints", get(get_endpoint_summary))
+        .route("/requests/rate-limits", get(get_rate_limit_events))
+        .route("/requests/ip-activity", get(get_ip_activity))
+        // Database sizes
+        .route("/database/sizes", get(get_database_sizes))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth::require_admin_auth,
