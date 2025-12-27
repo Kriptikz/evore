@@ -118,14 +118,41 @@ pub async fn finalize_round(
     );
     
     // Build deployments for ClickHouse
+    // Use miner snapshot as authoritative source for deployed amounts
+    // Match with websocket slot data where available, fallback to slot 0
     let mut all_deployments = Vec::new();
+    let mut miners_with_deployments = 0u32;
     
-    for (miner_pubkey, squares) in &snapshot.deployments {
+    for (miner_pubkey, miner) in &snapshot.miners {
+        // Only include miners who deployed this round
+        if miner.round_id != round_id {
+            continue;
+        }
+        
         // Check if this miner is the top_miner (from on-chain data)
         let is_this_top_miner = *miner_pubkey == top_miner_pubkey;
         
-        for (&square_id, &(amount, slot)) in squares {
-            let is_winner = square_id == winning_square;
+        // Get websocket slot data for this miner (if available)
+        let ws_squares = snapshot.deployments.get(miner_pubkey);
+        
+        let mut miner_has_deployment = false;
+        
+        // Use miner.deployed[25] as authoritative amounts
+        for (square_id, &amount) in miner.deployed.iter().enumerate() {
+            if amount == 0 {
+                continue;
+            }
+            
+            miner_has_deployment = true;
+            let square_id_u8 = square_id as u8;
+            
+            // Try to get slot from websocket data, fallback to 0 if not found
+            let deployed_slot = ws_squares
+                .and_then(|squares| squares.get(&square_id_u8))
+                .map(|(_, slot)| *slot)
+                .unwrap_or(0);
+            
+            let is_winner = square_id_u8 == winning_square;
             
             // Calculate rewards for winning square
             let (sol_earned, ore_earned) = if is_winner && total_winnings > 0 {
@@ -143,21 +170,26 @@ pub async fn finalize_round(
             all_deployments.push(DeploymentInsert {
                 round_id,
                 miner_pubkey: miner_pubkey.clone(),
-                square_id,
+                square_id: square_id_u8,
                 amount,
-                deployed_slot: slot,
+                deployed_slot,
                 sol_earned,
                 ore_earned,
                 is_winner: if is_winner { 1 } else { 0 },
                 is_top_miner: if is_winner && is_this_top_miner { 1 } else { 0 },
             });
         }
+        
+        if miner_has_deployment {
+            miners_with_deployments += 1;
+        }
     }
     
     tracing::info!(
-        "Round {}: {} deployments to store, top_miner={}",
+        "Round {}: {} deployments from {} miners to store, top_miner={}",
         round_id,
         all_deployments.len(),
+        miners_with_deployments,
         top_miner_pubkey
     );
     
@@ -178,7 +210,7 @@ pub async fn finalize_round(
         motherlode: finalized_round.motherlode,
         motherlode_hit: if finalized_round.motherlode > 0 { 1 } else { 0 },
         total_deployments: all_deployments.len() as u32,
-        unique_miners: snapshot.deployments.len() as u32,
+        unique_miners: miners_with_deployments,
         source: "live".to_string(),
     };
     
@@ -322,6 +354,11 @@ async fn wait_for_round_finalization(
 /// Log the optimistic winning square and top miner calculation
 /// This runs as soon as slot_hash is available (before on-chain top_miner is set)
 /// Used to verify our calculation matches the on-chain result
+///
+/// Top miner is NOT the highest deployer - it's a WEIGHTED RANDOM selection:
+/// - top_miner_sample = rng.reverse_bits() % total_deployed[winning_square]
+/// - The miner whose cumulative range contains this sample wins
+/// - If is_split_reward is true, the 1 ORE is split among all winners proportionally
 fn log_optimistic_calculation(round: &Round, snapshot: &RoundSnapshot) {
     // Calculate winning square from slot_hash
     let rng = match round.rng() {
@@ -332,71 +369,103 @@ fn log_optimistic_calculation(round: &Round, snapshot: &RoundSnapshot) {
         }
     };
     
-    let winning_square = round.winning_square(rng) as u8;
+    let winning_square = round.winning_square(rng);
+    let is_split = round.is_split_reward(rng);
+    let total_on_winning = round.deployed[winning_square];
     
-    // Find the miner with the highest deployment on the winning square
-    // from our snapshot data
-    let mut top_miner_on_winning: Option<(String, u64)> = None;
+    tracing::info!(
+        "OPTIMISTIC CALC - Round {}: winning_square={}, total_on_square={}, is_split_reward={}",
+        round.id, winning_square, total_on_winning, is_split
+    );
     
-    for (miner_pubkey, squares) in &snapshot.deployments {
-        if let Some(&(amount, _slot)) = squares.get(&winning_square) {
-            if amount > 0 {
-                match &top_miner_on_winning {
-                    Some((_, current_best)) if amount <= *current_best => {
-                        // This miner has less or equal, keep current
-                    }
-                    _ => {
-                        top_miner_on_winning = Some((miner_pubkey.clone(), amount));
-                    }
-                }
-            }
+    if total_on_winning == 0 {
+        tracing::info!(
+            "OPTIMISTIC CALC - Round {}: no deployments on winning square, no top_miner",
+            round.id
+        );
+        return;
+    }
+    
+    // If split reward, the 1 ORE is split among all winners - no single top_miner selection
+    if is_split {
+        tracing::info!(
+            "OPTIMISTIC CALC - Round {}: SPLIT REWARD - 1 ORE split among all winners on square {}",
+            round.id, winning_square
+        );
+        // Log participants
+        let miners_on_square: Vec<(&String, u64)> = snapshot.miners
+            .iter()
+            .filter(|(_, m)| m.deployed[winning_square] > 0)
+            .map(|(pubkey, m)| (pubkey, m.deployed[winning_square]))
+            .collect();
+        tracing::info!(
+            "OPTIMISTIC CALC - Round {}: {} miners will split the reward",
+            round.id, miners_on_square.len()
+        );
+        return;
+    }
+    
+    // Weighted random selection using top_miner_sample
+    // Sample point in [0, total_deployed[winning_square])
+    let sample = round.top_miner_sample(rng, winning_square);
+    
+    tracing::info!(
+        "OPTIMISTIC CALC - Round {}: sample={} (will select miner whose cumulative range contains this)",
+        round.id, sample
+    );
+    
+    // Find the miner whose cumulative range contains the sample
+    // Range for each miner: [cumulative, cumulative + deployed)
+    let mut predicted_top_miner: Option<(String, u64, u64, u64)> = None; // (pubkey, cumulative, deployed, upper_bound)
+    
+    for (pubkey, miner) in &snapshot.miners {
+        let deployed = miner.deployed[winning_square];
+        if deployed == 0 {
+            continue;
+        }
+        
+        let cumulative = miner.cumulative[winning_square];
+        let upper_bound = cumulative + deployed;
+        
+        // Check if sample falls in this miner's range [cumulative, upper_bound)
+        if sample >= cumulative && sample < upper_bound {
+            predicted_top_miner = Some((pubkey.clone(), cumulative, deployed, upper_bound));
+            break;
         }
     }
     
-    // Calculate total on winning square from snapshot
-    let total_on_winning: u64 = snapshot.deployments
-        .values()
-        .filter_map(|squares| squares.get(&winning_square).map(|(amt, _)| *amt))
-        .sum();
-    
-    // Compare with on-chain deployed array
-    let onchain_total_on_winning = round.deployed[winning_square as usize];
-    
-    tracing::info!(
-        "OPTIMISTIC CALC - Round {}: winning_square={}, total_on_winning={} (on-chain={})",
-        round.id, winning_square, total_on_winning, onchain_total_on_winning
-    );
-    
-    if let Some((miner, amount)) = &top_miner_on_winning {
+    if let Some((pubkey, cumulative, deployed, upper)) = predicted_top_miner {
         tracing::info!(
-            "OPTIMISTIC CALC - Round {}: predicted_top_miner={} (deployed {} on square {})",
-            round.id, miner, amount, winning_square
+            "OPTIMISTIC CALC - Round {}: PREDICTED top_miner={}",
+            round.id, pubkey
+        );
+        tracing::info!(
+            "OPTIMISTIC CALC - Round {}: range=[{}, {}) contains sample={}, deployed={} lamports",
+            round.id, cumulative, upper, sample, deployed
         );
     } else {
-        tracing::info!(
-            "OPTIMISTIC CALC - Round {}: no miners found on winning square {} in snapshot",
-            round.id, winning_square
+        tracing::warn!(
+            "OPTIMISTIC CALC - Round {}: Could not find miner for sample={}! Data mismatch?",
+            round.id, sample
         );
-    }
-    
-    // Also log all miners on the winning square for debugging
-    let mut winners_on_square: Vec<(&String, u64)> = snapshot.deployments
-        .iter()
-        .filter_map(|(miner, squares)| {
-            squares.get(&winning_square).map(|(amt, _)| (miner, *amt))
-        })
-        .filter(|(_, amt)| *amt > 0)
-        .collect();
-    
-    winners_on_square.sort_by(|a, b| b.1.cmp(&a.1));
-    
-    if !winners_on_square.is_empty() {
+        
+        // Debug: log all miners on the winning square
+        let mut miners_on_square: Vec<(&String, u64, u64)> = snapshot.miners
+            .iter()
+            .filter(|(_, m)| m.deployed[winning_square] > 0)
+            .map(|(pubkey, m)| (pubkey, m.cumulative[winning_square], m.deployed[winning_square]))
+            .collect();
+        miners_on_square.sort_by(|a, b| a.1.cmp(&b.1)); // Sort by cumulative
+        
         tracing::info!(
-            "OPTIMISTIC CALC - Round {}: {} miners on winning square (top 5):",
-            round.id, winners_on_square.len()
+            "OPTIMISTIC CALC - Round {}: {} miners on winning square (sorted by cumulative):",
+            round.id, miners_on_square.len()
         );
-        for (miner, amount) in winners_on_square.iter().take(5) {
-            tracing::info!("  {} - {} lamports", miner, amount);
+        for (pubkey, cumulative, deployed) in miners_on_square.iter().take(10) {
+            tracing::info!(
+                "  {} - cumulative={}, deployed={}, range=[{}, {})",
+                pubkey, cumulative, deployed, cumulative, cumulative + deployed
+            );
         }
     }
 }

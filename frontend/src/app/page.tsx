@@ -56,11 +56,28 @@ interface LiveRound {
   unique_miners: number;
 }
 
+// SSE Live Deployment (batched by miner per slot)
+interface LiveDeploymentEvent {
+  round_id: number;
+  miner_pubkey: string;
+  amounts: number[];  // Array of 25 amounts, index = square_id
+  slot: number;
+}
+
+// Aggregated live deployments for display
+interface LiveDeploymentDisplay {
+  miner_pubkey: string;
+  square_id: number;
+  amount: number;
+  slot: number;
+}
+
 // API endpoint
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 // Format functions
 const formatSol = (lamports: number) => (lamports / 1e9).toFixed(4);
+const formatOre = (atomicOre: number) => (atomicOre / 1e11).toFixed(2); // ORE has 11 decimals
 const truncate = (s: string) => s.length > 12 ? `${s.slice(0, 6)}...${s.slice(-4)}` : s;
 
 function SquareGrid({
@@ -301,14 +318,88 @@ function DeploymentsGroupedBySlot({
   );
 }
 
+function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisplay[] }) {
+  const groupedBySlot = useMemo(() => {
+    const groups: Map<number, LiveDeploymentDisplay[]> = new Map();
+    for (const d of deployments) {
+      if (!groups.has(d.slot)) {
+        groups.set(d.slot, []);
+      }
+      groups.get(d.slot)!.push(d);
+    }
+    // Sort by slot descending (newest first)
+    return Array.from(groups.entries()).sort((a, b) => b[0] - a[0]);
+  }, [deployments]);
+
+  return (
+    <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
+        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+          <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+          Live Deployments ({deployments.length})
+        </h3>
+        <span className="text-sm text-slate-400">
+          {groupedBySlot.length} slot{groupedBySlot.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+      <div className="max-h-[400px] overflow-y-auto">
+        {groupedBySlot.slice(0, 50).map(([slot, slotDeployments]) => (
+          <div key={slot} className="border-b border-slate-700/30 last:border-0">
+            <div className="px-4 py-2 bg-slate-900/50 flex justify-between items-center sticky top-0">
+              <span className="text-xs font-mono text-slate-400">
+                Slot {slot.toLocaleString()}
+              </span>
+              <span className="text-xs text-emerald-400">
+                {slotDeployments.length} deployment{slotDeployments.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+            <div className="divide-y divide-slate-700/20">
+              {slotDeployments.map((d, i) => (
+                <div 
+                  key={`${d.miner_pubkey}-${d.square_id}-${i}`}
+                  className="px-4 py-2 flex items-center justify-between hover:bg-slate-700/20"
+                >
+                  <div className="flex items-center gap-3">
+                    <Link 
+                      href={`/miners/${d.miner_pubkey}`}
+                      className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
+                    >
+                      {truncate(d.miner_pubkey)}
+                    </Link>
+                  </div>
+                  <div className="flex items-center gap-4">
+                    <span className="px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-400">
+                      ◼ {d.square_id}
+                    </span>
+                    <span className="font-mono text-sm text-white w-24 text-right">
+                      {formatSol(d.amount)}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+        {deployments.length === 0 && (
+          <div className="p-6 text-center text-slate-400">
+            Waiting for deployments...
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RoundDetailView({
   round,
   liveRound,
   isLive,
+  liveDeployments,
 }: {
   round: RoundDetail | null;
   liveRound: LiveRound | null;
   isLive: boolean;
+  liveDeployments: LiveDeploymentDisplay[];
 }) {
   const [sliderValue, setSliderValue] = useState(100);
   
@@ -497,7 +588,7 @@ function RoundDetailView({
                     {truncate(round.top_miner)}
                   </Link>
                   <p className="text-xs text-slate-500 mt-0.5">
-                    Reward: <span className="text-emerald-400">{formatSol(round.top_miner_reward)} SOL</span>
+                    Reward: <span className="text-emerald-400">{formatOre(round.top_miner_reward)} ORE</span>
                   </p>
                 </div>
               </div>
@@ -506,13 +597,18 @@ function RoundDetailView({
         </div>
       </div>
 
-      {/* Deployments Table (historical only) */}
+      {/* Deployments Table */}
       {!isLive && round && (
         <DeploymentsGroupedBySlot 
           deployments={visibleDeployments} 
           winningSquare={winningSquare}
           topMiner={round.top_miner}
         />
+      )}
+      
+      {/* Live Deployments Table */}
+      {isLive && liveDeployments.length > 0 && (
+        <LiveDeploymentsTable deployments={liveDeployments} />
       )}
     </div>
   );
@@ -523,6 +619,7 @@ export default function HomePage() {
   const [selectedRoundId, setSelectedRoundId] = useState<number | null>(0);
   const [roundDetail, setRoundDetail] = useState<RoundDetail | null>(null);
   const [liveRound, setLiveRound] = useState<LiveRound | null>(null);
+  const [liveDeployments, setLiveDeployments] = useState<LiveDeploymentDisplay[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -542,7 +639,14 @@ export default function HomePage() {
       const res = await fetch(`${API_BASE}/round`);
       if (!res.ok) throw new Error("Failed to fetch live round");
       const data = await res.json();
-      setLiveRound(data);
+      
+      // If round changed, clear live deployments
+      setLiveRound((prev) => {
+        if (prev && prev.round_id !== data.round_id) {
+          setLiveDeployments([]);
+        }
+        return data;
+      });
     } catch (err) {
       console.error("Failed to fetch live round:", err);
     }
@@ -565,6 +669,53 @@ export default function HomePage() {
       setLoading(false);
     }
   }, []);
+
+  // SSE subscription for live deployments
+  useEffect(() => {
+    if (selectedRoundId !== 0) return;
+    
+    const eventSource = new EventSource(`${API_BASE}/sse/deployments`);
+    
+    eventSource.addEventListener("deployment", (event) => {
+      try {
+        const wrapper = JSON.parse(event.data);
+        // The SSE sends { "Deployment": { round_id, miner_pubkey, amounts, slot } }
+        const deployment: LiveDeploymentEvent = wrapper.Deployment;
+        
+        if (!deployment || !liveRound) return;
+        
+        // Only process deployments for the current round
+        if (deployment.round_id !== liveRound.round_id) return;
+        
+        // Convert batched amounts array to individual deployment entries
+        const newDeployments: LiveDeploymentDisplay[] = [];
+        deployment.amounts.forEach((amount, squareId) => {
+          if (amount > 0) {
+            newDeployments.push({
+              miner_pubkey: deployment.miner_pubkey,
+              square_id: squareId,
+              amount,
+              slot: deployment.slot,
+            });
+          }
+        });
+        
+        if (newDeployments.length > 0) {
+          setLiveDeployments((prev) => [...prev, ...newDeployments]);
+        }
+      } catch (err) {
+        console.error("Failed to parse deployment event:", err);
+      }
+    });
+    
+    eventSource.onerror = () => {
+      console.error("SSE connection error");
+    };
+    
+    return () => {
+      eventSource.close();
+    };
+  }, [selectedRoundId, liveRound?.round_id]);
 
   useEffect(() => {
     Promise.all([fetchRounds(), fetchLiveRound()]).finally(() => setLoading(false));
@@ -646,6 +797,7 @@ export default function HomePage() {
               round={roundDetail}
               liveRound={liveRound}
               isLive={selectedRoundId === 0}
+              liveDeployments={liveDeployments}
             />
           </div>
         </div>
