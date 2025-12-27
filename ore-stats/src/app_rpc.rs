@@ -34,8 +34,8 @@ pub struct RpcMetrics {
     pub method: String,
     pub duration_ms: u32,
     pub status: String,
-    pub request_size: u64,
-    pub response_size: u64,
+    pub request_size: u32,
+    pub response_size: u32,
 }
 
 /// Central RPC gateway with metrics tracking
@@ -143,7 +143,7 @@ impl AppRpc {
                     duration_ms,
                     status: "success".to_string(),
                     request_size: 32, // pubkey size
-                    response_size: data.len() as u64,
+                    response_size: data.len() as u32,
                 }).await;
                 
                 let board = Board::try_from_bytes(&data)?;
@@ -179,7 +179,7 @@ impl AppRpc {
                     duration_ms,
                     status: "success".to_string(),
                     request_size: 32,
-                    response_size: data.len() as u64,
+                    response_size: data.len() as u32,
                 }).await;
                 
                 let round = Round::try_from_bytes(&data)?;
@@ -214,7 +214,7 @@ impl AppRpc {
                     duration_ms,
                     status: "success".to_string(),
                     request_size: 32,
-                    response_size: data.len() as u64,
+                    response_size: data.len() as u32,
                 }).await;
                 
                 let treasury = Treasury::try_from_bytes(&data)?;
@@ -250,7 +250,7 @@ impl AppRpc {
                     duration_ms,
                     status: "success".to_string(),
                     request_size: 32,
-                    response_size: data.len() as u64,
+                    response_size: data.len() as u32,
                 }).await;
                 
                 let miner = Miner::try_from_bytes(&data)?;
@@ -358,16 +358,16 @@ impl AppRpc {
         
         match result {
             Ok(accounts) => {
-                let response_size: u64 = accounts.iter()
+                let response_size: u32 = accounts.iter()
                     .filter_map(|a| a.as_ref())
-                    .map(|a| a.data.len() as u64)
+                    .map(|a| a.data.len() as u32)
                     .sum();
                     
                 self.log_metrics(RpcMetrics {
                     method: "getMultipleAccounts".to_string(),
                     duration_ms,
                     status: "success".to_string(),
-                    request_size: (pubkeys.len() * 32) as u64,
+                    request_size: (pubkeys.len() * 32) as u32,
                     response_size,
                 }).await;
                 
@@ -378,7 +378,7 @@ impl AppRpc {
                     method: "getMultipleAccounts".to_string(),
                     duration_ms,
                     status: "error".to_string(),
-                    request_size: (pubkeys.len() * 32) as u64,
+                    request_size: (pubkeys.len() * 32) as u32,
                     response_size: 0,
                 }).await;
                 Err(e.into())

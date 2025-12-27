@@ -517,7 +517,7 @@ impl RoundInsert {
         total_winnings: u64,
         motherlode: u64,
         unique_miners: u32,
-        timestamp_secs: u64,
+        _timestamp_secs: u64,
     ) -> Self {
         // Approximate expires_at: ts + 24 hours worth of slots (~216000 at 400ms/slot)
         let expires_at = end_slot.saturating_add(216000);
@@ -589,11 +589,11 @@ pub struct RpcRequestInsert {
     pub api_key_id: String,
     pub method: String,
     pub is_batch: u8,
-    pub batch_size: u32,
+    pub batch_size: u16,       // UInt16 in ClickHouse
     pub status: String,
     pub duration_ms: u32,
-    pub request_size: u64,
-    pub response_size: u64,
+    pub request_size: u32,     // UInt32 in ClickHouse
+    pub response_size: u32,    // UInt32 in ClickHouse
     pub rate_limit_remaining: i32,
 }
 
