@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::Engine as _;
 use evore::ore_api::Miner;
 use steel::Pubkey;
 use tokio::time::interval;
@@ -370,6 +371,180 @@ pub fn spawn_cleanup_task(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
             // This is optional - depends on memory constraints
             
             tracing::debug!("Cleanup task completed");
+        }
+    })
+}
+
+// ============================================================================
+// EVORE Account Polling (Phase 1b)
+// ============================================================================
+
+/// Spawn the EVORE accounts polling task
+/// Fetches Managers, Deployers, and Auth balances every 5 seconds
+pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
+    use crate::evore_cache::{
+        parse_manager, parse_deployer, managed_miner_auth_pda, CachedAuthBalance,
+    };
+    
+    tokio::spawn(async move {
+        // Initial delay to let other caches populate first
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        
+        let mut ticker = interval(Duration::from_secs(5));
+        let mut initial_load_done = false;
+        
+        loop {
+            ticker.tick().await;
+            
+            // Fetch all EVORE accounts
+            let helius = state.helius.clone();
+            
+            // Fetch Managers
+            let managers_result = {
+                let mut api = helius.write().await;
+                api.get_all_evore_managers(None).await
+            };
+            
+            match managers_result {
+                Ok(accounts) => {
+                    let mut cache = state.evore_cache.write().await;
+                    let mut count = 0;
+                    
+                    for acc in &accounts {
+                        // Decode account data
+                        if let Some(data_b64) = acc.account.data.first() {
+                            if let Ok(data) = base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                data_b64,
+                            ) {
+                                if let Some(manager) = parse_manager(&acc.pubkey, &data) {
+                                    cache.upsert_manager(manager);
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !initial_load_done {
+                        tracing::info!("EVORE: Loaded {} managers", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch EVORE managers: {}", e);
+                }
+            }
+            
+            // Fetch Deployers
+            let deployers_result = {
+                let mut api = helius.write().await;
+                api.get_all_evore_deployers(None).await
+            };
+            
+            match deployers_result {
+                Ok(accounts) => {
+                    let mut cache = state.evore_cache.write().await;
+                    let mut count = 0;
+                    
+                    for acc in &accounts {
+                        if let Some(data_b64) = acc.account.data.first() {
+                            if let Ok(data) = base64::Engine::decode(
+                                &base64::engine::general_purpose::STANDARD,
+                                data_b64,
+                            ) {
+                                if let Some(deployer) = parse_deployer(&acc.pubkey, &data) {
+                                    cache.upsert_deployer(deployer);
+                                    count += 1;
+                                }
+                            }
+                        }
+                    }
+                    
+                    if !initial_load_done {
+                        tracing::info!("EVORE: Loaded {} deployers", count);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch EVORE deployers: {}", e);
+                }
+            }
+            
+            // Fetch Auth balances for all managers
+            {
+                let cache = state.evore_cache.read().await;
+                let managers: Vec<(String, Pubkey)> = cache.managers
+                    .iter()
+                    .filter_map(|(addr, _)| {
+                        Pubkey::try_from(addr.as_str()).ok().map(|p| (addr.clone(), p))
+                    })
+                    .collect();
+                drop(cache);
+                
+                if !managers.is_empty() {
+                    // Derive PDAs and fetch balances in batches
+                    let mut pdas: Vec<(String, Pubkey)> = Vec::new();
+                    for (manager_addr, manager_pubkey) in &managers {
+                        let (pda, _) = managed_miner_auth_pda(manager_pubkey, 0);
+                        pdas.push((manager_addr.clone(), pda));
+                    }
+                    
+                    // Fetch balances in batches of 100
+                    let mut all_balances: Vec<(String, Pubkey, Option<u64>)> = Vec::new();
+                    
+                    for chunk in pdas.chunks(100) {
+                        let addresses: Vec<Pubkey> = chunk.iter().map(|(_, p)| *p).collect();
+                        
+                        let balances_result = {
+                            let mut api = helius.write().await;
+                            api.get_multiple_account_balances(&addresses).await
+                        };
+                        
+                        match balances_result {
+                            Ok(balances) => {
+                                for (i, (pubkey, balance)) in balances.into_iter().enumerate() {
+                                    let manager_addr = chunk[i].0.clone();
+                                    all_balances.push((manager_addr, pubkey, balance));
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("Failed to fetch auth balances: {}", e);
+                            }
+                        }
+                    }
+                    
+                    // Update cache
+                    let mut cache = state.evore_cache.write().await;
+                    let mut count = 0;
+                    
+                    for (manager_addr, pda, balance) in all_balances {
+                        if let Some(lamports) = balance {
+                            cache.upsert_auth_balance(CachedAuthBalance {
+                                address: pda.to_string(),
+                                manager: manager_addr,
+                                auth_id: 0,
+                                balance: lamports,
+                            });
+                            count += 1;
+                        }
+                    }
+                    
+                    // Update last slot
+                    cache.last_updated_slot = *state.slot_cache.read().await;
+                    
+                    if !initial_load_done {
+                        tracing::info!("EVORE: Loaded {} auth balances", count);
+                    }
+                }
+            }
+            
+            if !initial_load_done {
+                let cache = state.evore_cache.read().await;
+                let stats = cache.stats();
+                tracing::info!(
+                    "EVORE cache initialized: {} managers, {} deployers, {} auth balances",
+                    stats.managers_count, stats.deployers_count, stats.auth_balances_count
+                );
+                initial_load_done = true;
+            }
         }
     })
 }

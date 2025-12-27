@@ -412,6 +412,79 @@ export interface Miner {
 }
 
 // ============================================================================
+// Historical Data Types (Phase 3)
+// ============================================================================
+
+export interface HistoricalRound {
+  round_id: number;
+  start_slot: number;
+  end_slot: number;
+  winning_square: number;
+  top_miner: string;
+  total_deployed: number;
+  total_winnings: number;
+  unique_miners: number;
+  motherlode: number;
+  motherlode_hit: boolean;
+  created_at: string;
+}
+
+export interface HistoricalDeployment {
+  round_id: number;
+  miner_pubkey: string;
+  square_id: number;
+  amount: number;
+  deployed_slot: number;
+  sol_earned: number;
+  ore_earned: number;
+  is_winner: boolean;
+  is_top_miner: boolean;
+}
+
+export interface MinerStats {
+  miner_pubkey: string;
+  total_deployed: number;
+  total_sol_earned: number;
+  total_ore_earned: number;
+  net_sol_change: number;
+  rounds_played: number;
+  rounds_won: number;
+  win_rate: number;
+  avg_deployment: number;
+}
+
+export interface LeaderboardEntry {
+  rank: number;
+  miner_pubkey: string;
+  value: number;
+  rounds_played: number;
+}
+
+export interface TreasurySnapshot {
+  round_id: number;
+  balance: number;
+  motherlode: number;
+  total_staked: number;
+  total_unclaimed: number;
+  total_refined: number;
+  created_at: string;
+}
+
+export interface CursorResponse<T> {
+  data: T[];
+  cursor: string | null;
+  has_more: boolean;
+}
+
+export interface OffsetResponse<T> {
+  data: T[];
+  page: number;
+  per_page: number;
+  total_count: number;
+  total_pages: number;
+}
+
+// ============================================================================
 // Rate Limiter
 // ============================================================================
 
@@ -724,6 +797,116 @@ class ApiClient {
         delete_deployments: deleteDeployments,
       },
     });
+  }
+
+  // ========== Historical Data Endpoints (Phase 3) ==========
+
+  async getHistoricalRounds(options?: {
+    cursor?: string;
+    limit?: number;
+    roundIdGte?: number;
+    roundIdLte?: number;
+    motherlodeHit?: boolean;
+    order?: "asc" | "desc";
+  }): Promise<CursorResponse<HistoricalRound>> {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    if (options?.motherlodeHit !== undefined) params.set("motherlode_hit", options.motherlodeHit.toString());
+    if (options?.order) params.set("order", options.order);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/rounds${query}`);
+  }
+
+  async getHistoricalRound(roundId: number): Promise<HistoricalRound> {
+    return this.request("GET", `/history/rounds/${roundId}`);
+  }
+
+  async getRoundDeployments(roundId: number, options?: {
+    cursor?: string;
+    limit?: number;
+    miner?: string;
+    winnerOnly?: boolean;
+  }): Promise<CursorResponse<HistoricalDeployment>> {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.miner) params.set("miner", options.miner);
+    if (options?.winnerOnly) params.set("winner_only", "true");
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/rounds/${roundId}/deployments${query}`);
+  }
+
+  async getDeployments(options?: {
+    cursor?: string;
+    limit?: number;
+    roundIdGte?: number;
+    roundIdLte?: number;
+    miner?: string;
+    winnerOnly?: boolean;
+  }): Promise<CursorResponse<HistoricalDeployment>> {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    if (options?.miner) params.set("miner", options.miner);
+    if (options?.winnerOnly) params.set("winner_only", "true");
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/deployments${query}`);
+  }
+
+  async getMinerDeployments(pubkey: string, options?: {
+    cursor?: string;
+    limit?: number;
+    roundIdGte?: number;
+    roundIdLte?: number;
+    winnerOnly?: boolean;
+  }): Promise<CursorResponse<HistoricalDeployment>> {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    if (options?.winnerOnly) params.set("winner_only", "true");
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/miner/${pubkey}/deployments${query}`);
+  }
+
+  async getMinerStats(pubkey: string): Promise<MinerStats> {
+    return this.request("GET", `/history/miner/${pubkey}/stats`);
+  }
+
+  async getLeaderboard(options?: {
+    metric?: "net_sol" | "sol_earned" | "ore_earned" | "rounds_won";
+    roundRange?: "all" | "last_60" | "last_100" | "today";
+    page?: number;
+    limit?: number;
+  }): Promise<OffsetResponse<LeaderboardEntry>> {
+    const params = new URLSearchParams();
+    if (options?.metric) params.set("metric", options.metric);
+    if (options?.roundRange) params.set("round_range", options.roundRange);
+    if (options?.page) params.set("page", options.page.toString());
+    if (options?.limit) params.set("limit", options.limit.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/leaderboard${query}`);
+  }
+
+  async getTreasuryHistory(options?: {
+    cursor?: string;
+    limit?: number;
+    roundIdGte?: number;
+    roundIdLte?: number;
+  }): Promise<CursorResponse<TreasurySnapshot>> {
+    const params = new URLSearchParams();
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/treasury/history${query}`);
   }
 }
 

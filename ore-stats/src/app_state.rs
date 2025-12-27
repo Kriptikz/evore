@@ -10,6 +10,7 @@ use tokio::sync::{broadcast, RwLock};
 
 use crate::app_rpc::AppRpc;
 use crate::clickhouse::ClickHouseClient;
+use crate::evore_cache::EvoreCache;
 use crate::helius_api::HeliusApi;
 
 // ============================================================================
@@ -48,6 +49,9 @@ pub struct AppState {
     // ORE token holders cache (updated periodically)
     pub ore_holders_cache: Arc<RwLock<HashMap<Pubkey, u64>>>,
     pub ore_holders_last_slot: Arc<RwLock<u64>>,
+    
+    // EVORE program accounts cache (Managers, Deployers, Auth balances)
+    pub evore_cache: Arc<RwLock<EvoreCache>>,
     
     // SSE broadcast channels
     pub round_broadcast: broadcast::Sender<LiveBroadcastData>,
@@ -115,6 +119,7 @@ impl AppState {
             slot_cache: Arc::new(RwLock::new(0)),
             ore_holders_cache: Arc::new(RwLock::new(HashMap::new())),
             ore_holders_last_slot: Arc::new(RwLock::new(0)),
+            evore_cache: Arc::new(RwLock::new(EvoreCache::new())),
             round_broadcast: round_tx,
             deployment_broadcast: deployment_tx,
             pending_deployments: Arc::new(RwLock::new(HashMap::new())),

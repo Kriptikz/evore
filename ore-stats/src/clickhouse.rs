@@ -189,7 +189,8 @@ impl ClickHouseClient {
                     motherlode_hit,
                     total_deployments,
                     unique_miners,
-                    source
+                    source,
+                    toUnixTimestamp(created_at) as created_at
                 FROM rounds
                 ORDER BY round_id DESC
                 LIMIT ?
@@ -218,7 +219,8 @@ impl ClickHouseClient {
                     motherlode_hit,
                     total_deployments,
                     unique_miners,
-                    source
+                    source,
+                    toUnixTimestamp(created_at) as created_at
                 FROM rounds
                 WHERE round_id = ?
             "#)
@@ -886,6 +888,371 @@ impl ClickHouseClient {
         insert.end().await?;
         Ok(())
     }
+    
+    // ========== Phase 3: Historical Query Methods ==========
+    
+    /// Get rounds with filters and cursor pagination.
+    pub async fn get_rounds_filtered(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        slot_gte: Option<u64>,
+        slot_lte: Option<u64>,
+        motherlode_hit: Option<bool>,
+        cursor: Option<&str>,
+        limit: u32,
+        order_desc: bool,
+    ) -> Result<Vec<RoundRowWithTimestamp>, ClickHouseError> {
+        let mut conditions = vec!["1=1".to_string()];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("round_id <= {}", lte));
+        }
+        if let Some(gte) = slot_gte {
+            conditions.push(format!("start_slot >= {}", gte));
+        }
+        if let Some(lte) = slot_lte {
+            conditions.push(format!("end_slot <= {}", lte));
+        }
+        if let Some(hit) = motherlode_hit {
+            conditions.push(format!("motherlode_hit = {}", if hit { 1 } else { 0 }));
+        }
+        if let Some(c) = cursor {
+            if let Ok(rid) = c.parse::<u64>() {
+                if order_desc {
+                    conditions.push(format!("round_id < {}", rid));
+                } else {
+                    conditions.push(format!("round_id > {}", rid));
+                }
+            }
+        }
+        
+        let order = if order_desc { "DESC" } else { "ASC" };
+        let query = format!(
+            r#"SELECT round_id, start_slot, end_slot, winning_square, top_miner, 
+                      total_deployed, total_winnings, unique_miners, motherlode, 
+                      motherlode_hit, toUnixTimestamp(created_at) as created_at
+               FROM rounds FINAL
+               WHERE {} 
+               ORDER BY round_id {}
+               LIMIT {}"#,
+            conditions.join(" AND "), order, limit
+        );
+        
+        let results = self.client.query(&query).fetch_all().await?;
+        Ok(results)
+    }
+    
+    /// Get deployments for a round with filters.
+    pub async fn get_deployments_for_round_filtered(
+        &self,
+        round_id: u64,
+        miner: Option<&str>,
+        winner_only: Option<bool>,
+        min_sol_earned: Option<u64>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<DeploymentRow>, ClickHouseError> {
+        let mut conditions = vec![format!("round_id = {}", round_id)];
+        
+        if let Some(m) = miner {
+            conditions.push(format!("miner_pubkey = '{}'", m));
+        }
+        if winner_only == Some(true) {
+            conditions.push("is_winner = 1".to_string());
+        }
+        if let Some(min) = min_sol_earned {
+            conditions.push(format!("sol_earned >= {}", min));
+        }
+        if let Some(c) = cursor {
+            // Cursor format: "miner:square"
+            let parts: Vec<&str> = c.split(':').collect();
+            if parts.len() >= 2 {
+                conditions.push(format!("(miner_pubkey, square_id) > ('{}', {})", parts[0], parts[1].parse::<u8>().unwrap_or(0)));
+            }
+        }
+        
+        let query = format!(
+            r#"SELECT round_id, miner_pubkey, square_id, amount, deployed_slot,
+                      sol_earned, ore_earned, is_winner, is_top_miner
+               FROM deployments
+               WHERE {}
+               ORDER BY miner_pubkey, square_id
+               LIMIT {}"#,
+            conditions.join(" AND "), limit
+        );
+        
+        let results = self.client.query(&query).fetch_all().await?;
+        Ok(results)
+    }
+    
+    /// Get deployments across rounds with filters.
+    pub async fn get_deployments_filtered(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        miner: Option<&str>,
+        winner_only: Option<bool>,
+        min_sol_earned: Option<u64>,
+        max_sol_earned: Option<u64>,
+        min_ore_earned: Option<u64>,
+        max_ore_earned: Option<u64>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<DeploymentRow>, ClickHouseError> {
+        let mut conditions = vec!["1=1".to_string()];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("round_id <= {}", lte));
+        }
+        if let Some(m) = miner {
+            conditions.push(format!("miner_pubkey = '{}'", m));
+        }
+        if winner_only == Some(true) {
+            conditions.push("is_winner = 1".to_string());
+        }
+        if let Some(min) = min_sol_earned {
+            conditions.push(format!("sol_earned >= {}", min));
+        }
+        if let Some(max) = max_sol_earned {
+            conditions.push(format!("sol_earned <= {}", max));
+        }
+        if let Some(min) = min_ore_earned {
+            conditions.push(format!("ore_earned >= {}", min));
+        }
+        if let Some(max) = max_ore_earned {
+            conditions.push(format!("ore_earned <= {}", max));
+        }
+        if let Some(c) = cursor {
+            // Cursor format: "round:miner:square"
+            let parts: Vec<&str> = c.split(':').collect();
+            if parts.len() >= 3 {
+                let rid = parts[0].parse::<u64>().unwrap_or(0);
+                let sq = parts[2].parse::<u8>().unwrap_or(0);
+                conditions.push(format!("(round_id, miner_pubkey, square_id) > ({}, '{}', {})", rid, parts[1], sq));
+            }
+        }
+        
+        let query = format!(
+            r#"SELECT round_id, miner_pubkey, square_id, amount, deployed_slot,
+                      sol_earned, ore_earned, is_winner, is_top_miner
+               FROM deployments
+               WHERE {}
+               ORDER BY round_id DESC, miner_pubkey, square_id
+               LIMIT {}"#,
+            conditions.join(" AND "), limit
+        );
+        
+        let results = self.client.query(&query).fetch_all().await?;
+        Ok(results)
+    }
+    
+    /// Get miner's deployment history.
+    pub async fn get_miner_deployments(
+        &self,
+        miner: &str,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        winner_only: Option<bool>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<DeploymentRow>, ClickHouseError> {
+        let mut conditions = vec![format!("miner_pubkey = '{}'", miner)];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("round_id <= {}", lte));
+        }
+        if winner_only == Some(true) {
+            conditions.push("is_winner = 1".to_string());
+        }
+        if let Some(c) = cursor {
+            // Cursor format: "round:square"
+            let parts: Vec<&str> = c.split(':').collect();
+            if parts.len() >= 2 {
+                let rid = parts[0].parse::<u64>().unwrap_or(0);
+                let sq = parts[1].parse::<u8>().unwrap_or(0);
+                conditions.push(format!("(round_id, square_id) < ({}, {})", rid, sq));
+            }
+        }
+        
+        let query = format!(
+            r#"SELECT round_id, miner_pubkey, square_id, amount, deployed_slot,
+                      sol_earned, ore_earned, is_winner, is_top_miner
+               FROM deployments
+               WHERE {}
+               ORDER BY round_id DESC, square_id DESC
+               LIMIT {}"#,
+            conditions.join(" AND "), limit
+        );
+        
+        let results = self.client.query(&query).fetch_all().await?;
+        Ok(results)
+    }
+    
+    /// Get aggregated miner stats.
+    pub async fn get_miner_stats(&self, miner: &str) -> Result<Option<crate::historical_routes::MinerStats>, ClickHouseError> {
+        let query = r#"
+            SELECT 
+                miner_pubkey,
+                sum(amount) as total_deployed,
+                sum(sol_earned) as total_sol_earned,
+                sum(ore_earned) as total_ore_earned,
+                toInt64(sum(sol_earned)) - toInt64(sum(amount)) as net_sol_change,
+                count(DISTINCT round_id) as rounds_played,
+                countIf(is_winner = 1) as rounds_won
+            FROM deployments
+            WHERE miner_pubkey = ?
+            GROUP BY miner_pubkey
+        "#;
+        
+        let row: Option<MinerStatsRow> = self.client.query(query)
+            .bind(miner)
+            .fetch_optional()
+            .await?;
+        
+        Ok(row.map(|r| {
+            let win_rate = if r.rounds_played > 0 {
+                (r.rounds_won as f64 / r.rounds_played as f64) * 100.0
+            } else {
+                0.0
+            };
+            let avg_deployment = if r.rounds_played > 0 {
+                r.total_deployed / r.rounds_played
+            } else {
+                0
+            };
+            
+            crate::historical_routes::MinerStats {
+                miner_pubkey: r.miner_pubkey,
+                total_deployed: r.total_deployed,
+                total_sol_earned: r.total_sol_earned,
+                total_ore_earned: r.total_ore_earned,
+                net_sol_change: r.net_sol_change,
+                rounds_played: r.rounds_played,
+                rounds_won: r.rounds_won,
+                win_rate,
+                avg_deployment,
+            }
+        }))
+    }
+    
+    /// Get leaderboard with pagination.
+    pub async fn get_leaderboard(
+        &self,
+        metric: &str,
+        round_range: &str,
+        offset: u32,
+        limit: u32,
+    ) -> Result<(Vec<crate::historical_routes::LeaderboardEntry>, u64), ClickHouseError> {
+        // Build round filter
+        let round_filter = match round_range {
+            "last_60" => "round_id >= (SELECT max(round_id) - 60 FROM rounds)".to_string(),
+            "last_100" => "round_id >= (SELECT max(round_id) - 100 FROM rounds)".to_string(),
+            "today" => "deployed_at >= today()".to_string(),
+            _ => "1=1".to_string(), // "all"
+        };
+        
+        // Build ordering based on metric
+        let (value_expr, order) = match metric {
+            "sol_earned" => ("sum(sol_earned)", "DESC"),
+            "ore_earned" => ("sum(ore_earned)", "DESC"),
+            "rounds_won" => ("countIf(is_winner = 1)", "DESC"),
+            _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
+        };
+        
+        // Get total count
+        let count_query = format!(
+            "SELECT count(DISTINCT miner_pubkey) FROM deployments WHERE {}",
+            round_filter
+        );
+        let total_count: u64 = self.client.query(&count_query).fetch_one().await?;
+        
+        // Get leaderboard page
+        let query = format!(
+            r#"SELECT 
+                   miner_pubkey,
+                   {} as value,
+                   count(DISTINCT round_id) as rounds_played
+               FROM deployments
+               WHERE {}
+               GROUP BY miner_pubkey
+               ORDER BY value {}
+               LIMIT {} OFFSET {}"#,
+            value_expr, round_filter, order, limit, offset
+        );
+        
+        let rows: Vec<LeaderboardRow> = self.client.query(&query).fetch_all().await?;
+        
+        let entries: Vec<crate::historical_routes::LeaderboardEntry> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| crate::historical_routes::LeaderboardEntry {
+                rank: (offset + i as u32 + 1),
+                miner_pubkey: r.miner_pubkey,
+                value: r.value,
+                rounds_played: r.rounds_played,
+            })
+            .collect();
+        
+        Ok((entries, total_count))
+    }
+    
+    /// Get treasury history snapshots.
+    pub async fn get_treasury_history(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<crate::historical_routes::TreasurySnapshot>, ClickHouseError> {
+        let mut conditions = vec!["1=1".to_string()];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("round_id <= {}", lte));
+        }
+        if let Some(c) = cursor {
+            if let Ok(rid) = c.parse::<u64>() {
+                conditions.push(format!("round_id < {}", rid));
+            }
+        }
+        
+        let query = format!(
+            r#"SELECT round_id, balance, motherlode, total_staked, 
+                      total_unclaimed, total_refined, 
+                      toUnixTimestamp(created_at) as created_at
+               FROM treasury_snapshots
+               WHERE {}
+               ORDER BY round_id DESC
+               LIMIT {}"#,
+            conditions.join(" AND "), limit
+        );
+        
+        let rows: Vec<TreasurySnapshotRow> = self.client.query(&query).fetch_all().await?;
+        
+        Ok(rows.into_iter().map(|r| crate::historical_routes::TreasurySnapshot {
+            round_id: r.round_id,
+            balance: r.balance,
+            motherlode: r.motherlode,
+            total_staked: r.total_staked,
+            total_unclaimed: r.total_unclaimed,
+            total_refined: r.total_refined,
+            created_at: chrono::DateTime::from_timestamp(r.created_at, 0)
+                .map(|dt| dt.to_rfc3339())
+                .unwrap_or_else(|| r.created_at.to_string()),
+        }).collect())
+    }
 }
 
 // ========== Row Types ==========
@@ -1038,6 +1405,8 @@ pub struct RoundRow {
     pub total_deployments: u32,
     pub unique_miners: u32,
     pub source: String,
+    #[serde(default)]
+    pub created_at: i64,  // DateTime64(3) as unix timestamp
 }
 
 /// Deployment row for queries.
@@ -1571,6 +1940,58 @@ pub struct RecentRequestStats {
     pub p50: f32,
     pub p95: f32,
     pub p99: f32,
+}
+
+// ============================================================================
+// Phase 3: Historical Query Row Types
+// ============================================================================
+
+/// Round row with timestamp for historical queries.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RoundRowWithTimestamp {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub winning_square: u8,
+    pub top_miner: String,
+    pub total_deployed: u64,
+    pub total_winnings: u64,
+    pub unique_miners: u32,
+    pub motherlode: u64,
+    pub motherlode_hit: u8,
+    pub created_at: i64,
+}
+
+/// Miner stats aggregation row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct MinerStatsRow {
+    pub miner_pubkey: String,
+    pub total_deployed: u64,
+    pub total_sol_earned: u64,
+    pub total_ore_earned: u64,
+    pub net_sol_change: i64,
+    pub rounds_played: u64,
+    pub rounds_won: u64,
+}
+
+/// Leaderboard row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct LeaderboardRow {
+    pub miner_pubkey: String,
+    pub value: i64,
+    pub rounds_played: u64,
+}
+
+/// Treasury snapshot row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct TreasurySnapshotRow {
+    pub round_id: u64,
+    pub balance: u64,
+    pub motherlode: u64,
+    pub total_staked: u64,
+    pub total_unclaimed: u64,
+    pub total_refined: u64,
+    pub created_at: i64,
 }
 
 #[cfg(test)]

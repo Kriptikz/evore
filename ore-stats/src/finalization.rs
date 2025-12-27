@@ -98,7 +98,7 @@ pub async fn finalize_round(
     tracing::info!("Finalizing round {}...", round_id);
     
     // Poll until round has both slot_hash AND top_miner populated
-    let finalized_round = wait_for_round_finalization(state, round_id).await?;
+    let finalized_round = wait_for_round_finalization(state, round_id, &snapshot).await?;
     
     // Verify we have the slot_hash
     let rng = finalized_round.rng().ok_or_else(|| {
@@ -264,12 +264,15 @@ fn calculate_rewards(
 
 /// Wait for round to have both slot_hash and top_miner populated
 /// Polls every 2 seconds, times out after 60 seconds
+/// Also logs optimistic top_miner calculation for verification
 async fn wait_for_round_finalization(
     state: &AppState,
     round_id: u64,
+    snapshot: &RoundSnapshot,
 ) -> anyhow::Result<Round> {
     let max_attempts = 30; // 60 seconds total
     let poll_interval = Duration::from_secs(2);
+    let mut logged_optimistic = false;
     
     for attempt in 1..=max_attempts {
         match state.rpc.get_round(round_id).await {
@@ -279,6 +282,12 @@ async fn wait_for_round_finalization(
                 
                 // Check if top_miner is populated (not default pubkey)
                 let has_top_miner = round.top_miner != Pubkey::default();
+                
+                // Log optimistic calculation as soon as slot_hash is available
+                if has_slot_hash && !logged_optimistic {
+                    logged_optimistic = true;
+                    log_optimistic_calculation(&round, snapshot);
+                }
                 
                 if has_slot_hash && has_top_miner {
                     tracing::info!(
@@ -308,6 +317,88 @@ async fn wait_for_round_finalization(
         "Timeout waiting for round {} to have slot_hash and top_miner after {} seconds",
         round_id, max_attempts * 2
     ))
+}
+
+/// Log the optimistic winning square and top miner calculation
+/// This runs as soon as slot_hash is available (before on-chain top_miner is set)
+/// Used to verify our calculation matches the on-chain result
+fn log_optimistic_calculation(round: &Round, snapshot: &RoundSnapshot) {
+    // Calculate winning square from slot_hash
+    let rng = match round.rng() {
+        Some(r) => r,
+        None => {
+            tracing::warn!("OPTIMISTIC: Cannot calculate - no rng available");
+            return;
+        }
+    };
+    
+    let winning_square = round.winning_square(rng) as u8;
+    
+    // Find the miner with the highest deployment on the winning square
+    // from our snapshot data
+    let mut top_miner_on_winning: Option<(String, u64)> = None;
+    
+    for (miner_pubkey, squares) in &snapshot.deployments {
+        if let Some(&(amount, _slot)) = squares.get(&winning_square) {
+            if amount > 0 {
+                match &top_miner_on_winning {
+                    Some((_, current_best)) if amount <= *current_best => {
+                        // This miner has less or equal, keep current
+                    }
+                    _ => {
+                        top_miner_on_winning = Some((miner_pubkey.clone(), amount));
+                    }
+                }
+            }
+        }
+    }
+    
+    // Calculate total on winning square from snapshot
+    let total_on_winning: u64 = snapshot.deployments
+        .values()
+        .filter_map(|squares| squares.get(&winning_square).map(|(amt, _)| *amt))
+        .sum();
+    
+    // Compare with on-chain deployed array
+    let onchain_total_on_winning = round.deployed[winning_square as usize];
+    
+    tracing::info!(
+        "OPTIMISTIC CALC - Round {}: winning_square={}, total_on_winning={} (on-chain={})",
+        round.id, winning_square, total_on_winning, onchain_total_on_winning
+    );
+    
+    if let Some((miner, amount)) = &top_miner_on_winning {
+        tracing::info!(
+            "OPTIMISTIC CALC - Round {}: predicted_top_miner={} (deployed {} on square {})",
+            round.id, miner, amount, winning_square
+        );
+    } else {
+        tracing::info!(
+            "OPTIMISTIC CALC - Round {}: no miners found on winning square {} in snapshot",
+            round.id, winning_square
+        );
+    }
+    
+    // Also log all miners on the winning square for debugging
+    let mut winners_on_square: Vec<(&String, u64)> = snapshot.deployments
+        .iter()
+        .filter_map(|(miner, squares)| {
+            squares.get(&winning_square).map(|(amt, _)| (miner, *amt))
+        })
+        .filter(|(_, amt)| *amt > 0)
+        .collect();
+    
+    winners_on_square.sort_by(|a, b| b.1.cmp(&a.1));
+    
+    if !winners_on_square.is_empty() {
+        tracing::info!(
+            "OPTIMISTIC CALC - Round {}: {} miners on winning square (top 5):",
+            round.id, winners_on_square.len()
+        );
+        for (miner, amount) in winners_on_square.iter().take(5) {
+            tracing::info!("  {} - {} lamports", miner, amount);
+        }
+    }
 }
 
 #[cfg(test)]

@@ -40,6 +40,9 @@ mod middleware;
 mod websocket;
 mod finalization;
 mod backfill;
+mod evore_cache;
+mod evore_routes;
+mod historical_routes;
 
 // Keep these for reference but don't compile:
 // - main_old.rs
@@ -176,6 +179,10 @@ async fn main() -> anyhow::Result<()> {
     let metrics_handle = tasks::spawn_metrics_snapshot(state.clone());
     tracing::info!("Metrics snapshot task started");
     
+    // EVORE accounts polling task
+    let evore_handle = tasks::spawn_evore_polling(state.clone());
+    tracing::info!("EVORE polling started");
+    
     // ========== Axum Router ==========
     
     let app = Router::new()
@@ -199,6 +206,12 @@ async fn main() -> anyhow::Result<()> {
         // ORE token balances
         .route("/ore-balance/{owner}", get(routes::get_ore_balance))
         .route("/ore-holders", get(routes::get_ore_holders))
+        
+        // EVORE accounts (Phase 1b)
+        .nest("/evore", evore_routes::evore_router(state.clone()))
+        
+        // Historical data endpoints (Phase 3)
+        .nest("/history", historical_routes::historical_router(state.clone()))
         
         // Metrics
         .route("/metrics", get(routes::get_metrics))
@@ -245,6 +258,7 @@ async fn main() -> anyhow::Result<()> {
     polling_handle.abort();
     miners_handle.abort();
     metrics_handle.abort();
+    evore_handle.abort();
     
     Ok(())
 }

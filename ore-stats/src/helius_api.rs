@@ -1627,6 +1627,201 @@ impl HeliusApi {
             amount,
         })
     }
+    
+    // ========================================================================
+    // EVORE Account Fetching (Phase 1b)
+    // ========================================================================
+    
+    /// Fetch all EVORE Manager accounts using getProgramAccountsV2.
+    pub async fn get_all_evore_managers(
+        &mut self,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        let mut all_accounts = Vec::new();
+        let mut cursor: Option<String> = None;
+        
+        // Manager account size: discriminator (8) + Manager struct size
+        let manager_size = std::mem::size_of::<evore::state::Manager>() as u64 + 8;
+        
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &evore::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(1000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: None,
+                        filters: vec![
+                            ProgramAccountFilter::DataSize(manager_size),
+                        ],
+                        data_slice: None,
+                    },
+                )
+                .await?;
+            
+            all_accounts.extend(page.accounts);
+            
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+        
+        tracing::info!("Fetched {} EVORE manager accounts", all_accounts.len());
+        Ok(all_accounts)
+    }
+    
+    /// Fetch all EVORE Deployer accounts using getProgramAccountsV2.
+    pub async fn get_all_evore_deployers(
+        &mut self,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        let mut all_accounts = Vec::new();
+        let mut cursor: Option<String> = None;
+        
+        // Deployer account size: discriminator (8) + Deployer struct size
+        let deployer_size = std::mem::size_of::<evore::state::Deployer>() as u64 + 8;
+        
+        loop {
+            let page = self
+                .get_program_accounts_v2(
+                    &evore::ID,
+                    GetProgramAccountsV2Options {
+                        encoding: Some("base64".to_string()),
+                        limit: Some(limit_per_page.unwrap_or(1000)),
+                        cursor: cursor.clone(),
+                        changed_since_slot: None,
+                        filters: vec![
+                            ProgramAccountFilter::DataSize(deployer_size),
+                        ],
+                        data_slice: None,
+                    },
+                )
+                .await?;
+            
+            all_accounts.extend(page.accounts);
+            
+            if page.cursor.is_none() {
+                break;
+            }
+            cursor = page.cursor;
+        }
+        
+        tracing::info!("Fetched {} EVORE deployer accounts", all_accounts.len());
+        Ok(all_accounts)
+    }
+    
+    /// Fetch a single account's lamport balance (for ManagedMinerAuth PDAs)
+    pub async fn get_account_balance(&mut self, address: &Pubkey) -> Result<Option<u64>, HeliusError> {
+        // Use getAccountInfo to get just the lamports
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getAccountInfo",
+            "params": [
+                address.to_string(),
+                { "encoding": "base64" }
+            ]
+        });
+        
+        let start = Instant::now();
+        
+        let response = self.client
+            .post(&self.rpc_url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        
+        let response_bytes = response.bytes().await?;
+        let duration_ms = start.elapsed().as_millis() as u32;
+        
+        let resp: serde_json::Value = serde_json::from_slice(&response_bytes)
+            .map_err(|e| HeliusError::InvalidResponse(format!("JSON parse error: {}", e)))?;
+        
+        if let Some(err) = resp.get("error") {
+            self.log_error("getAccountInfo", "balance", &address.to_string(), duration_ms, &err.to_string());
+            return Err(HeliusError::Rpc(err.to_string()));
+        }
+        
+        let result = resp.get("result").and_then(|r| r.get("value"));
+        
+        if result.is_none() || result == Some(&serde_json::Value::Null) {
+            // Account doesn't exist
+            self.log_success("getAccountInfo", "balance", &address.to_string(), duration_ms, 0, response_bytes.len() as u32);
+            return Ok(None);
+        }
+        
+        let lamports = result
+            .and_then(|v| v.get("lamports"))
+            .and_then(|l| l.as_u64());
+        
+        self.log_success("getAccountInfo", "balance", &address.to_string(), duration_ms, 1, response_bytes.len() as u32);
+        
+        Ok(lamports)
+    }
+    
+    /// Fetch multiple account balances in a batch
+    pub async fn get_multiple_account_balances(&mut self, addresses: &[Pubkey]) -> Result<Vec<(Pubkey, Option<u64>)>, HeliusError> {
+        if addresses.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        // Use getMultipleAccounts for efficiency
+        let address_strings: Vec<String> = addresses.iter().map(|a| a.to_string()).collect();
+        
+        let body = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getMultipleAccounts",
+            "params": [
+                address_strings,
+                { "encoding": "base64" }
+            ]
+        });
+        
+        let start = Instant::now();
+        
+        let response = self.client
+            .post(&self.rpc_url)
+            .json(&body)
+            .send()
+            .await?
+            .error_for_status()?;
+        
+        let response_bytes = response.bytes().await?;
+        let duration_ms = start.elapsed().as_millis() as u32;
+        
+        let resp: serde_json::Value = serde_json::from_slice(&response_bytes)
+            .map_err(|e| HeliusError::InvalidResponse(format!("JSON parse error: {}", e)))?;
+        
+        if let Some(err) = resp.get("error") {
+            self.log_error("getMultipleAccounts", "balance", "", duration_ms, &err.to_string());
+            return Err(HeliusError::Rpc(err.to_string()));
+        }
+        
+        let values = resp
+            .get("result")
+            .and_then(|r| r.get("value"))
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| HeliusError::InvalidResponse("Missing result.value array".to_string()))?;
+        
+        let mut results = Vec::with_capacity(addresses.len());
+        
+        for (i, value) in values.iter().enumerate() {
+            let lamports = if value.is_null() {
+                None
+            } else {
+                value.get("lamports").and_then(|l| l.as_u64())
+            };
+            results.push((addresses[i], lamports));
+        }
+        
+        self.log_success("getMultipleAccounts", "balance", "", duration_ms, results.len() as u32, response_bytes.len() as u32);
+        
+        Ok(results)
+    }
 }
 
 /// Parsed token balance from sliced account data

@@ -28,6 +28,12 @@ export function Header() {
               Rounds
             </Link>
             <Link 
+              href="/miners" 
+              className={`text-sm ${pathname?.startsWith('/miners') ? 'text-white' : 'text-zinc-400 hover:text-zinc-300'}`}
+            >
+              Leaderboard
+            </Link>
+            <Link 
               href="/manage" 
               className={`text-sm ${pathname === '/manage' ? 'text-white' : 'text-zinc-400 hover:text-zinc-300'}`}
             >
