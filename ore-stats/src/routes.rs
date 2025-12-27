@@ -77,6 +77,15 @@ pub struct OreBalanceResponse {
 }
 
 #[derive(Serialize)]
+pub struct SignatureStatusResponse {
+    pub signature: String,
+    pub slot: Option<u64>,
+    pub confirmations: Option<usize>,
+    pub status: Option<String>, // "confirmed", "finalized", "processed", or null
+    pub err: Option<String>,
+}
+
+#[derive(Serialize)]
 pub struct OreHoldersResponse {
     pub holders: Vec<OreHolderEntry>,
     pub total: usize,
@@ -289,6 +298,53 @@ pub async fn get_balance(
             pubkey,
             lamports,
         })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("RPC error: {}", e) }),
+        )),
+    }
+}
+
+/// GET /signature/{signature} - Transaction signature status (RPC proxy)
+pub async fn get_signature_status(
+    State(state): State<Arc<AppState>>,
+    Path(signature): Path<String>,
+) -> Result<Json<SignatureStatusResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Basic validation - signature should be base58 encoded, typically 87-88 chars
+    if signature.len() < 80 || signature.len() > 100 {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { error: "Invalid signature format".to_string() })));
+    }
+    
+    match state.rpc.get_signature_statuses(&[signature.clone()]).await {
+        Ok(statuses) => {
+            let status = statuses.into_iter().next().flatten();
+            
+            let (slot, confirmations, status_str, err) = match status {
+                Some(s) => {
+                    // Use confirmation_status from RPC if available, otherwise infer
+                    let commitment = s.confirmation_status.or_else(|| {
+                        if s.confirmations.is_none() {
+                            Some("finalized".to_string())
+                        } else if s.confirmations.unwrap_or(0) > 0 {
+                            Some("confirmed".to_string())
+                        } else {
+                            Some("processed".to_string())
+                        }
+                    });
+                    
+                    (s.slot, s.confirmations, commitment, s.err)
+                }
+                None => (None, None, None, None),
+            };
+            
+            Ok(Json(SignatureStatusResponse {
+                signature,
+                slot,
+                confirmations,
+                status: status_str,
+                err,
+            }))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: format!("RPC error: {}", e) }),

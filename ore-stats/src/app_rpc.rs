@@ -38,6 +38,15 @@ pub struct RpcContext {
     pub batch_size: u16,
 }
 
+/// Signature status from getSignatureStatuses RPC
+#[derive(Debug, Clone)]
+pub struct SignatureStatus {
+    pub slot: Option<u64>,
+    pub confirmations: Option<usize>,
+    pub err: Option<String>,
+    pub confirmation_status: Option<String>, // "processed", "confirmed", "finalized"
+}
+
 /// Central RPC gateway with metrics tracking
 pub struct AppRpc {
     client: RpcClient,
@@ -377,6 +386,86 @@ impl AppRpc {
                 self.log_success(&ctx, duration_ms, found_count, response_size).await;
                 
                 Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect())
+            }
+            Err(e) => {
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                Err(e.into())
+            }
+        }
+    }
+    
+    /// Get signature statuses for transaction confirmations
+    /// Returns Vec<Option<SignatureStatus>> where:
+    /// - None = not found yet
+    /// - Some(status) = found with confirmation details
+    pub async fn get_signature_statuses(&self, signatures: &[String]) -> Result<Vec<Option<SignatureStatus>>> {
+        self.rate_limit().await;
+        let start = Instant::now();
+        
+        let ctx = RpcContext {
+            method: "getSignatureStatuses".to_string(),
+            target_type: "signature".to_string(),
+            target_address: if signatures.len() == 1 { 
+                signatures[0].clone()
+            } else { 
+                String::new() 
+            },
+            is_batch: signatures.len() > 1,
+            batch_size: signatures.len() as u16,
+        };
+        
+        // Use direct JSON-RPC call like the crank does
+        let body = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "getSignatureStatuses",
+            "params": [
+                signatures,
+                { "searchTransactionHistory": false }
+            ]
+        });
+        
+        let client = reqwest::Client::new();
+        let response = client
+            .post(&self.rpc_url)
+            .json(&body)
+            .send()
+            .await;
+        
+        let duration_ms = start.elapsed().as_millis() as u32;
+        
+        match response {
+            Ok(res) => {
+                let json: serde_json::Value = res.json().await
+                    .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
+                
+                if let Some(error) = json.get("error") {
+                    let error_msg = error.to_string();
+                    self.log_error(&ctx, duration_ms, &error_msg).await;
+                    return Err(anyhow::anyhow!("RPC error: {}", error_msg));
+                }
+                
+                let statuses: Vec<Option<SignatureStatus>> = json["result"]["value"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter().map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                Some(SignatureStatus {
+                                    slot: v["slot"].as_u64(),
+                                    confirmations: v["confirmations"].as_u64().map(|c| c as usize),
+                                    err: v["err"].as_str().map(|s| s.to_string()),
+                                    confirmation_status: v["confirmationStatus"].as_str().map(|s| s.to_string()),
+                                })
+                            }
+                        }).collect()
+                    })
+                    .unwrap_or_default();
+                
+                let confirmed_count = statuses.iter().filter(|s| s.is_some()).count() as u32;
+                self.log_success(&ctx, duration_ms, confirmed_count, 0).await;
+                Ok(statuses)
             }
             Err(e) => {
                 self.log_error(&ctx, duration_ms, &e.to_string()).await;

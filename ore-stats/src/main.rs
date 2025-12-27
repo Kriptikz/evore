@@ -202,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
         
         // RPC proxy
         .route("/balance/{pubkey}", get(routes::get_balance))
+        .route("/signature/{signature}", get(routes::get_signature_status))
         
         // ORE token balances
         .route("/ore-balance/{owner}", get(routes::get_ore_balance))
