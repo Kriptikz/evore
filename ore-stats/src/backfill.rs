@@ -172,6 +172,10 @@ pub struct RoundsWithDataQuery {
     pub page: Option<u32>,
     /// Cursor: get rounds before this round_id (for cursor-based pagination)
     pub before: Option<u64>,
+    /// Filter: minimum round_id (inclusive)
+    pub round_id_gte: Option<u64>,
+    /// Filter: maximum round_id (inclusive)
+    pub round_id_lte: Option<u64>,
     /// Only show rounds with no deployments
     pub missing_deployments_only: Option<bool>,
     /// Only show rounds where deployments_sum != total_deployed (data integrity issue)
@@ -597,6 +601,10 @@ pub async fn get_rounds_with_data(
     let missing_only = params.missing_deployments_only.unwrap_or(false);
     let invalid_only = params.invalid_only.unwrap_or(false);
     
+    // Round ID filters
+    let round_id_gte = params.round_id_gte;
+    let round_id_lte = params.round_id_lte;
+    
     // Determine pagination mode
     let (before_round_id, offset) = if let Some(before) = params.before {
         // Cursor-based pagination
@@ -610,9 +618,9 @@ pub async fn get_rounds_with_data(
         (None, None)
     };
     
-    // Get rounds from ClickHouse with pagination
+    // Get rounds from ClickHouse with filters and pagination
     let (rounds, has_more) = state.clickhouse
-        .get_rounds_paginated(before_round_id, offset, limit)
+        .get_rounds_filtered_for_admin(round_id_gte, round_id_lte, before_round_id, offset, limit)
         .await
         .map_err(|e| {
             (

@@ -450,16 +450,13 @@ function RoundsList({
             <span className="bg-slate-700/80 px-1.5 py-0.5 rounded">
               ◼ {round.winning_square + 1}
             </span>
-            <span className="text-emerald-400">{formatSol(round.total_winnings)} won</span>
-            <span className="text-purple-400">{formatSol(round.total_vaulted)} vaulted</span>
+            <span className="text-white/70">{formatSol(round.total_deployed)} deployed</span>
+            <span className="text-purple-400">{formatSol(round.total_vaulted || 0)} vaulted</span>
           </div>
           <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
-            <span className="text-white/70">{formatSol(round.total_deployed)} deployed</span>
-            <span>•</span>
             <span>{round.unique_miners} miners</span>
-          </div>
-          <div className="text-slate-600 font-mono text-[10px] mt-0.5">
-            👑 {truncateAddress(round.top_miner)}
+            <span>•</span>
+            <span className="font-mono">👑 {truncateAddress(round.top_miner)}</span>
           </div>
         </button>
       ))}
@@ -553,7 +550,7 @@ function DeploymentsGroupedBySlot({
   }, [deployments]);
 
   if (deployments.length === 0) {
-    return (
+  return (
       <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6 text-center text-slate-400">
         No deployments in this time range
       </div>
@@ -569,7 +566,7 @@ function DeploymentsGroupedBySlot({
         <span className="text-sm text-slate-400">
           {groupedBySlotAndMiner.length} slot{groupedBySlotAndMiner.length !== 1 ? 's' : ''}
         </span>
-      </div>
+            </div>
       <div className="max-h-[400px] overflow-y-auto">
         {groupedBySlotAndMiner.slice(0, 50).map(({ slot, miners }) => (
           <div key={slot} className="border-b border-slate-700/30 last:border-0">
@@ -580,7 +577,7 @@ function DeploymentsGroupedBySlot({
               <span className="text-xs text-slate-500">
                 {miners.length} miner{miners.length !== 1 ? 's' : ''}
               </span>
-            </div>
+          </div>
             <div className="divide-y divide-slate-700/20">
               {miners.map((group) => {
                 const isTopMiner = group.miner_pubkey === topMiner;
@@ -617,8 +614,8 @@ function DeploymentsGroupedBySlot({
                         ) : (
                           <span className="text-slate-600 text-sm w-24 text-right">—</span>
                         )}
-                      </div>
-                    </div>
+              </div>
+              </div>
                     {/* Square breakdown */}
                     <div className="flex flex-wrap gap-1.5 mt-2">
                       {deployedSquares.map((squareId) => {
@@ -637,12 +634,12 @@ function DeploymentsGroupedBySlot({
                           </span>
                         );
                       })}
-                    </div>
-                  </div>
+              </div>
+              </div>
                 );
               })}
+              </div>
             </div>
-          </div>
         ))}
       </div>
     </div>
@@ -705,7 +702,7 @@ function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisp
         <span className="text-sm text-slate-400">
           {groupedBySlotAndMiner.length} slot{groupedBySlotAndMiner.length !== 1 ? 's' : ''}
         </span>
-      </div>
+              </div>
       <div className="max-h-[400px] overflow-y-auto">
         {groupedBySlotAndMiner.slice(0, 50).map(({ slot, miners }) => (
           <div key={slot} className="border-b border-slate-700/30 last:border-0">
@@ -728,17 +725,17 @@ function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisp
                     key={`${group.miner_pubkey}-${slot}`}
                     className="px-4 py-3 hover:bg-slate-700/20"
                   >
-                    <div className="flex items-center justify-between">
-                      <Link 
+              <div className="flex items-center justify-between">
+                <Link 
                         href={`/miners/${group.miner_pubkey}`}
                         className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
-                      >
+                >
                         {truncate(group.miner_pubkey)}
-                      </Link>
+                </Link>
                       <span className="font-mono text-sm text-white">
                         {formatSol(group.total_amount)} SOL
                       </span>
-                    </div>
+              </div>
                     {/* Square breakdown */}
                     <div className="flex flex-wrap gap-1.5 mt-2">
                       {deployedSquares.map((squareId) => (
@@ -898,7 +895,7 @@ function RoundDetailView({
   }, [selectedMiner, winners, losers]);
 
   if (!displayRound) {
-    return (
+                  return (
       <div className="flex items-center justify-center h-full text-slate-400">
         Select a round to view details
               </div>
@@ -954,8 +951,8 @@ function RoundDetailView({
           {!isLive && round && (
             <p className="text-sm text-slate-400 mt-1">
               Slots: {round.start_slot.toLocaleString()} → {round.end_slot.toLocaleString()}
-            </p>
-          )}
+                    </p>
+                  )}
               </div>
         {!isLive && round?.motherlode_hit && (
           <div className="bg-amber-500/20 text-amber-400 px-4 py-2 rounded-xl text-sm font-medium border border-amber-500/30">
@@ -973,7 +970,7 @@ function RoundDetailView({
               Slot {highlightSlot?.toLocaleString()}
             </span>
           </div>
-          <input
+                    <input
             type="range"
             min="0"
             max="100"
@@ -984,7 +981,7 @@ function RoundDetailView({
           <div className="flex justify-between text-xs text-slate-500 mt-1">
             <span>Start</span>
             <span>End</span>
-          </div>
+                  </div>
               </div>
             )}
 
@@ -995,12 +992,12 @@ function RoundDetailView({
           <div className="flex items-center justify-between mb-4">
             <h3 className="text-lg font-semibold text-white">Deployment Grid</h3>
             {selectedMiner && (
-              <button
+                  <button
                 onClick={() => setSelectedMiner(null)}
                 className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
               >
                 Clear selection
-              </button>
+                  </button>
             )}
           </div>
           <SquareGrid
@@ -1100,13 +1097,13 @@ function RoundDetailView({
                           </p>
                           <p className="text-xs text-slate-500">For First Deploy</p>
                         </>
-                      )}
-                    </div>
+                  )}
+                </div>
                   );
                 })()
               )}
+              </div>
             </div>
-          </div>
 
           {/* Top Miner (historical only) */}
           {!isLive && round && round.top_miner && (
@@ -1127,9 +1124,9 @@ function RoundDetailView({
                     Reward: <span className="text-emerald-400">{formatOre(round.top_miner_reward)} ORE</span>
                   </p>
                 </div>
-              </div>
             </div>
-          )}
+          </div>
+        )}
         </div>
       </div>
 

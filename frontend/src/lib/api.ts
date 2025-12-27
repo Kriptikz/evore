@@ -792,6 +792,8 @@ class ApiClient {
     limit?: number;
     page?: number;
     before?: number;
+    roundIdGte?: number;
+    roundIdLte?: number;
     missingDeploymentsOnly?: boolean;
     invalidOnly?: boolean;
   }): Promise<RoundsWithDataResponse> {
@@ -799,6 +801,8 @@ class ApiClient {
     if (options?.limit) params.set("limit", options.limit.toString());
     if (options?.page) params.set("page", options.page.toString());
     if (options?.before) params.set("before", options.before.toString());
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
     if (options?.missingDeploymentsOnly) params.set("missing_deployments_only", "true");
     if (options?.invalidOnly) params.set("invalid_only", "true");
     const query = params.toString() ? `?${params.toString()}` : "";

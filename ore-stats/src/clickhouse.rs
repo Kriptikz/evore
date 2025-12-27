@@ -327,6 +327,98 @@ impl ClickHouseClient {
         Ok((rounds, has_more))
     }
     
+    /// Get rounds with flexible filtering for admin backfill
+    pub async fn get_rounds_filtered_for_admin(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        before_round_id: Option<u64>,
+        offset: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<RoundRow>, bool), ClickHouseError> {
+        // Build WHERE conditions
+        let mut conditions = Vec::new();
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("round_id <= {}", lte));
+        }
+        if let Some(before) = before_round_id {
+            conditions.push(format!("round_id < {}", before));
+        }
+        
+        let where_clause = if conditions.is_empty() {
+            "1=1".to_string()
+        } else {
+            conditions.join(" AND ")
+        };
+        
+        // Fetch one extra to determine if there are more
+        let fetch_limit = limit + 1;
+        let skip = offset.unwrap_or(0);
+        
+        let query = format!(r#"
+            SELECT 
+                round_id,
+                start_slot,
+                end_slot,
+                winning_square,
+                top_miner,
+                top_miner_reward,
+                total_deployed,
+                total_vaulted,
+                total_winnings,
+                motherlode,
+                motherlode_hit,
+                total_deployments,
+                unique_miners,
+                source,
+                created_at
+            FROM rounds
+            WHERE {}
+            ORDER BY round_id DESC
+            LIMIT {} OFFSET {}
+        "#, where_clause, fetch_limit, skip);
+        
+        let results: Vec<RoundRow> = self.client
+            .query(&query)
+            .fetch_all()
+            .await?;
+        
+        let has_more = results.len() > limit as usize;
+        let rounds: Vec<RoundRow> = results.into_iter().take(limit as usize).collect();
+        
+        Ok((rounds, has_more))
+    }
+    
+    /// Get total count of rounds matching filter criteria
+    pub async fn get_rounds_count_filtered(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+    ) -> Result<u64, ClickHouseError> {
+        let mut conditions = Vec::new();
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("round_id <= {}", lte));
+        }
+        
+        let where_clause = if conditions.is_empty() {
+            "1=1".to_string()
+        } else {
+            conditions.join(" AND ")
+        };
+        
+        let query = format!("SELECT count() FROM rounds WHERE {}", where_clause);
+        let count: u64 = self.client.query(&query).fetch_one().await?;
+        Ok(count)
+    }
+    
     /// Get total count of rounds in database.
     pub async fn get_rounds_count(&self) -> Result<u64, ClickHouseError> {
         let result: u64 = self.client

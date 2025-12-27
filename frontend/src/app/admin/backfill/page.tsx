@@ -175,6 +175,10 @@ export default function BackfillPage() {
   const [selectedRounds, setSelectedRounds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   
+  // Round ID filter state
+  const [startRound, setStartRound] = useState<string>("");
+  const [endRound, setEndRound] = useState<string>("");
+  
   // Pagination state
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
@@ -201,6 +205,8 @@ export default function BackfillPage() {
         limit: 100,
         missingDeploymentsOnly: showMissingOnly,
         invalidOnly: showInvalidOnly,
+        roundIdGte: startRound ? parseInt(startRound) : undefined,
+        roundIdLte: endRound ? parseInt(endRound) : undefined,
       });
       setRoundsData(res.rounds);
       setHasMore(res.has_more);
@@ -214,7 +220,7 @@ export default function BackfillPage() {
     } finally {
       setDataLoading(false);
     }
-  }, [isAuthenticated, showMissingOnly, showInvalidOnly]);
+  }, [isAuthenticated, showMissingOnly, showInvalidOnly, startRound, endRound]);
   
   const loadMoreRoundsData = useCallback(async () => {
     if (!isAuthenticated || !hasMore || !nextCursor || loadingMore) return;
@@ -225,6 +231,8 @@ export default function BackfillPage() {
         before: nextCursor,
         missingDeploymentsOnly: showMissingOnly,
         invalidOnly: showInvalidOnly,
+        roundIdGte: startRound ? parseInt(startRound) : undefined,
+        roundIdLte: endRound ? parseInt(endRound) : undefined,
       });
       if (res.rounds.length > 0) {
         setRoundsData(prev => [...prev, ...res.rounds]);
@@ -239,7 +247,7 @@ export default function BackfillPage() {
     } finally {
       setLoadingMore(false);
     }
-  }, [isAuthenticated, hasMore, nextCursor, loadingMore, showMissingOnly, showInvalidOnly]);
+  }, [isAuthenticated, hasMore, nextCursor, loadingMore, showMissingOnly, showInvalidOnly, startRound, endRound]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -255,6 +263,11 @@ export default function BackfillPage() {
       fetchRoundsData(true);
     }
   }, [showMissingOnly, showInvalidOnly, fetchRoundsData, isAuthenticated]);
+
+  // Separate effect for round ID filters - only triggers on Apply button or Enter
+  const handleApplyFilters = useCallback(() => {
+    fetchRoundsData(true);
+  }, [fetchRoundsData]);
 
   const handleBackfill = async () => {
     setBackfillLoading(true);
@@ -408,7 +421,49 @@ export default function BackfillPage() {
         {activeTab === "data" && (
           <>
             {/* Data Viewer Controls */}
-            <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4 flex justify-between items-center">
+            <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4 space-y-4">
+              {/* Round ID Range Filters */}
+              <div className="flex flex-wrap items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-slate-400">From Round:</label>
+                  <input
+                    type="number"
+                    value={startRound}
+                    onChange={(e) => setStartRound(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleApplyFilters()}
+                    placeholder="Start"
+                    className="w-28 px-3 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <label className="text-sm text-slate-400">To Round:</label>
+                  <input
+                    type="number"
+                    value={endRound}
+                    onChange={(e) => setEndRound(e.target.value)}
+                    onKeyDown={(e) => e.key === "Enter" && handleApplyFilters()}
+                    placeholder="End"
+                    className="w-28 px-3 py-1.5 bg-slate-900 border border-slate-600 rounded-lg text-white text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <button
+                  onClick={handleApplyFilters}
+                  disabled={dataLoading}
+                  className="px-4 py-1.5 bg-blue-500 hover:bg-blue-600 text-white text-sm rounded-lg disabled:opacity-50 transition-colors"
+                >
+                  Apply
+                </button>
+                {(startRound || endRound) && (
+                  <button
+                    onClick={() => { setStartRound(""); setEndRound(""); }}
+                    className="px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+              
+              {/* Checkbox Filters */}
               <div className="flex items-center gap-4">
                 <label className="flex items-center gap-2 cursor-pointer">
                   <input
