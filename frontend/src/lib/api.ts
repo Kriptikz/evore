@@ -123,6 +123,25 @@ export interface RpcDailyRow {
   unique_methods: number;
 }
 
+// Individual RPC request (all requests, not just errors)
+export interface RpcRequestRow {
+  timestamp: number; // milliseconds since epoch
+  program: string;
+  provider: string;
+  method: string;
+  target_type: string;
+  target_address: string;
+  is_batch: number;
+  batch_size: number;
+  status: string;
+  error_code: string;
+  error_message: string;
+  result_count: number;
+  duration_ms: number;
+  request_size: number;
+  response_size: number;
+}
+
 // WebSocket metrics types
 export interface WsEventRow {
   timestamp: number; // milliseconds since epoch
@@ -493,6 +512,10 @@ class ApiClient {
 
   async getRpcDaily(days = 7): Promise<{ days: number; daily: RpcDailyRow[] }> {
     return this.request("GET", `/admin/rpc/daily?days=${days}`, { requireAuth: true });
+  }
+
+  async getRpcRequests(hours = 24, limit = 100): Promise<{ hours: number; limit: number; requests: RpcRequestRow[] }> {
+    return this.request("GET", `/admin/rpc/requests?hours=${hours}&limit=${limit}`, { requireAuth: true });
   }
 
   async getBlacklist(): Promise<BlacklistResponse> {

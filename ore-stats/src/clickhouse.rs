@@ -362,6 +362,38 @@ impl ClickHouseClient {
         Ok(results)
     }
     
+    /// Get recent RPC requests (all, not just errors).
+    pub async fn get_rpc_requests(&self, hours: u32, limit: u32) -> Result<Vec<RpcRequestRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    timestamp,
+                    program,
+                    provider,
+                    method,
+                    target_type,
+                    target_address,
+                    is_batch,
+                    batch_size,
+                    status,
+                    error_code,
+                    error_message,
+                    result_count,
+                    duration_ms,
+                    request_size,
+                    response_size
+                FROM rpc_requests
+                WHERE timestamp > now() - INTERVAL ? HOUR
+                ORDER BY timestamp DESC
+                LIMIT ?
+            "#)
+            .bind(hours)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
     // ========== Rate Limit Events ==========
     
     /// Insert a rate limit event.
@@ -1138,6 +1170,26 @@ pub struct RpcErrorRow {
     pub error_code: String,
     pub error_message: String,
     pub duration_ms: u32,
+}
+
+/// Individual RPC request row (all requests, not just errors).
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RpcRequestRow {
+    pub timestamp: i64,  // DateTime64(3) → milliseconds since epoch
+    pub program: String,
+    pub provider: String,
+    pub method: String,
+    pub target_type: String,
+    pub target_address: String,
+    pub is_batch: u8,
+    pub batch_size: u16,
+    pub status: String,
+    pub error_code: String,
+    pub error_message: String,
+    pub result_count: u32,
+    pub duration_ms: u32,
+    pub request_size: u32,
+    pub response_size: u32,
 }
 
 /// Time series row for RPC metrics (minute granularity).

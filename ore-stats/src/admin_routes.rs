@@ -461,6 +461,36 @@ pub async fn get_rpc_daily(
     }))
 }
 
+#[derive(Debug, Serialize)]
+pub struct RpcRequestsResponse {
+    pub hours: u32,
+    pub limit: u32,
+    pub requests: Vec<crate::clickhouse::RpcRequestRow>,
+}
+
+/// GET /admin/rpc/requests?hours=24&limit=100
+/// Get recent RPC requests (all requests, not just errors)
+pub async fn get_rpc_requests(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<RpcRequestsResponse>, (StatusCode, Json<AuthError>)> {
+    let requests = state.clickhouse.get_rpc_requests(params.hours, params.limit)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get RPC requests: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: "Failed to get RPC requests".to_string() }),
+            )
+        })?;
+    
+    Ok(Json(RpcRequestsResponse {
+        hours: params.hours,
+        limit: params.limit,
+        requests,
+    }))
+}
+
 // ============================================================================
 // WebSocket Metrics Handlers
 // ============================================================================
@@ -932,6 +962,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/rpc/errors", get(get_rpc_errors))
         .route("/rpc/timeseries", get(get_rpc_timeseries))
         .route("/rpc/daily", get(get_rpc_daily))
+        .route("/rpc/requests", get(get_rpc_requests))
         // WebSocket metrics
         .route("/ws/events", get(get_ws_events))
         .route("/ws/throughput", get(get_ws_throughput))

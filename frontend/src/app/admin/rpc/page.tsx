@@ -4,9 +4,10 @@ import { useEffect, useState, useCallback } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { MetricCard } from "@/components/admin/MetricCard";
 import { useAdmin } from "@/context/AdminContext";
-import { api, RpcSummaryRow, RpcErrorRow, RpcTimeseriesRow } from "@/lib/api";
+import { api, RpcSummaryRow, RpcErrorRow, RpcTimeseriesRow, RpcRequestRow } from "@/lib/api";
 
 type TimeRange = 1 | 6 | 24 | 168; // hours
+type TabType = "requests" | "summary" | "errors" | "timeseries";
 
 function formatNumber(n: number): string {
   if (n >= 1_000_000) {
@@ -31,28 +32,43 @@ function formatBytes(bytes: number): string {
   return bytes + " B";
 }
 
+function formatDuration(ms: number): string {
+  if (ms >= 1000) {
+    return (ms / 1000).toFixed(2) + "s";
+  }
+  return ms + "ms";
+}
+
+function truncateAddress(addr: string, len = 8): string {
+  if (!addr || addr.length <= len * 2) return addr;
+  return `${addr.slice(0, len)}...${addr.slice(-len)}`;
+}
+
 export default function RpcMetricsPage() {
   const { isAuthenticated } = useAdmin();
   const [timeRange, setTimeRange] = useState<TimeRange>(24);
   const [summary, setSummary] = useState<RpcSummaryRow[]>([]);
   const [errors, setErrors] = useState<RpcErrorRow[]>([]);
+  const [requests, setRequests] = useState<RpcRequestRow[]>([]);
   const [timeseries, setTimeseries] = useState<RpcTimeseriesRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<"summary" | "errors" | "timeseries">("summary");
+  const [activeTab, setActiveTab] = useState<TabType>("requests");
 
   const fetchData = useCallback(async () => {
     if (!isAuthenticated) return;
     
     try {
       setLoading(true);
-      const [summaryData, errorsData, timeseriesData] = await Promise.all([
+      const [summaryData, errorsData, requestsData, timeseriesData] = await Promise.all([
         api.getRpcSummary(timeRange),
         api.getRpcErrors(timeRange, 50),
-        api.getRpcTimeseries(timeRange > 24 ? 24 : timeRange), // Limit timeseries to 24h
+        api.getRpcRequests(timeRange, 100),
+        api.getRpcTimeseries(timeRange > 24 ? 24 : timeRange),
       ]);
       setSummary(summaryData.data);
       setErrors(errorsData.errors);
+      setRequests(requestsData.requests);
       setTimeseries(timeseriesData.timeseries);
       setError(null);
     } catch (err) {
@@ -88,8 +104,13 @@ export default function RpcMetricsPage() {
     ? ((totals.success / totals.requests) * 100).toFixed(2) 
     : "0";
 
+  // Calculate average latency from requests
+  const avgLatency = requests.length > 0
+    ? requests.reduce((sum, r) => sum + r.duration_ms, 0) / requests.length
+    : 0;
+
   return (
-    <AdminShell title="RPC Metrics" subtitle="Monitor RPC usage and performance">
+    <AdminShell title="RPC Metrics" subtitle="Monitor RPC usage, latency, and errors in real-time">
       <div className="space-y-6">
         {/* Time Range Selector */}
         <div className="flex items-center gap-4">
@@ -128,7 +149,7 @@ export default function RpcMetricsPage() {
         ) : (
           <>
             {/* Overview Cards */}
-            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4">
               <MetricCard
                 title="Total Requests"
                 value={formatNumber(totals.requests)}
@@ -138,6 +159,11 @@ export default function RpcMetricsPage() {
                 title="Success Rate"
                 value={`${successRate}%`}
                 color={Number(successRate) >= 99 ? "green" : Number(successRate) >= 95 ? "amber" : "red"}
+              />
+              <MetricCard
+                title="Avg Latency"
+                value={formatDuration(avgLatency)}
+                color={avgLatency > 1000 ? "red" : avgLatency > 500 ? "amber" : "green"}
               />
               <MetricCard
                 title="Errors"
@@ -164,7 +190,7 @@ export default function RpcMetricsPage() {
             {/* Tabs */}
             <div className="border-b border-slate-700">
               <nav className="flex gap-4">
-                {(["summary", "errors", "timeseries"] as const).map((tab) => (
+                {(["requests", "summary", "errors", "timeseries"] as TabType[]).map((tab) => (
                   <button
                     key={tab}
                     onClick={() => setActiveTab(tab)}
@@ -174,6 +200,7 @@ export default function RpcMetricsPage() {
                         : "text-slate-400 border-transparent hover:text-white"
                     }`}
                   >
+                    {tab === "requests" && `Recent Requests (${requests.length})`}
                     {tab === "summary" && "By Method"}
                     {tab === "errors" && `Errors (${errors.length})`}
                     {tab === "timeseries" && "Time Series"}
@@ -184,11 +211,94 @@ export default function RpcMetricsPage() {
 
             {/* Tab Content */}
             <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
+              {/* Recent Requests Tab */}
+              {activeTab === "requests" && (
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b border-slate-700">
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Time</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Method</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Type</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Target</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Provider</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Program</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Status</th>
+                        <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Results</th>
+                        <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Size</th>
+                        <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Duration</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {requests.length === 0 ? (
+                        <tr>
+                          <td colSpan={10} className="px-4 py-8 text-center text-slate-400">
+                            No RPC requests in this time range
+                          </td>
+                        </tr>
+                      ) : (
+                        requests.map((row, i) => (
+                          <tr key={i} className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30">
+                            <td className="px-4 py-3 text-slate-400 text-sm font-mono whitespace-nowrap">
+                              {new Date(row.timestamp).toLocaleTimeString()}
+                            </td>
+                            <td className="px-4 py-3 text-white font-mono text-sm">
+                              {row.method}
+                              {row.is_batch === 1 && (
+                                <span className="ml-1 px-1.5 py-0.5 text-xs bg-purple-500/20 text-purple-400 rounded">
+                                  x{row.batch_size}
+                                </span>
+                              )}
+                            </td>
+                            <td className="px-4 py-3">
+                              <span className="px-2 py-1 text-xs rounded bg-slate-600/50 text-slate-300">
+                                {row.target_type || "-"}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-slate-400 font-mono text-sm" title={row.target_address}>
+                              {truncateAddress(row.target_address) || "-"}
+                            </td>
+                            <td className="px-4 py-3 text-slate-300">{row.provider}</td>
+                            <td className="px-4 py-3 text-slate-400">{row.program}</td>
+                            <td className="px-4 py-3">
+                              <span className={`px-2 py-1 text-xs rounded ${
+                                row.status === "success" ? "bg-green-500/20 text-green-400" :
+                                row.status === "not_found" ? "bg-slate-500/20 text-slate-400" :
+                                row.status === "timeout" ? "bg-amber-500/20 text-amber-400" :
+                                row.status === "rate_limited" ? "bg-purple-500/20 text-purple-400" :
+                                "bg-red-500/20 text-red-400"
+                              }`}>
+                                {row.status}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right text-slate-300">
+                              {row.result_count > 0 ? row.result_count : "-"}
+                            </td>
+                            <td className="px-4 py-3 text-right text-slate-400 text-sm whitespace-nowrap">
+                              {row.response_size > 0 ? formatBytes(row.response_size) : "-"}
+                            </td>
+                            <td className={`px-4 py-3 text-right font-mono text-sm ${
+                              row.duration_ms > 1000 ? "text-red-400" :
+                              row.duration_ms > 500 ? "text-amber-400" :
+                              "text-green-400"
+                            }`}>
+                              {formatDuration(row.duration_ms)}
+                            </td>
+                          </tr>
+                        ))
+                      )}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Summary by Method Tab */}
               {activeTab === "summary" && (
                 <table className="w-full">
                   <thead>
                     <tr className="border-b border-slate-700">
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Method</th>
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Type</th>
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Provider</th>
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Program</th>
                       <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Requests</th>
@@ -196,12 +306,13 @@ export default function RpcMetricsPage() {
                       <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Errors</th>
                       <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Avg</th>
                       <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Max</th>
+                      <th className="text-right px-4 py-3 text-sm font-medium text-slate-400">Data</th>
                     </tr>
                   </thead>
                   <tbody>
                     {summary.length === 0 ? (
                       <tr>
-                        <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
+                        <td colSpan={10} className="px-4 py-8 text-center text-slate-400">
                           No RPC data available for this time range
                         </td>
                       </tr>
@@ -209,13 +320,35 @@ export default function RpcMetricsPage() {
                       summary.map((row, i) => (
                         <tr key={i} className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30">
                           <td className="px-4 py-3 text-white font-mono text-sm">{row.method}</td>
+                          <td className="px-4 py-3">
+                            <span className="px-2 py-1 text-xs rounded bg-slate-600/50 text-slate-300">
+                              {row.target_type || "-"}
+                            </span>
+                          </td>
                           <td className="px-4 py-3 text-slate-300">{row.provider}</td>
                           <td className="px-4 py-3 text-slate-400">{row.program}</td>
                           <td className="px-4 py-3 text-right text-white">{formatNumber(row.total_requests)}</td>
                           <td className="px-4 py-3 text-right text-green-400">{formatNumber(row.success_count)}</td>
-                          <td className="px-4 py-3 text-right text-red-400">{row.error_count}</td>
-                          <td className="px-4 py-3 text-right text-slate-300">{row.avg_duration_ms.toFixed(0)}ms</td>
-                          <td className="px-4 py-3 text-right text-slate-400">{row.max_duration_ms}ms</td>
+                          <td className="px-4 py-3 text-right text-red-400">
+                            {row.error_count + row.timeout_count > 0 ? (
+                              <span title={`Errors: ${row.error_count}, Timeouts: ${row.timeout_count}`}>
+                                {row.error_count + row.timeout_count}
+                              </span>
+                            ) : "-"}
+                          </td>
+                          <td className={`px-4 py-3 text-right ${
+                            row.avg_duration_ms > 1000 ? "text-red-400" :
+                            row.avg_duration_ms > 500 ? "text-amber-400" :
+                            "text-slate-300"
+                          }`}>
+                            {formatDuration(row.avg_duration_ms)}
+                          </td>
+                          <td className="px-4 py-3 text-right text-slate-400">
+                            {formatDuration(row.max_duration_ms)}
+                          </td>
+                          <td className="px-4 py-3 text-right text-slate-400 text-sm">
+                            {formatBytes(row.total_response_bytes)}
+                          </td>
                         </tr>
                       ))
                     )}
@@ -223,12 +356,15 @@ export default function RpcMetricsPage() {
                 </table>
               )}
 
+              {/* Errors Tab */}
               {activeTab === "errors" && (
                 <table className="w-full">
                   <thead>
                     <tr className="border-b border-slate-700">
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Time</th>
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Method</th>
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Type</th>
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Target</th>
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Provider</th>
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Status</th>
                       <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Error</th>
@@ -238,17 +374,25 @@ export default function RpcMetricsPage() {
                   <tbody>
                     {errors.length === 0 ? (
                       <tr>
-                        <td colSpan={6} className="px-4 py-8 text-center text-slate-400">
-                          No errors in this time range 🎉
+                        <td colSpan={8} className="px-4 py-8 text-center text-slate-400">
+                          No errors in this time range
                         </td>
                       </tr>
                     ) : (
                       errors.map((row, i) => (
                         <tr key={i} className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30">
-                          <td className="px-4 py-3 text-slate-400 text-sm font-mono">
-                            {new Date(row.timestamp).toLocaleTimeString()} {/* ms since epoch */}
+                          <td className="px-4 py-3 text-slate-400 text-sm font-mono whitespace-nowrap">
+                            {new Date(row.timestamp).toLocaleTimeString()}
                           </td>
                           <td className="px-4 py-3 text-white font-mono text-sm">{row.method}</td>
+                          <td className="px-4 py-3">
+                            <span className="px-2 py-1 text-xs rounded bg-slate-600/50 text-slate-300">
+                              {row.target_type || "-"}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-slate-400 font-mono text-sm" title={row.target_address}>
+                            {truncateAddress(row.target_address) || "-"}
+                          </td>
                           <td className="px-4 py-3 text-slate-300">{row.provider}</td>
                           <td className="px-4 py-3">
                             <span className={`px-2 py-1 text-xs rounded ${
@@ -262,7 +406,7 @@ export default function RpcMetricsPage() {
                           <td className="px-4 py-3 text-red-300 text-sm truncate max-w-xs" title={row.error_message}>
                             {row.error_code ? `[${row.error_code}] ` : ""}{row.error_message || "-"}
                           </td>
-                          <td className="px-4 py-3 text-right text-slate-400">{row.duration_ms}ms</td>
+                          <td className="px-4 py-3 text-right text-slate-400">{formatDuration(row.duration_ms)}</td>
                         </tr>
                       ))
                     )}
@@ -270,10 +414,17 @@ export default function RpcMetricsPage() {
                 </table>
               )}
 
+              {/* Time Series Tab */}
               {activeTab === "timeseries" && (
                 <div className="p-4">
                   {timeseries.length === 0 ? (
-                    <p className="text-center text-slate-400 py-8">No time series data available</p>
+                    <div className="text-center py-8 space-y-2">
+                      <p className="text-slate-400">No time series data available</p>
+                      <p className="text-sm text-slate-500">
+                        Time series data is populated as RPC requests are made. 
+                        If you just started the server, data will appear once requests are logged.
+                      </p>
+                    </div>
                   ) : (
                     <div className="space-y-4">
                       {/* Simple bar chart representation */}
@@ -289,7 +440,7 @@ export default function RpcMetricsPage() {
                             <div
                               key={i}
                               className="flex-1 min-w-1 group relative"
-                              title={`${new Date(row.minute * 1000).toLocaleTimeString()}: ${row.total_requests} requests`}
+                              title={`${new Date(row.minute * 1000).toLocaleTimeString()}: ${row.total_requests} requests, ${row.error_count} errors, avg ${row.avg_duration_ms.toFixed(0)}ms`}
                             >
                               <div
                                 className={`w-full rounded-t transition-all ${
@@ -312,8 +463,39 @@ export default function RpcMetricsPage() {
                         </span>
                       </div>
                       <p className="text-xs text-slate-500 text-center">
-                        Requests per minute (last 60 minutes shown)
+                        Requests per minute (last 60 minutes shown) - Hover for details
                       </p>
+                      
+                      {/* Stats summary */}
+                      <div className="grid grid-cols-4 gap-4 pt-4 border-t border-slate-700">
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-blue-400">
+                            {formatNumber(timeseries.reduce((sum, r) => sum + r.total_requests, 0))}
+                          </div>
+                          <div className="text-xs text-slate-500">Total Requests</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-green-400">
+                            {formatNumber(timeseries.reduce((sum, r) => sum + r.success_count, 0))}
+                          </div>
+                          <div className="text-xs text-slate-500">Successful</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-red-400">
+                            {formatNumber(timeseries.reduce((sum, r) => sum + r.error_count, 0))}
+                          </div>
+                          <div className="text-xs text-slate-500">Errors</div>
+                        </div>
+                        <div className="text-center">
+                          <div className="text-2xl font-bold text-amber-400">
+                            {timeseries.length > 0 ? 
+                              formatDuration(timeseries.reduce((sum, r) => sum + r.avg_duration_ms, 0) / timeseries.length) :
+                              "0ms"
+                            }
+                          </div>
+                          <div className="text-xs text-slate-500">Avg Latency</div>
+                        </div>
+                      </div>
                     </div>
                   )}
                 </div>
@@ -325,4 +507,3 @@ export default function RpcMetricsPage() {
     </AdminShell>
   );
 }
-
