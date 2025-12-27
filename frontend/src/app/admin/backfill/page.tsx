@@ -3,9 +3,10 @@
 import { useEffect, useState, useCallback } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { useAdmin } from "@/context/AdminContext";
-import { api, RoundStatus } from "@/lib/api";
+import { api, RoundStatus, RoundWithData } from "@/lib/api";
 
 type WorkflowStep = "meta" | "txns" | "reconstruct" | "verify" | "finalize";
+type Tab = "backfill" | "data";
 
 function StepBadge({ done, active, label }: { done: boolean; active?: boolean; label: string }) {
   return (
@@ -95,8 +96,101 @@ function RoundStatusRow({
   );
 }
 
+// Format SOL from lamports
+const formatSol = (lamports: number) => (lamports / 1e9).toFixed(4);
+const truncate = (s: string) => s.length > 12 ? `${s.slice(0, 6)}...${s.slice(-4)}` : s;
+
+function RoundDataRow({
+  round,
+  onDelete,
+  loading,
+}: {
+  round: RoundWithData;
+  onDelete: (roundId: number, deleteRound: boolean, deleteDeployments: boolean) => void;
+  loading: number | null;
+}) {
+  const [showConfirm, setShowConfirm] = useState(false);
+  const isLoading = loading === round.round_id;
+  const hasMissingDeployments = round.deployment_count === 0;
+
+  return (
+    <tr className={`border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30 ${hasMissingDeployments ? 'bg-red-500/5' : ''}`}>
+      <td className="px-4 py-3 text-white font-mono">{round.round_id}</td>
+      <td className="px-4 py-3 text-slate-400 text-sm">◼ {round.winning_square}</td>
+      <td className="px-4 py-3 text-slate-400 text-sm font-mono">{truncate(round.top_miner)}</td>
+      <td className="px-4 py-3 text-slate-400 text-sm">{formatSol(round.total_deployed)}</td>
+      <td className="px-4 py-3 text-slate-400 text-sm">{formatSol(round.total_winnings)}</td>
+      <td className="px-4 py-3">
+        <span className={`px-2 py-1 text-xs rounded-full ${
+          round.deployment_count > 0 
+            ? 'bg-green-500/20 text-green-400' 
+            : 'bg-red-500/20 text-red-400'
+        }`}>
+          {round.deployment_count}
+        </span>
+      </td>
+      <td className="px-4 py-3">
+        <span className={`px-2 py-1 text-xs rounded-full ${
+          round.source === 'live' 
+            ? 'bg-emerald-500/20 text-emerald-400' 
+            : 'bg-slate-600 text-slate-300'
+        }`}>
+          {round.source}
+        </span>
+      </td>
+      <td className="px-4 py-3">
+        {showConfirm ? (
+          <div className="flex gap-2">
+            <button
+              onClick={() => {
+                onDelete(round.round_id, false, true);
+                setShowConfirm(false);
+              }}
+              disabled={isLoading}
+              className="px-2 py-1 text-xs bg-orange-500 hover:bg-orange-600 text-white rounded"
+            >
+              Deploys
+            </button>
+            <button
+              onClick={() => {
+                onDelete(round.round_id, true, true);
+                setShowConfirm(false);
+              }}
+              disabled={isLoading}
+              className="px-2 py-1 text-xs bg-red-500 hover:bg-red-600 text-white rounded"
+            >
+              All
+            </button>
+            <button
+              onClick={() => setShowConfirm(false)}
+              className="px-2 py-1 text-xs bg-slate-600 hover:bg-slate-500 text-white rounded"
+            >
+              Cancel
+            </button>
+          </div>
+        ) : (
+          <button
+            onClick={() => setShowConfirm(true)}
+            disabled={isLoading}
+            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+              isLoading
+                ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                : "bg-red-500/20 hover:bg-red-500/30 text-red-400"
+            }`}
+          >
+            {isLoading ? "..." : "Delete"}
+          </button>
+        )}
+      </td>
+    </tr>
+  );
+}
+
 export default function BackfillPage() {
   const { isAuthenticated } = useAdmin();
+  const [activeTab, setActiveTab] = useState<Tab>("data");
+  
+  // Backfill workflow state
   const [pendingRounds, setPendingRounds] = useState<RoundStatus[]>([]);
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState<number | null>(null);
@@ -107,6 +201,11 @@ export default function BackfillPage() {
   const [stopAtRound, setStopAtRound] = useState<string>("");
   const [maxPages, setMaxPages] = useState<string>("10");
   const [backfillLoading, setBackfillLoading] = useState(false);
+
+  // Data viewer state
+  const [roundsData, setRoundsData] = useState<RoundWithData[]>([]);
+  const [dataLoading, setDataLoading] = useState(false);
+  const [showMissingOnly, setShowMissingOnly] = useState(false);
 
   const fetchPendingRounds = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -121,13 +220,34 @@ export default function BackfillPage() {
     }
   }, [isAuthenticated]);
 
+  const fetchRoundsData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    setDataLoading(true);
+    try {
+      const res = await api.getRoundsWithData(100, showMissingOnly);
+      setRoundsData(res.rounds);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to fetch rounds data");
+    } finally {
+      setDataLoading(false);
+    }
+  }, [isAuthenticated, showMissingOnly]);
+
   useEffect(() => {
     if (!isAuthenticated) {
       setLoading(false);
       return;
     }
     fetchPendingRounds();
-  }, [fetchPendingRounds, isAuthenticated]);
+    fetchRoundsData();
+  }, [fetchPendingRounds, fetchRoundsData, isAuthenticated]);
+
+  useEffect(() => {
+    if (isAuthenticated) {
+      fetchRoundsData();
+    }
+  }, [showMissingOnly, fetchRoundsData, isAuthenticated]);
 
   const handleBackfill = async () => {
     setBackfillLoading(true);
@@ -139,10 +259,11 @@ export default function BackfillPage() {
         maxPages ? parseInt(maxPages) : undefined
       );
       setMessage(
-        `Backfill complete: ${res.rounds_fetched} fetched, ${res.rounds_skipped} skipped` +
+        `Backfill complete: ${res.rounds_fetched} fetched, ${res.rounds_skipped} skipped, ${res.rounds_missing_deployments} missing deployments` +
           (res.stopped_at_round ? `, stopped at round ${res.stopped_at_round}` : "")
       );
       fetchPendingRounds();
+      fetchRoundsData();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Backfill failed");
     } finally {
@@ -176,6 +297,7 @@ export default function BackfillPage() {
           break;
       }
       fetchPendingRounds();
+      fetchRoundsData();
     } catch (err) {
       setError(err instanceof Error ? err.message : `Action failed for round ${roundId}`);
     } finally {
@@ -183,55 +305,54 @@ export default function BackfillPage() {
     }
   };
 
+  const handleDelete = async (roundId: number, deleteRound: boolean, deleteDeployments: boolean) => {
+    setActionLoading(roundId);
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await api.deleteRoundData(roundId, deleteRound, deleteDeployments);
+      setMessage(`Round ${roundId}: ${res.message}`);
+      fetchPendingRounds();
+      fetchRoundsData();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `Delete failed for round ${roundId}`);
+    } finally {
+      setActionLoading(null);
+    }
+  };
+
+  const missingCount = roundsData.filter(r => r.deployment_count === 0).length;
+
   return (
-    <AdminShell title="Historical Backfill" subtitle="Reconstruct historical round data">
+    <AdminShell title="Historical Backfill" subtitle="Manage and verify round data">
       <div className="space-y-6">
-        {/* Backfill Form */}
-        <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6">
-          <h2 className="text-lg font-semibold text-white mb-4">Fetch Round Metadata</h2>
-          <p className="text-sm text-slate-400 mb-4">
-            Fetch round metadata from the external API and store to ClickHouse.
-            Newer rounds are fetched first (pagination from newest to oldest).
-          </p>
-          <div className="flex flex-wrap gap-4 items-end">
-            <div>
-              <label className="block text-sm text-slate-400 mb-1">Stop at Round</label>
-              <input
-                type="number"
-                value={stopAtRound}
-                onChange={(e) => setStopAtRound(e.target.value)}
-                placeholder="Optional"
-                className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-32"
-              />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-400 mb-1">Max Pages</label>
-              <input
-                type="number"
-                value={maxPages}
-                onChange={(e) => setMaxPages(e.target.value)}
-                className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-24"
-              />
-            </div>
-            <button
-              onClick={handleBackfill}
-              disabled={backfillLoading}
-              className={`px-4 py-2 rounded-lg transition-colors ${
-                backfillLoading
-                  ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                  : "bg-emerald-500 hover:bg-emerald-600 text-white"
-              }`}
-            >
-              {backfillLoading ? (
-                <span className="flex items-center gap-2">
-                  <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                  Fetching...
-                </span>
-              ) : (
-                "Start Backfill"
-              )}
-            </button>
-          </div>
+        {/* Tabs */}
+        <div className="flex gap-2 border-b border-slate-700 pb-2">
+          <button
+            onClick={() => setActiveTab("data")}
+            className={`px-4 py-2 rounded-t-lg transition-colors ${
+              activeTab === "data"
+                ? "bg-slate-800 text-white border-b-2 border-blue-500"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            Round Data ({roundsData.length})
+            {missingCount > 0 && (
+              <span className="ml-2 px-1.5 py-0.5 text-xs bg-red-500/20 text-red-400 rounded">
+                {missingCount} missing
+              </span>
+            )}
+          </button>
+          <button
+            onClick={() => setActiveTab("backfill")}
+            className={`px-4 py-2 rounded-t-lg transition-colors ${
+              activeTab === "backfill"
+                ? "bg-slate-800 text-white border-b-2 border-blue-500"
+                : "text-slate-400 hover:text-white"
+            }`}
+          >
+            Backfill Workflow ({pendingRounds.length})
+          </button>
         </div>
 
         {/* Messages */}
@@ -246,81 +367,203 @@ export default function BackfillPage() {
           </div>
         )}
 
-        {/* Pending Rounds Table */}
-        <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-700 flex justify-between items-center">
-            <h2 className="text-lg font-semibold text-white">
-              Pending Rounds ({pendingRounds.length})
-            </h2>
-            <button
-              onClick={fetchPendingRounds}
-              className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
-            >
-              Refresh
-            </button>
-          </div>
-
-          {loading ? (
-            <div className="flex items-center justify-center h-48">
-              <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
-            </div>
-          ) : pendingRounds.length === 0 ? (
-            <div className="p-8 text-center text-slate-400">
-              No pending rounds. Start a backfill to fetch historical data.
-            </div>
-          ) : (
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-700">
-                  <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Round ID</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Status</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Txns</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deploys</th>
-                  <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Action</th>
-                </tr>
-              </thead>
-              <tbody>
-                {pendingRounds.map((round) => (
-                  <RoundStatusRow
-                    key={round.round_id}
-                    round={round}
-                    onAction={handleAction}
-                    loading={actionLoading}
+        {activeTab === "data" && (
+          <>
+            {/* Data Viewer Controls */}
+            <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4 flex justify-between items-center">
+              <div className="flex items-center gap-4">
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showMissingOnly}
+                    onChange={(e) => setShowMissingOnly(e.target.checked)}
+                    className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500"
                   />
-                ))}
-              </tbody>
-            </table>
-          )}
-        </div>
+                  <span className="text-sm text-slate-300">Show missing deployments only</span>
+                </label>
+              </div>
+              <button
+                onClick={fetchRoundsData}
+                className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
+              >
+                Refresh
+              </button>
+            </div>
 
-        {/* Workflow Legend */}
-        <div className="bg-slate-800/30 rounded-lg border border-slate-700/50 p-4">
-          <h3 className="text-sm font-medium text-slate-300 mb-3">Workflow Steps</h3>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-4 text-sm">
-            <div>
-              <span className="text-emerald-400 font-medium">1. Meta</span>
-              <p className="text-slate-500 text-xs mt-1">Fetch round metadata from external API</p>
+            {/* Rounds Data Table */}
+            <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-700">
+                <h2 className="text-lg font-semibold text-white">
+                  Stored Rounds
+                  {showMissingOnly && ` (${roundsData.length} missing deployments)`}
+                </h2>
+              </div>
+
+              {dataLoading ? (
+                <div className="flex items-center justify-center h-48">
+                  <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : roundsData.length === 0 ? (
+                <div className="p-8 text-center text-slate-400">
+                  {showMissingOnly ? "All rounds have deployment data!" : "No rounds found. Start a backfill."}
+                </div>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b border-slate-700">
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Round</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Win</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Top Miner</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deployed</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Winnings</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deploys</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Source</th>
+                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {roundsData.map((round) => (
+                        <RoundDataRow
+                          key={round.round_id}
+                          round={round}
+                          onDelete={handleDelete}
+                          loading={actionLoading}
+                        />
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
-            <div>
-              <span className="text-emerald-400 font-medium">2. Txns</span>
-              <p className="text-slate-500 text-xs mt-1">Fetch all transactions via Helius</p>
+          </>
+        )}
+
+        {activeTab === "backfill" && (
+          <>
+            {/* Backfill Form */}
+            <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6">
+              <h2 className="text-lg font-semibold text-white mb-4">Fetch Round Metadata</h2>
+              <p className="text-sm text-slate-400 mb-4">
+                Fetch round metadata from the external API. Also checks for rounds missing deployments.
+              </p>
+              <div className="flex flex-wrap gap-4 items-end">
+                <div>
+                  <label className="block text-sm text-slate-400 mb-1">Stop at Round</label>
+                  <input
+                    type="number"
+                    value={stopAtRound}
+                    onChange={(e) => setStopAtRound(e.target.value)}
+                    placeholder="Optional"
+                    className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-32"
+                  />
+                </div>
+                <div>
+                  <label className="block text-sm text-slate-400 mb-1">Max Pages</label>
+                  <input
+                    type="number"
+                    value={maxPages}
+                    onChange={(e) => setMaxPages(e.target.value)}
+                    className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-24"
+                  />
+                </div>
+                <button
+                  onClick={handleBackfill}
+                  disabled={backfillLoading}
+                  className={`px-4 py-2 rounded-lg transition-colors ${
+                    backfillLoading
+                      ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                      : "bg-emerald-500 hover:bg-emerald-600 text-white"
+                  }`}
+                >
+                  {backfillLoading ? (
+                    <span className="flex items-center gap-2">
+                      <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      Fetching...
+                    </span>
+                  ) : (
+                    "Start Backfill"
+                  )}
+                </button>
+              </div>
             </div>
-            <div>
-              <span className="text-emerald-400 font-medium">3. Rebuild</span>
-              <p className="text-slate-500 text-xs mt-1">Reconstruct deployments from txns</p>
+
+            {/* Pending Rounds Table */}
+            <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
+              <div className="px-6 py-4 border-b border-slate-700 flex justify-between items-center">
+                <h2 className="text-lg font-semibold text-white">
+                  Pending Rounds ({pendingRounds.length})
+                </h2>
+                <button
+                  onClick={fetchPendingRounds}
+                  className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
+                >
+                  Refresh
+                </button>
+              </div>
+
+              {loading ? (
+                <div className="flex items-center justify-center h-48">
+                  <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
+                </div>
+              ) : pendingRounds.length === 0 ? (
+                <div className="p-8 text-center text-slate-400">
+                  No pending rounds. Start a backfill to fetch historical data.
+                </div>
+              ) : (
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b border-slate-700">
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Round ID</th>
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Status</th>
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Txns</th>
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deploys</th>
+                      <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {pendingRounds.map((round) => (
+                      <RoundStatusRow
+                        key={round.round_id}
+                        round={round}
+                        onAction={handleAction}
+                        loading={actionLoading}
+                      />
+                    ))}
+                  </tbody>
+                </table>
+              )}
             </div>
-            <div>
-              <span className="text-emerald-400 font-medium">4. Verify</span>
-              <p className="text-slate-500 text-xs mt-1">Manually verify against external data</p>
+
+            {/* Workflow Legend */}
+            <div className="bg-slate-800/30 rounded-lg border border-slate-700/50 p-4">
+              <h3 className="text-sm font-medium text-slate-300 mb-3">Workflow Steps</h3>
+              <div className="grid grid-cols-1 md:grid-cols-5 gap-4 text-sm">
+                <div>
+                  <span className="text-emerald-400 font-medium">1. Meta</span>
+                  <p className="text-slate-500 text-xs mt-1">Fetch round metadata from external API</p>
+                </div>
+                <div>
+                  <span className="text-emerald-400 font-medium">2. Txns</span>
+                  <p className="text-slate-500 text-xs mt-1">Fetch all transactions via Helius</p>
+                </div>
+                <div>
+                  <span className="text-emerald-400 font-medium">3. Rebuild</span>
+                  <p className="text-slate-500 text-xs mt-1">Reconstruct deployments from txns</p>
+                </div>
+                <div>
+                  <span className="text-emerald-400 font-medium">4. Verify</span>
+                  <p className="text-slate-500 text-xs mt-1">Manually verify against external data</p>
+                </div>
+                <div>
+                  <span className="text-emerald-400 font-medium">5. Final</span>
+                  <p className="text-slate-500 text-xs mt-1">Store deployments to ClickHouse</p>
+                </div>
+              </div>
             </div>
-            <div>
-              <span className="text-emerald-400 font-medium">5. Final</span>
-              <p className="text-slate-500 text-xs mt-1">Store deployments to ClickHouse</p>
-            </div>
-          </div>
-        </div>
+          </>
+        )}
       </div>
     </AdminShell>
   );
 }
-

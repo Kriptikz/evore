@@ -28,6 +28,7 @@ use crate::external_api::get_ore_supply_rounds;
 pub struct BackfillRoundsResponse {
     pub rounds_fetched: u32,
     pub rounds_skipped: u32,
+    pub rounds_missing_deployments: u32,
     pub stopped_at_round: Option<u64>,
 }
 
@@ -111,6 +112,34 @@ pub struct RoundDataStatus {
 }
 
 #[derive(Debug, Serialize)]
+pub struct RoundWithData {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub winning_square: u8,
+    pub top_miner: String,
+    pub total_deployed: u64,
+    pub total_winnings: u64,
+    pub unique_miners: u32,
+    pub motherlode: u64,
+    pub deployment_count: u64,
+    pub source: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoundsWithDataResponse {
+    pub rounds: Vec<RoundWithData>,
+    pub total: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoundsWithDataQuery {
+    pub limit: Option<u32>,
+    pub offset: Option<u32>,
+    pub missing_deployments_only: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -130,6 +159,7 @@ pub async fn backfill_rounds(
     
     let mut rounds_fetched = 0u32;
     let mut rounds_skipped = 0u32;
+    let mut rounds_missing_deployments = 0u32;
     let mut stopped_at: Option<u64> = None;
     
     tracing::info!("Starting backfill, stop_at_round={}, max_pages={}", stop_at_round, max_pages);
@@ -157,13 +187,24 @@ pub async fn backfill_rounds(
             }
             
             // Check if round already exists in ClickHouse
-            let exists = check_round_exists(&state.clickhouse, round_id).await;
-            if exists {
+            let round_exists = check_round_exists(&state.clickhouse, round_id).await;
+            
+            // Also check if deployments exist
+            let deployment_count = state.clickhouse.count_deployments_for_round(round_id).await.unwrap_or(0);
+            
+            if round_exists && deployment_count > 0 {
+                // Fully complete - skip
                 rounds_skipped += 1;
+                continue;
+            } else if round_exists && deployment_count == 0 {
+                // Round exists but no deployments - mark for backfill
+                rounds_missing_deployments += 1;
+                // Update PostgreSQL to indicate needs deployment backfill
+                update_round_status_meta_fetched(&state.postgres, round_id).await;
                 continue;
             }
             
-            // Create RoundInsert from external API data
+            // Round doesn't exist - create it
             let insert = RoundInsert::from_backfill(
                 round_id,
                 0, // start_slot - not available from external API
@@ -204,13 +245,14 @@ pub async fn backfill_rounds(
     }
     
     tracing::info!(
-        "Backfill complete: {} fetched, {} skipped, stopped_at={:?}",
-        rounds_fetched, rounds_skipped, stopped_at
+        "Backfill complete: {} fetched, {} skipped, {} missing deployments, stopped_at={:?}",
+        rounds_fetched, rounds_skipped, rounds_missing_deployments, stopped_at
     );
     
     Ok(Json(BackfillRoundsResponse {
         rounds_fetched,
         rounds_skipped,
+        rounds_missing_deployments,
         stopped_at_round: stopped_at,
     }))
 }
@@ -425,6 +467,57 @@ pub async fn get_round_data_status(
         round_id,
         round_exists,
         deployment_count,
+    }))
+}
+
+/// GET /admin/rounds/data?limit=50&offset=0&missing_deployments_only=false
+/// Get rounds with their deployment counts for admin verification
+pub async fn get_rounds_with_data(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RoundsWithDataQuery>,
+) -> Result<Json<RoundsWithDataResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    let missing_only = params.missing_deployments_only.unwrap_or(false);
+    
+    // Get recent rounds from ClickHouse
+    let rounds = state.clickhouse.get_recent_rounds(limit).await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    // Enrich with deployment counts
+    let mut enriched = Vec::new();
+    for r in rounds {
+        let deployment_count = state.clickhouse.count_deployments_for_round(r.round_id).await.unwrap_or(0);
+        
+        // Filter if missing_deployments_only is set
+        if missing_only && deployment_count > 0 {
+            continue;
+        }
+        
+        enriched.push(RoundWithData {
+            round_id: r.round_id,
+            start_slot: r.start_slot,
+            end_slot: r.end_slot,
+            winning_square: r.winning_square,
+            top_miner: r.top_miner,
+            total_deployed: r.total_deployed,
+            total_winnings: r.total_winnings,
+            unique_miners: r.unique_miners,
+            motherlode: r.motherlode,
+            deployment_count,
+            source: r.source,
+        });
+    }
+    
+    let total = enriched.len() as u32;
+    
+    Ok(Json(RoundsWithDataResponse {
+        rounds: enriched,
+        total,
     }))
 }
 

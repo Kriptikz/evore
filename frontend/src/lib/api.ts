@@ -171,7 +171,27 @@ export interface WsThroughputSummary {
 export interface BackfillRoundsResponse {
   rounds_fetched: number;
   rounds_skipped: number;
+  rounds_missing_deployments: number;
   stopped_at_round: number | null;
+}
+
+export interface RoundWithData {
+  round_id: number;
+  start_slot: number;
+  end_slot: number;
+  winning_square: number;
+  top_miner: string;
+  total_deployed: number;
+  total_winnings: number;
+  unique_miners: number;
+  motherlode: number;
+  deployment_count: number;
+  source: string;
+}
+
+export interface RoundsWithDataResponse {
+  rounds: RoundWithData[];
+  total: number;
 }
 
 export interface RoundStatus {
@@ -680,6 +700,13 @@ class ApiClient {
     params.set("delete_round", deleteRound.toString());
     params.set("delete_deployments", deleteDeployments.toString());
     return this.request("DELETE", `/admin/rounds/${roundId}?${params.toString()}`, { requireAuth: true });
+  }
+
+  async getRoundsWithData(limit = 50, missingDeploymentsOnly = false): Promise<RoundsWithDataResponse> {
+    const params = new URLSearchParams();
+    params.set("limit", limit.toString());
+    if (missingDeploymentsOnly) params.set("missing_deployments_only", "true");
+    return this.request("GET", `/admin/rounds/data?${params.toString()}`, { requireAuth: true });
   }
 }
 
