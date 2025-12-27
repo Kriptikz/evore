@@ -671,9 +671,10 @@ pub struct RpcProviderRow {
 }
 
 /// Individual RPC error row.
+/// Note: timestamp is DateTime64(3) - i64 milliseconds since epoch
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcErrorRow {
-    pub timestamp: time::OffsetDateTime,
+    pub timestamp: i64,  // DateTime64(3) → milliseconds since epoch
     pub program: String,
     pub provider: String,
     pub method: String,
@@ -684,9 +685,10 @@ pub struct RpcErrorRow {
 }
 
 /// Time series row for RPC metrics (minute granularity).
+/// Note: minute is DateTime - u32 seconds since epoch
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcTimeseriesRow {
-    pub minute: time::OffsetDateTime,
+    pub minute: u32,  // DateTime → seconds since epoch
     pub total_requests: u64,
     pub success_count: u64,
     pub error_count: u64,
@@ -694,9 +696,10 @@ pub struct RpcTimeseriesRow {
 }
 
 /// Daily summary row.
+/// Note: day is Date - u16 days since epoch (1970-01-01)
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcDailyRow {
-    pub day: time::Date,  // Native Date type from ClickHouse
+    pub day: u16,  // Date → days since 1970-01-01
     pub program: String,
     pub provider: String,
     pub total_requests: u64,

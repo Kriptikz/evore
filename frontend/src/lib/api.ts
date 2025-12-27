@@ -74,7 +74,7 @@ export interface RpcProviderRow {
 }
 
 export interface RpcErrorRow {
-  timestamp: string; // ISO 8601 datetime
+  timestamp: number; // milliseconds since epoch (DateTime64(3))
   program: string;
   provider: string;
   method: string;
@@ -85,7 +85,7 @@ export interface RpcErrorRow {
 }
 
 export interface RpcTimeseriesRow {
-  minute: string; // ISO 8601 datetime
+  minute: number; // seconds since epoch (DateTime)
   total_requests: number;
   success_count: number;
   error_count: number;
@@ -93,7 +93,7 @@ export interface RpcTimeseriesRow {
 }
 
 export interface RpcDailyRow {
-  day: string; // ISO 8601 date
+  day: number; // days since 1970-01-01 (Date)
   program: string;
   provider: string;
   total_requests: number;
