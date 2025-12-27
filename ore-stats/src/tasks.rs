@@ -120,13 +120,15 @@ pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()>
                     }
                 }
             } else if current_slot > last_slot {
-                // Incremental update
+                // Incremental update - only fetches miners changed since last_slot
+                let slot_delta = current_slot - last_slot;
                 match fetch_miners_changed_since(&state, last_slot).await {
                     Ok(count) => {
+                        // Only log if there were changes (reduces noise)
                         if count > 0 {
-                            tracing::debug!(
-                                "Updated {} miners (slot {} -> {})",
-                                count, last_slot, current_slot
+                            tracing::info!(
+                                "Miner cache: +{} changed (slots {} → {}, Δ{})",
+                                count, last_slot, current_slot, slot_delta
                             );
                         }
                         
