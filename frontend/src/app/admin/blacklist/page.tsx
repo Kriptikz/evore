@@ -2,9 +2,11 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
+import { useAdmin } from "@/context/AdminContext";
 import { api, BlacklistEntry } from "@/lib/api";
 
 export default function BlacklistPage() {
+  const { isAuthenticated } = useAdmin();
   const [entries, setEntries] = useState<BlacklistEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -15,6 +17,8 @@ export default function BlacklistPage() {
   const [adding, setAdding] = useState(false);
 
   const fetchData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    
     try {
       setLoading(true);
       const data = await api.getBlacklist();
@@ -25,11 +29,15 @@ export default function BlacklistPage() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      setLoading(false);
+      return;
+    }
     fetchData();
-  }, [fetchData]);
+  }, [fetchData, isAuthenticated]);
 
   const handleAdd = async (e: React.FormEvent) => {
     e.preventDefault();

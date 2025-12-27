@@ -74,7 +74,7 @@ export interface RpcProviderRow {
 }
 
 export interface RpcErrorRow {
-  timestamp: string;
+  timestamp: number; // Unix timestamp in milliseconds
   program: string;
   provider: string;
   method: string;
@@ -85,7 +85,7 @@ export interface RpcErrorRow {
 }
 
 export interface RpcTimeseriesRow {
-  minute: string;
+  minute: number; // Unix timestamp in seconds
   total_requests: number;
   success_count: number;
   error_count: number;
@@ -93,7 +93,7 @@ export interface RpcTimeseriesRow {
 }
 
 export interface RpcDailyRow {
-  day: string;
+  day: number; // Unix timestamp in seconds
   program: string;
   provider: string;
   total_requests: number;

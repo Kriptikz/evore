@@ -3,6 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { MetricCard } from "@/components/admin/MetricCard";
+import { useAdmin } from "@/context/AdminContext";
 import { api, AdminMetrics, RpcProviderRow } from "@/lib/api";
 
 function formatUptime(seconds: number): string {
@@ -30,12 +31,15 @@ function formatNumber(n: number): string {
 }
 
 export default function AdminDashboard() {
+  const { isAuthenticated } = useAdmin();
   const [metrics, setMetrics] = useState<AdminMetrics | null>(null);
   const [providers, setProviders] = useState<RpcProviderRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    
     try {
       const [metricsData, providersData] = await Promise.all([
         api.getAdminMetrics(),
@@ -49,14 +53,19 @@ export default function AdminDashboard() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [isAuthenticated]);
 
   useEffect(() => {
+    if (!isAuthenticated) {
+      setLoading(false);
+      return;
+    }
+    
     fetchData();
     // Refresh every 30 seconds
     const interval = setInterval(fetchData, 30000);
     return () => clearInterval(interval);
-  }, [fetchData]);
+  }, [fetchData, isAuthenticated]);
 
   return (
     <AdminShell title="Dashboard" subtitle="Server overview and quick stats">
