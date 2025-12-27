@@ -220,21 +220,13 @@ function RoundDetail({
   
   // For live rounds, use live data
   const displayRound = isLive ? liveRound : round;
-  
-  if (!displayRound) {
-    return (
-      <div className="flex items-center justify-center h-full text-slate-400">
-        Select a round to view details
-      </div>
-    );
-  }
 
-  const deployed = isLive 
-    ? (displayRound as LiveRound).deployed 
+  const deployed = isLive && liveRound
+    ? liveRound.deployed 
     : new Array(25).fill(0);
   
-  const counts = isLive 
-    ? (displayRound as LiveRound).count 
+  const counts = isLive && liveRound
+    ? liveRound.count 
     : new Array(25).fill(0);
 
   // For historical rounds, calculate deployed from deployments
@@ -264,17 +256,32 @@ function RoundDetail({
     );
   }, [isLive, round, highlightSlot]);
 
-  // Stats
-  const totalDeployed = isLive 
-    ? (displayRound as LiveRound).total_deployed 
-    : visibleDeployments.reduce((sum, d) => sum + d.amount, 0);
+  // Stats - compute after hooks
+  const totalDeployed = useMemo(() => {
+    if (!displayRound) return 0;
+    return isLive 
+      ? (displayRound as LiveRound).total_deployed 
+      : visibleDeployments.reduce((sum, d) => sum + d.amount, 0);
+  }, [displayRound, isLive, visibleDeployments]);
   
-  const uniqueMiners = isLive 
-    ? (displayRound as LiveRound).unique_miners 
-    : new Set(visibleDeployments.map(d => d.miner_pubkey)).size;
+  const uniqueMiners = useMemo(() => {
+    if (!displayRound) return 0;
+    return isLive 
+      ? (displayRound as LiveRound).unique_miners 
+      : new Set(visibleDeployments.map(d => d.miner_pubkey)).size;
+  }, [displayRound, isLive, visibleDeployments]);
 
   const totalWinnings = isLive ? 0 : (round?.total_winnings || 0);
-  const winningSquare = isLive ? undefined : (round?.winning_square);
+  const winningSquare = isLive ? undefined : round?.winning_square;
+
+  // Early return AFTER all hooks
+  if (!displayRound) {
+    return (
+      <div className="flex items-center justify-center h-full text-slate-400">
+        Select a round to view details
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
