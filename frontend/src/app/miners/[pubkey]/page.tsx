@@ -340,7 +340,7 @@ export default function MinerProfilePage() {
               </div>
             </div>
 
-            <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+            <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
               <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6">
                 <div className="text-slate-400 text-sm mb-1">Rounds Played</div>
                 <div className="text-2xl font-bold text-white">{stats.rounds_played.toLocaleString()}</div>
@@ -356,6 +356,12 @@ export default function MinerProfilePage() {
               <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6">
                 <div className="text-slate-400 text-sm mb-1">Avg Deployment</div>
                 <div className="text-2xl font-bold text-white">{formatSol(stats.avg_deployment)}</div>
+              </div>
+              <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6">
+                <div className="text-slate-400 text-sm mb-1">Avg Slots Left</div>
+                <div className="text-2xl font-bold text-cyan-400" title="Average slots remaining when deploying">
+                  {stats.avg_slots_left.toFixed(1)}
+                </div>
               </div>
             </div>
 

@@ -63,22 +63,12 @@ export function Header() {
             <Link 
               href="/autominers" 
               className={`text-sm transition-colors ${
-                isActive('/autominers') 
+                isActive('/autominers') || isActive('/manage')
                   ? 'text-amber-400 font-medium' 
                   : 'text-slate-400 hover:text-white'
               }`}
             >
               AutoMiners
-            </Link>
-            <Link 
-              href="/manage" 
-              className={`text-sm transition-colors ${
-                isActive('/manage') 
-                  ? 'text-amber-400 font-medium' 
-                  : 'text-slate-400 hover:text-white'
-              }`}
-            >
-              Advanced
             </Link>
           </nav>
         </div>

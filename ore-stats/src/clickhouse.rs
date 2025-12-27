@@ -1237,16 +1237,22 @@ impl ClickHouseClient {
     pub async fn get_miner_stats(&self, miner: &str) -> Result<Option<crate::historical_routes::MinerStats>, ClickHouseError> {
         let query = r#"
             SELECT 
-                miner_pubkey,
-                sum(amount) as total_deployed,
-                sum(sol_earned) as total_sol_earned,
-                sum(ore_earned) as total_ore_earned,
-                toInt64(sum(sol_earned)) - toInt64(sum(amount)) as net_sol_change,
-                count(DISTINCT round_id) as rounds_played,
-                countIf(is_winner = 1) as rounds_won
-            FROM deployments
-            WHERE miner_pubkey = ?
-            GROUP BY miner_pubkey
+                d.miner_pubkey as miner_pubkey,
+                sum(d.amount) as total_deployed,
+                sum(d.sol_earned) as total_sol_earned,
+                sum(d.ore_earned) as total_ore_earned,
+                toInt64(sum(d.sol_earned)) - toInt64(sum(d.amount)) as net_sol_change,
+                count(DISTINCT d.round_id) as rounds_played,
+                countIf(d.is_winner = 1) as rounds_won,
+                avg(CASE 
+                    WHEN d.deployed_slot > 0 AND r.end_slot > d.deployed_slot 
+                    THEN r.end_slot - d.deployed_slot 
+                    ELSE 0 
+                END) as avg_slots_left
+            FROM deployments d
+            LEFT JOIN rounds r ON d.round_id = r.round_id
+            WHERE d.miner_pubkey = ?
+            GROUP BY d.miner_pubkey
         "#;
         
         let row: Option<MinerStatsRow> = self.client.query(query)
@@ -1276,6 +1282,7 @@ impl ClickHouseClient {
                 rounds_won: r.rounds_won,
                 win_rate,
                 avg_deployment,
+                avg_slots_left: r.avg_slots_left,
             }
         }))
     }
@@ -1332,6 +1339,86 @@ impl ClickHouseClient {
             .enumerate()
             .map(|(i, r)| crate::historical_routes::LeaderboardEntry {
                 rank: (offset + i as u32 + 1),
+                miner_pubkey: r.miner_pubkey,
+                value: r.value,
+                rounds_played: r.rounds_played,
+            })
+            .collect();
+        
+        Ok((entries, total_count))
+    }
+    
+    /// Get leaderboard with search filter (keeps ranking intact).
+    pub async fn get_leaderboard_filtered(
+        &self,
+        metric: &str,
+        round_range: &str,
+        search: &str,
+        limit: u32,
+    ) -> Result<(Vec<crate::historical_routes::LeaderboardEntry>, u64), ClickHouseError> {
+        // Build round filter
+        let round_filter = match round_range {
+            "last_60" => "round_id >= (SELECT max(round_id) - 60 FROM rounds)".to_string(),
+            "last_100" => "round_id >= (SELECT max(round_id) - 100 FROM rounds)".to_string(),
+            "today" => "deployed_at >= today()".to_string(),
+            _ => "1=1".to_string(), // "all"
+        };
+        
+        // Build ordering based on metric
+        let (value_expr, order) = match metric {
+            "sol_earned" => ("sum(sol_earned)", "DESC"),
+            "ore_earned" => ("sum(ore_earned)", "DESC"),
+            "rounds_won" => ("countIf(is_winner = 1)", "DESC"),
+            _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
+        };
+        
+        // Get total count with search filter
+        let count_query = format!(
+            "SELECT count(DISTINCT miner_pubkey) FROM deployments WHERE {} AND miner_pubkey LIKE '%{}%'",
+            round_filter,
+            search.replace("'", "''") // Simple SQL escape
+        );
+        let total_count: u64 = self.client.query(&count_query).fetch_one().await?;
+        
+        // Use a subquery with row_number to get rankings, then filter
+        let query = format!(
+            r#"SELECT 
+                   miner_pubkey,
+                   value,
+                   rounds_played,
+                   rank
+               FROM (
+                   SELECT 
+                       miner_pubkey,
+                       {} as value,
+                       count(DISTINCT round_id) as rounds_played,
+                       row_number() OVER (ORDER BY {} {}) as rank
+                   FROM deployments
+                   WHERE {}
+                   GROUP BY miner_pubkey
+               )
+               WHERE miner_pubkey LIKE '%{}%'
+               ORDER BY rank
+               LIMIT {}"#,
+            value_expr, value_expr, order, round_filter, 
+            search.replace("'", "''"),
+            limit
+        );
+        
+        #[derive(Debug, Clone, clickhouse::Row, serde::Deserialize)]
+        struct FilteredLeaderboardRow {
+            miner_pubkey: String,
+            value: i64,
+            rounds_played: u64,
+            rank: u64,
+        }
+        
+        let rows: Vec<FilteredLeaderboardRow> = self.client.query(&query).fetch_all().await?;
+        
+        let entries: Vec<crate::historical_routes::LeaderboardEntry> = rows
+            .into_iter()
+            .map(|r| crate::historical_routes::LeaderboardEntry {
+                rank: r.rank as u32,
                 miner_pubkey: r.miner_pubkey,
                 value: r.value,
                 rounds_played: r.rounds_played,
@@ -2107,6 +2194,7 @@ pub struct MinerStatsRow {
     pub net_sol_change: i64,
     pub rounds_played: u64,
     pub rounds_won: u64,
+    pub avg_slots_left: f64,
 }
 
 /// Leaderboard row.

@@ -225,6 +225,18 @@ export default function AutoMinersPage() {
           </div>
         ) : (
           <div className="space-y-6">
+            {/* Page Header with Sub-navigation */}
+            <div className="flex items-center justify-between">
+              <h1 className="text-2xl font-bold text-white">AutoMiners</h1>
+              <Link
+                href="/manage"
+                className="px-3 py-1.5 text-sm bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white rounded-lg transition-colors border border-slate-700 flex items-center gap-2"
+              >
+                <span>⚙️</span>
+                Advanced Management
+              </Link>
+            </div>
+
             {/* Wallet Stats */}
             <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
               <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">

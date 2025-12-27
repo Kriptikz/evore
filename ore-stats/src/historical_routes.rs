@@ -115,6 +115,8 @@ pub struct LeaderboardQuery {
     // Pagination
     pub page: Option<u32>,
     pub limit: Option<u32>,
+    // Search filter (partial pubkey match, preserves ranking)
+    pub search: Option<String>,
 }
 
 /// Treasury history filters
@@ -171,6 +173,8 @@ pub struct MinerStats {
     pub rounds_won: u64,
     pub win_rate: f64,
     pub avg_deployment: u64,
+    /// Average slots left when deploying (0 = deployed at end of round)
+    pub avg_slots_left: f64,
 }
 
 #[derive(Debug, Serialize)]
@@ -524,13 +528,27 @@ async fn get_leaderboard_internal(
     let limit = params.limit.unwrap_or(50).min(100);
     let offset = (page - 1) * limit;
     
-    let (entries, total_count) = state.clickhouse
-        .get_leaderboard(metric, round_range, offset, limit)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to get leaderboard: {}", e);
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string() }))
-        })?;
+    // Check if there's a search filter
+    let (entries, total_count) = if let Some(search) = &params.search {
+        if search.trim().is_empty() {
+            // Empty search, use normal pagination
+            state.clickhouse
+                .get_leaderboard(metric, round_range, offset, limit)
+                .await
+        } else {
+            // Search filter - keeps rankings intact, no pagination offset
+            state.clickhouse
+                .get_leaderboard_filtered(metric, round_range, search.trim(), limit)
+                .await
+        }
+    } else {
+        state.clickhouse
+            .get_leaderboard(metric, round_range, offset, limit)
+            .await
+    }.map_err(|e| {
+        tracing::error!("Failed to get leaderboard: {}", e);
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string() }))
+    })?;
     
     let total_pages = ((total_count as f64) / (limit as f64)).ceil() as u32;
     

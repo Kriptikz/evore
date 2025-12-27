@@ -87,8 +87,12 @@ pub struct RoundSnapshot {
     /// miner_pubkey -> { square_id -> (amount, slot) }
     pub deployments: HashMap<String, HashMap<u8, (u64, u64)>>,
     
-    /// Miner states at round end (for snapshots)
+    /// Miners who deployed THIS round (for deployment tracking)
     pub miners: HashMap<String, Miner>,
+    
+    /// ALL miners from GPA snapshot (for full historical tracking ~1/min)
+    /// Stores complete state of every miner account at round end
+    pub all_miners: HashMap<String, Miner>,
     
     /// Treasury state at round end
     pub treasury: Treasury,

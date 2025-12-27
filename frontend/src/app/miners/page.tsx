@@ -39,8 +39,20 @@ export default function MinersPage() {
   const [metric, setMetric] = useState<MetricType>("net_sol");
   const [range, setRange] = useState<RangeType>("all");
   const [page, setPage] = useState(1);
-  const [searchAddress, setSearchAddress] = useState("");
-  const [searchError, setSearchError] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+
+  // Debounce search input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedSearch(searchQuery);
+      // Reset to page 1 when search changes
+      if (searchQuery !== debouncedSearch) {
+        setPage(1);
+      }
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [searchQuery]);
 
   const fetchLeaderboard = useCallback(async () => {
     setLoading(true);
@@ -49,8 +61,9 @@ export default function MinersPage() {
       const data = await api.getLeaderboard({
         metric,
         roundRange: range,
-        page,
+        page: debouncedSearch ? 1 : page, // No pagination when searching
         limit: 50,
+        search: debouncedSearch || undefined,
       });
       setLeaderboard(data);
     } catch (err) {
@@ -58,7 +71,7 @@ export default function MinersPage() {
     } finally {
       setLoading(false);
     }
-  }, [metric, range, page]);
+  }, [metric, range, page, debouncedSearch]);
 
   useEffect(() => {
     fetchLeaderboard();
@@ -93,18 +106,12 @@ export default function MinersPage() {
   };
 
   const handleGoToMiner = () => {
-    const address = searchAddress.trim();
-    if (!address) {
-      setSearchError("Please enter an address");
-      return;
+    const address = searchQuery.trim();
+    if (!address) return;
+    // If it looks like a full address, go directly to the profile
+    if (address.length >= 32 && address.length <= 44) {
+      router.push(`/miners/${address}`);
     }
-    // Basic validation: Solana addresses are 32-44 chars, base58
-    if (address.length < 32 || address.length > 44) {
-      setSearchError("Invalid address format");
-      return;
-    }
-    setSearchError(null);
-    router.push(`/miners/${address}`);
   };
 
   const handleSearchKeyDown = (e: React.KeyboardEvent) => {
@@ -181,33 +188,45 @@ export default function MinersPage() {
               </div>
             </div>
 
-            {/* Go to Miner */}
+            {/* Search/Filter */}
             <div>
-              <label className="block text-sm text-slate-400 mb-2">Go to Miner</label>
+              <label className="block text-sm text-slate-400 mb-2">
+                Filter Leaderboard
+                {debouncedSearch && <span className="text-amber-400 ml-2">(ranking preserved)</span>}
+              </label>
               <div className="flex gap-2">
                 <input
                   type="text"
-                  value={searchAddress}
-                  onChange={(e) => {
-                    setSearchAddress(e.target.value);
-                    setSearchError(null);
-                  }}
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
                   onKeyDown={handleSearchKeyDown}
-                  placeholder="Enter miner address..."
-                  className={`flex-1 px-4 py-2 bg-slate-900 border rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 ${
-                    searchError ? "border-red-500" : "border-slate-700"
-                  }`}
+                  placeholder="Search by address..."
+                  className="flex-1 px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
                 />
-                <button
-                  onClick={handleGoToMiner}
-                  className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black font-medium rounded-lg transition-colors whitespace-nowrap"
-                >
-                  View Profile
-                </button>
+                {searchQuery.length >= 32 && (
+                  <button
+                    onClick={handleGoToMiner}
+                    className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black font-medium rounded-lg transition-colors whitespace-nowrap"
+                  >
+                    View Profile ↗
+                  </button>
+                )}
+                {searchQuery && (
+                  <button
+                    onClick={() => setSearchQuery("")}
+                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
+                    title="Clear search"
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
-              {searchError && (
-                <p className="text-red-400 text-xs mt-1">{searchError}</p>
-              )}
+              <p className="text-slate-500 text-xs mt-1">
+                {debouncedSearch 
+                  ? `Showing miners matching "${debouncedSearch}" with their original ranking` 
+                  : "Type to filter leaderboard by address (keeps ranking position intact)"
+                }
+              </p>
             </div>
           </div>
         </div>

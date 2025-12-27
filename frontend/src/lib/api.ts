@@ -457,6 +457,7 @@ export interface MinerStats {
   rounds_won: number;
   win_rate: number;
   avg_deployment: number;
+  avg_slots_left: number;
 }
 
 export interface LeaderboardEntry {
@@ -900,12 +901,14 @@ class ApiClient {
     roundRange?: "all" | "last_60" | "last_100" | "today";
     page?: number;
     limit?: number;
+    search?: string;
   }): Promise<OffsetResponse<LeaderboardEntry>> {
     const params = new URLSearchParams();
     if (options?.metric) params.set("metric", options.metric);
     if (options?.roundRange) params.set("round_range", options.roundRange);
     if (options?.page) params.set("page", options.page.toString());
     if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.search) params.set("search", options.search);
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/history/leaderboard${query}`);
   }

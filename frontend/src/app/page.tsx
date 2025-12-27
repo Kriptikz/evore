@@ -14,6 +14,7 @@ interface RoundSummary {
   winning_square: number;
   top_miner: string;
   total_deployed: number;
+  total_vaulted: number;
   total_winnings: number;
   unique_miners: number;
   motherlode: number;
@@ -118,12 +119,16 @@ function SquareGrid({
   winningSquare,
   highlightSlot,
   deployments,
+  highlightedSquares,
+  highlightedAmounts,
 }: {
   deployed: number[];
   counts: number[];
   winningSquare?: number;
   highlightSlot?: number;
   deployments?: DeploymentSummary[];
+  highlightedSquares?: number[];  // Squares to highlight (for selected miner)
+  highlightedAmounts?: number[];  // Amounts for highlighted miner on each square
 }) {
   const visibleDeployed = useMemo(() => {
     if (!highlightSlot || !deployments) return deployed;
@@ -144,6 +149,8 @@ function SquareGrid({
       {visibleDeployed.map((amount, idx) => {
         const opacity = Math.min(0.2 + (amount / maxDeployed) * 0.8, 1);
         const isWinner = winningSquare === idx;
+        const isHighlighted = highlightedSquares?.includes(idx);
+        const highlightAmount = highlightedAmounts?.[idx] || 0;
         
         return (
           <div
@@ -152,20 +159,26 @@ function SquareGrid({
               isWinner 
                 ? "ring-2 ring-amber-400 ring-offset-2 ring-offset-slate-900" 
                 : ""
+            } ${
+              isHighlighted
+                ? "ring-2 ring-cyan-400 ring-offset-1 ring-offset-slate-900"
+                : ""
             }`}
             style={{
-              backgroundColor: isWinner 
-                ? `rgba(245, 158, 11, ${0.3 + opacity * 0.5})` 
-                : `rgba(100, 116, 139, ${opacity * 0.4})`,
+              backgroundColor: isHighlighted
+                ? `rgba(34, 211, 238, 0.4)`
+                : isWinner 
+                  ? `rgba(245, 158, 11, ${0.3 + opacity * 0.5})` 
+                  : `rgba(100, 116, 139, ${opacity * 0.4})`,
             }}
           >
-            <span className={`font-bold text-lg ${isWinner ? "text-amber-300" : "text-white/90"}`}>
+            <span className={`font-bold text-lg ${isHighlighted ? "text-cyan-300" : isWinner ? "text-amber-300" : "text-white/90"}`}>
               {idx + 1}
             </span>
-            <span className={`text-[10px] ${isWinner ? "text-amber-200/80" : "text-white/60"}`}>
-              {formatSol(amount)}
+            <span className={`text-[10px] ${isHighlighted ? "text-cyan-200/80" : isWinner ? "text-amber-200/80" : "text-white/60"}`}>
+              {isHighlighted ? formatSol(highlightAmount) : formatSol(amount)}
             </span>
-            {counts && counts[idx] > 0 && (
+            {counts && counts[idx] > 0 && !isHighlighted && (
               <span className="text-white/40 text-[9px]">
                 {counts[idx]} miners
               </span>
@@ -176,6 +189,136 @@ function SquareGrid({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+// Aggregated miner data for winners/losers tabs
+interface MinerSummary {
+  pubkey: string;
+  totalDeployed: number;
+  squares: { squareId: number; amount: number }[];
+  solEarned: number;
+  oreEarned: number;
+  isTopMiner: boolean;
+}
+
+function WinnersTab({
+  miners,
+  selectedMiner,
+  onSelectMiner,
+}: {
+  miners: MinerSummary[];
+  selectedMiner: string | null;
+  onSelectMiner: (pubkey: string | null) => void;
+}) {
+  return (
+    <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
+        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+          <span className="text-emerald-400">🏆</span>
+          Winners ({miners.length})
+        </h3>
+        <span className="text-sm text-slate-400">
+          Click to highlight on grid
+        </span>
+      </div>
+      <div className="max-h-[400px] overflow-y-auto divide-y divide-slate-700/30">
+        {miners.length === 0 ? (
+          <div className="p-6 text-center text-slate-400">No winners this round</div>
+        ) : (
+          miners.map((miner) => (
+            <div
+              key={miner.pubkey}
+              onClick={() => onSelectMiner(selectedMiner === miner.pubkey ? null : miner.pubkey)}
+              className={`px-4 py-3 cursor-pointer transition-all ${
+                selectedMiner === miner.pubkey
+                  ? "bg-cyan-500/20 border-l-2 border-cyan-400"
+                  : "hover:bg-slate-700/30"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Link
+                    href={`/miners/${miner.pubkey}`}
+                    onClick={(e) => e.stopPropagation()}
+                    className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
+                  >
+                    {truncate(miner.pubkey)}
+                  </Link>
+                  {miner.isTopMiner && <span className="text-amber-400" title="Top Miner">👑</span>}
+                </div>
+                <div className="flex items-center gap-4 text-sm">
+                  <span className="text-emerald-400">+{formatSol(miner.solEarned)} SOL</span>
+                  {miner.oreEarned > 0 && (
+                    <span className="text-purple-400">+{formatOre(miner.oreEarned)} ORE</span>
+                  )}
+                </div>
+              </div>
+              <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
+                <span>Deployed: {formatSol(miner.totalDeployed)}</span>
+                <span>•</span>
+                <span>Squares: {miner.squares.map(s => s.squareId + 1).join(', ')}</span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
+
+function LosersTab({
+  miners,
+  selectedMiner,
+  onSelectMiner,
+}: {
+  miners: MinerSummary[];
+  selectedMiner: string | null;
+  onSelectMiner: (pubkey: string | null) => void;
+}) {
+  return (
+    <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
+        <h3 className="text-lg font-semibold text-white flex items-center gap-2">
+          <span className="text-red-400">❌</span>
+          Losers ({miners.length})
+        </h3>
+        <span className="text-sm text-slate-400">
+          Click to highlight on grid
+        </span>
+      </div>
+      <div className="max-h-[400px] overflow-y-auto divide-y divide-slate-700/30">
+        {miners.length === 0 ? (
+          <div className="p-6 text-center text-slate-400">No losers this round</div>
+        ) : (
+          miners.map((miner) => (
+            <div
+              key={miner.pubkey}
+              onClick={() => onSelectMiner(selectedMiner === miner.pubkey ? null : miner.pubkey)}
+              className={`px-4 py-3 cursor-pointer transition-all ${
+                selectedMiner === miner.pubkey
+                  ? "bg-cyan-500/20 border-l-2 border-cyan-400"
+                  : "hover:bg-slate-700/30"
+              }`}
+            >
+              <div className="flex items-center justify-between">
+                <Link
+                  href={`/miners/${miner.pubkey}`}
+                  onClick={(e) => e.stopPropagation()}
+                  className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
+                >
+                  {truncate(miner.pubkey)}
+                </Link>
+                <span className="text-red-400 text-sm">-{formatSol(miner.totalDeployed)} SOL</span>
+              </div>
+              <div className="flex items-center gap-2 mt-1 text-xs text-slate-400">
+                <span>Deployed on squares: {miner.squares.map(s => s.squareId + 1).join(', ')}</span>
+              </div>
+            </div>
+          ))
+        )}
+      </div>
     </div>
   );
 }
@@ -307,13 +450,16 @@ function RoundsList({
             <span className="bg-slate-700/80 px-1.5 py-0.5 rounded">
               ◼ {round.winning_square + 1}
             </span>
-            <span>{formatSol(round.total_winnings)} SOL</span>
+            <span className="text-emerald-400">{formatSol(round.total_winnings)} won</span>
+            <span className="text-purple-400">{formatSol(round.total_vaulted)} vaulted</span>
           </div>
-          <div className="flex items-center justify-between text-xs text-slate-500 mt-1">
+          <div className="flex items-center gap-2 text-xs text-slate-500 mt-1">
+            <span className="text-white/70">{formatSol(round.total_deployed)} deployed</span>
+            <span>•</span>
             <span>{round.unique_miners} miners</span>
-            <span className="text-slate-600 font-mono text-[10px]">
-              {truncateAddress(round.top_miner)}
-            </span>
+          </div>
+          <div className="text-slate-600 font-mono text-[10px] mt-0.5">
+            👑 {truncateAddress(round.top_miner)}
           </div>
         </button>
       ))}
@@ -621,6 +767,8 @@ function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisp
   );
 }
 
+type DetailTab = "deployments" | "winners" | "losers";
+
 function RoundDetailView({
   round,
   liveRound,
@@ -635,6 +783,8 @@ function RoundDetailView({
   currentSlot: number;
 }) {
   const [sliderValue, setSliderValue] = useState(100);
+  const [activeTab, setActiveTab] = useState<DetailTab>("deployments");
+  const [selectedMiner, setSelectedMiner] = useState<string | null>(null);
   
   const displayRound = isLive ? liveRound : round;
 
@@ -685,7 +835,67 @@ function RoundDetailView({
   }, [displayRound, isLive, visibleDeployments]);
 
   const totalWinnings = isLive ? 0 : (round?.total_winnings || 0);
+  const totalVaulted = isLive ? 0 : (round?.total_vaulted || 0);
   const winningSquare = isLive ? undefined : round?.winning_square;
+
+  // Aggregate miners into winners and losers
+  const { winners, losers } = useMemo((): { winners: MinerSummary[]; losers: MinerSummary[] } => {
+    if (isLive || !round) return { winners: [], losers: [] };
+    
+    const minerMap = new Map<string, MinerSummary>();
+    
+    for (const d of visibleDeployments) {
+      const existing = minerMap.get(d.miner_pubkey);
+      if (existing) {
+        existing.totalDeployed += d.amount;
+        existing.solEarned += d.sol_earned;
+        existing.oreEarned += d.ore_earned;
+        if (!existing.squares.find(s => s.squareId === d.square_id)) {
+          existing.squares.push({ squareId: d.square_id, amount: d.amount });
+        } else {
+          const sq = existing.squares.find(s => s.squareId === d.square_id);
+          if (sq) sq.amount += d.amount;
+        }
+        if (d.is_top_miner) existing.isTopMiner = true;
+      } else {
+        minerMap.set(d.miner_pubkey, {
+          pubkey: d.miner_pubkey,
+          totalDeployed: d.amount,
+          squares: [{ squareId: d.square_id, amount: d.amount }],
+          solEarned: d.sol_earned,
+          oreEarned: d.ore_earned,
+          isTopMiner: d.is_top_miner,
+        });
+      }
+    }
+    
+    const allMiners = Array.from(minerMap.values());
+    const winnersList = allMiners.filter(m => m.squares.some(s => s.squareId === winningSquare));
+    const losersList = allMiners.filter(m => !m.squares.some(s => s.squareId === winningSquare));
+    
+    // Sort by total earned (winners) or total lost (losers)
+    winnersList.sort((a, b) => (b.solEarned + b.oreEarned) - (a.solEarned + a.oreEarned));
+    losersList.sort((a, b) => b.totalDeployed - a.totalDeployed);
+    
+    return { winners: winnersList, losers: losersList };
+  }, [isLive, round, visibleDeployments, winningSquare]);
+
+  // Get highlighted squares and amounts for selected miner
+  const { highlightedSquares, highlightedAmounts } = useMemo(() => {
+    if (!selectedMiner) return { highlightedSquares: undefined, highlightedAmounts: undefined };
+    
+    const allMiners = [...winners, ...losers];
+    const miner = allMiners.find(m => m.pubkey === selectedMiner);
+    if (!miner) return { highlightedSquares: undefined, highlightedAmounts: undefined };
+    
+    const squares = miner.squares.map(s => s.squareId);
+    const amounts = new Array(25).fill(0);
+    miner.squares.forEach(s => {
+      amounts[s.squareId] = s.amount;
+    });
+    
+    return { highlightedSquares: squares, highlightedAmounts: amounts };
+  }, [selectedMiner, winners, losers]);
 
   if (!displayRound) {
     return (
@@ -782,14 +992,31 @@ function RoundDetailView({
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Square Grid */}
         <div className="bg-slate-800/50 rounded-xl p-6 border border-slate-700/50">
-          <h3 className="text-lg font-semibold text-white mb-4">Deployment Grid</h3>
+          <div className="flex items-center justify-between mb-4">
+            <h3 className="text-lg font-semibold text-white">Deployment Grid</h3>
+            {selectedMiner && (
+              <button
+                onClick={() => setSelectedMiner(null)}
+                className="text-xs text-cyan-400 hover:text-cyan-300 transition-colors"
+              >
+                Clear selection
+              </button>
+            )}
+          </div>
           <SquareGrid
             deployed={isLive ? deployed : historicalDeployed.amounts}
             counts={isLive ? counts : historicalDeployed.counts}
             winningSquare={winningSquare}
             highlightSlot={highlightSlot}
             deployments={round?.deployments}
+            highlightedSquares={highlightedSquares}
+            highlightedAmounts={highlightedAmounts}
           />
+          {selectedMiner && (
+            <div className="mt-3 p-2 bg-cyan-500/10 rounded-lg border border-cyan-500/30 text-xs text-cyan-300">
+              Showing: {truncate(selectedMiner)}
+            </div>
+          )}
         </div>
 
         {/* Stats */}
@@ -818,10 +1045,22 @@ function RoundDetailView({
                     <p className="text-xs text-slate-500">Total Winnings</p>
                   </div>
                   <div>
+                    <p className="text-2xl font-bold text-purple-400">
+                      {formatSol(totalVaulted)} SOL
+                    </p>
+                    <p className="text-xs text-slate-500">Total Vaulted</p>
+                  </div>
+                  <div>
                     <p className="text-2xl font-bold text-blue-400">
                       ◼ {winningSquare !== undefined ? winningSquare + 1 : '-'}
                     </p>
                     <p className="text-xs text-slate-500">Winning Square</p>
+                  </div>
+                  <div>
+                    <p className="text-lg font-bold text-emerald-400">
+                      {winners.length}
+                    </p>
+                    <p className="text-xs text-slate-500">Winners</p>
                   </div>
                 </>
               )}
@@ -894,13 +1133,66 @@ function RoundDetailView({
         </div>
       </div>
 
-      {/* Deployments Table */}
+      {/* Tabs for Deployments/Winners/Losers */}
       {!isLive && round && (
-        <DeploymentsGroupedBySlot 
-          deployments={visibleDeployments} 
-          winningSquare={winningSquare}
-          topMiner={round.top_miner}
-        />
+        <>
+          <div className="flex gap-2 border-b border-slate-700/50">
+            <button
+              onClick={() => { setActiveTab("deployments"); setSelectedMiner(null); }}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === "deployments"
+                  ? "text-amber-400 border-b-2 border-amber-400"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Deployments ({visibleDeployments.length})
+            </button>
+            <button
+              onClick={() => { setActiveTab("winners"); setSelectedMiner(null); }}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === "winners"
+                  ? "text-emerald-400 border-b-2 border-emerald-400"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Winners ({winners.length})
+            </button>
+            <button
+              onClick={() => { setActiveTab("losers"); setSelectedMiner(null); }}
+              className={`px-4 py-2 text-sm font-medium transition-colors ${
+                activeTab === "losers"
+                  ? "text-red-400 border-b-2 border-red-400"
+                  : "text-slate-400 hover:text-white"
+              }`}
+            >
+              Losers ({losers.length})
+            </button>
+          </div>
+          
+          {activeTab === "deployments" && (
+            <DeploymentsGroupedBySlot 
+              deployments={visibleDeployments} 
+              winningSquare={winningSquare}
+              topMiner={round.top_miner}
+            />
+          )}
+          
+          {activeTab === "winners" && (
+            <WinnersTab
+              miners={winners}
+              selectedMiner={selectedMiner}
+              onSelectMiner={setSelectedMiner}
+            />
+          )}
+          
+          {activeTab === "losers" && (
+            <LosersTab
+              miners={losers}
+              selectedMiner={selectedMiner}
+              onSelectMiner={setSelectedMiner}
+            />
+          )}
+        </>
       )}
       
       {/* Live Deployments Table */}

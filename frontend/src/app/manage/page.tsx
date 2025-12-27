@@ -195,9 +195,21 @@ export default function ManagePage() {
       <Header />
 
       <main className="max-w-6xl mx-auto px-4 py-8">
-        <div className="mb-6">
-          <h1 className="text-2xl font-bold text-white">Advanced Management</h1>
-          <p className="text-slate-400 text-sm">Full control over managers, deployers, and miners</p>
+        <div className="mb-6 flex items-center justify-between">
+          <div>
+            <div className="flex items-center gap-3 mb-1">
+              <Link 
+                href="/autominers" 
+                className="text-slate-400 hover:text-white transition-colors text-sm flex items-center gap-1"
+              >
+                ← AutoMiners
+              </Link>
+              <span className="text-slate-600">/</span>
+              <span className="text-slate-300 text-sm">Advanced</span>
+            </div>
+            <h1 className="text-2xl font-bold text-white">Advanced Management</h1>
+            <p className="text-slate-400 text-sm">Full control over managers, deployers, and miners</p>
+          </div>
         </div>
 
         {!connected ? (

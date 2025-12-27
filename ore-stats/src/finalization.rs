@@ -45,9 +45,12 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // === STEP 1: IMMEDIATELY take GPA miners snapshot (source of truth) ===
     tracing::info!("Round {} ending - taking GPA miners snapshot IMMEDIATELY...", round_id);
     
-    let gpa_miners = match state.rpc.get_all_miners_gpa().await {
+    // Store ALL miners from GPA (for full historical tracking ~1/min)
+    // and also filter for round deployers for deployment processing
+    let (all_gpa_miners, gpa_miners) = match state.rpc.get_all_miners_gpa().await {
         Ok(miners) => {
             let total_count = miners.len();
+            let all_miners = miners.clone();
             let round_miners: HashMap<String, Miner> = miners
                 .into_iter()
                 .filter(|(_, m)| m.round_id == round_id)
@@ -58,11 +61,11 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
                 round_miners.len(),
                 round_id
             );
-            round_miners
+            (all_miners, round_miners)
         }
         Err(e) => {
             tracing::error!("Failed to get GPA miners snapshot: {}. Will fall back to cache.", e);
-            HashMap::new()
+            (HashMap::new(), HashMap::new())
         }
     };
     
@@ -224,6 +227,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         end_slot,
         deployments: combined_deployments,
         miners: source_miners,
+        all_miners: all_gpa_miners, // Store ALL miners for historical tracking
         treasury,
         round,
         captured_at: std::time::SystemTime::now()
@@ -233,9 +237,10 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     };
     
     tracing::info!(
-        "Captured snapshot for round {}: {} miners (GPA source), {} deployment entries",
+        "Captured snapshot for round {}: {} round miners, {} total miners (full GPA), {} deployment entries",
         round_id,
         snapshot.miners.len(),
+        snapshot.all_miners.len(),
         snapshot.deployments.len()
     );
     
@@ -381,11 +386,11 @@ pub async fn finalize_round(
         round_id,
     };
     
-    // Build miner snapshots
+    // Build miner snapshots - store ALL miners for complete historical tracking (~1/min)
+    // This tracks every miner account state at the end of each round
     let miner_snapshots: Vec<MinerSnapshot> = snapshot
-        .miners
+        .all_miners
         .values()
-        .filter(|m| m.round_id == round_id)
         .map(|m| MinerSnapshot {
             round_id,
             miner_pubkey: m.authority.to_string(),
@@ -488,6 +493,7 @@ async fn wait_for_round_finalization(
     let max_attempts = 30; // 60 seconds total
     let poll_interval = Duration::from_secs(2);
     let mut logged_optimistic = false;
+    let mut last_round_with_slot_hash: Option<Round> = None;
     
     for attempt in 1..=max_attempts {
         match state.rpc.get_round(round_id).await {
@@ -497,6 +503,11 @@ async fn wait_for_round_finalization(
                 
                 // Check if top_miner is populated (not default pubkey)
                 let has_top_miner = round.top_miner != Pubkey::default();
+                
+                // Save the round if it has slot_hash (for fallback)
+                if has_slot_hash {
+                    last_round_with_slot_hash = Some(round.clone());
+                }
                 
                 // Log optimistic calculation as soon as slot_hash is available
                 if has_slot_hash && !logged_optimistic {
@@ -528,10 +539,85 @@ async fn wait_for_round_finalization(
         tokio::time::sleep(poll_interval).await;
     }
     
+    // Timeout! But if we have slot_hash, we can calculate optimistic top_miner
+    if let Some(mut round) = last_round_with_slot_hash {
+        tracing::warn!(
+            "Round {} timed out waiting for on-chain top_miner - using optimistic calculation",
+            round_id
+        );
+        
+        // Calculate optimistic top_miner
+        if let Some(optimistic_top_miner) = calculate_optimistic_top_miner(&round, snapshot) {
+            tracing::info!(
+                "Round {} using optimistic top_miner={}",
+                round_id, optimistic_top_miner
+            );
+            round.top_miner = optimistic_top_miner;
+            return Ok(round);
+        } else {
+            tracing::warn!(
+                "Round {} could not calculate optimistic top_miner, using default",
+                round_id
+            );
+            // Leave as default pubkey - the finalization will handle this
+            return Ok(round);
+        }
+    }
+    
     Err(anyhow::anyhow!(
-        "Timeout waiting for round {} to have slot_hash and top_miner after {} seconds",
+        "Timeout waiting for round {} - no slot_hash available after {} seconds",
         round_id, max_attempts * 2
     ))
+}
+
+/// Calculate the optimistic top_miner from snapshot data
+/// Returns None if calculation fails (no deployments on winning square, etc.)
+fn calculate_optimistic_top_miner(round: &Round, snapshot: &RoundSnapshot) -> Option<Pubkey> {
+    let rng = round.rng()?;
+    let winning_square = round.winning_square(rng);
+    let total_on_winning = round.deployed[winning_square];
+    
+    if total_on_winning == 0 {
+        return None;
+    }
+    
+    // If split reward, there's no single top_miner
+    // The on-chain uses a split address, but we can just return the first miner
+    // The finalization code checks is_split_reward for reward calculation
+    if round.is_split_reward(rng) {
+        // Find any miner on the winning square
+        for (pubkey, miner) in &snapshot.miners {
+            if miner.deployed[winning_square] > 0 {
+                if let Ok(pk) = pubkey.parse::<Pubkey>() {
+                    return Some(pk);
+                }
+            }
+        }
+        return None;
+    }
+    
+    // Weighted random selection using top_miner_sample
+    let sample = round.top_miner_sample(rng, winning_square);
+    
+    // Find the miner whose cumulative range contains the sample
+    for (pubkey, miner) in &snapshot.miners {
+        let deployed = miner.deployed[winning_square];
+        if deployed == 0 {
+            continue;
+        }
+        
+        let cumulative = miner.cumulative[winning_square];
+        let upper_bound = cumulative + deployed;
+        
+        // Check if sample falls in this miner's range [cumulative, upper_bound)
+        if sample >= cumulative && sample < upper_bound {
+            if let Ok(pk) = pubkey.parse::<Pubkey>() {
+                return Some(pk);
+            }
+        }
+    }
+    
+    None
 }
 
 /// Log the optimistic winning square and top miner calculation
