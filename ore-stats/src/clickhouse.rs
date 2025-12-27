@@ -190,7 +190,7 @@ impl ClickHouseClient {
                     total_deployments,
                     unique_miners,
                     source,
-                    toUnixTimestamp(created_at) as created_at
+                    created_at
                 FROM rounds
                 ORDER BY round_id DESC
                 LIMIT ?
@@ -220,7 +220,7 @@ impl ClickHouseClient {
                     total_deployments,
                     unique_miners,
                     source,
-                    toUnixTimestamp(created_at) as created_at
+                    created_at
                 FROM rounds
                 WHERE round_id = ?
             "#)
@@ -934,7 +934,7 @@ impl ClickHouseClient {
         let query = format!(
             r#"SELECT round_id, start_slot, end_slot, winning_square, top_miner, 
                       total_deployed, total_winnings, unique_miners, motherlode, 
-                      motherlode_hit, toUnixTimestamp(created_at) as created_at
+                      motherlode_hit, created_at
                FROM rounds FINAL
                WHERE {} 
                ORDER BY round_id {}
@@ -1231,7 +1231,7 @@ impl ClickHouseClient {
         let query = format!(
             r#"SELECT round_id, balance, motherlode, total_staked, 
                       total_unclaimed, total_refined, 
-                      toUnixTimestamp(created_at) as created_at
+                      created_at
                FROM treasury_snapshots
                WHERE {}
                ORDER BY round_id DESC
