@@ -17,7 +17,7 @@ use axum::{
     Router,
 };
 use tokio::sync::RwLock;
-use tower_http::cors::{CorsLayer, Any};
+// CORS is handled by nginx - no tower_http::cors needed
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 
 mod admin_auth;
@@ -206,15 +206,10 @@ async fn main() -> anyhow::Result<()> {
         .nest("/admin", admin_routes::admin_router(state.clone()))
         
         // State
-        .with_state(state.clone())
+        .with_state(state.clone());
         
-        // CORS
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        );
+        // Note: CORS is handled by nginx at the edge
+        // ore-stats binds to localhost only, so no CORS needed here
     
     // ========== Start Server ==========
     
