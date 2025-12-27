@@ -285,14 +285,40 @@ pub async fn subscribe_to_program_accounts(
                        "connected", "", "", 0, 0, 0);
     tracing::info!("ORE program subscription established");
     
-    // Initialize round ID from state (may have been set by RPC polling)
-    let mut current_round_id: u64 = *state.pending_round_id.read().await;
+    // Wait for RPC polling to initialize pending_round_id (max 30 seconds)
+    // This ensures we don't miss deployments due to race condition at startup
+    let mut current_round_id: u64 = 0;
+    for wait_attempt in 1..=15 {
+        current_round_id = *state.pending_round_id.read().await;
+        if current_round_id > 0 {
+            tracing::info!(
+                "WebSocket deployment tracking initialized with round_id={} (attempt {})",
+                current_round_id, wait_attempt
+            );
+            break;
+        }
+        tracing::debug!(
+            "Waiting for RPC polling to set pending_round_id (attempt {}/15)...",
+            wait_attempt
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+    
+    if current_round_id == 0 {
+        tracing::warn!(
+            "WebSocket starting without valid round_id - deployments won't be tracked until Round update received"
+        );
+    }
     
     // Throughput sampling interval (every 10 seconds)
     let mut throughput_interval = tokio::time::interval(Duration::from_secs(10));
     throughput_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut last_message_count: u64 = 0;
     let throughput_subscription = "program".to_string();
+    
+    // Sync interval (every 5 seconds) - ensures we stay in sync with RPC polling
+    let mut sync_interval = tokio::time::interval(Duration::from_secs(5));
+    sync_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     
     loop {
         tokio::select! {
@@ -392,6 +418,17 @@ pub async fn subscribe_to_program_accounts(
             let mut cache = state.miners_cache.write().await;
             cache.insert(miner.authority.to_string(), *miner);
         }
+            }
+            _ = sync_interval.tick() => {
+                // Sync current_round_id with state (in case RPC polling detected a transition we missed)
+                let state_round_id = *state.pending_round_id.read().await;
+                if state_round_id > current_round_id && state_round_id > 0 {
+                    tracing::info!(
+                        "WebSocket syncing round_id from state: {} -> {}",
+                        current_round_id, state_round_id
+                    );
+                    current_round_id = state_round_id;
+                }
             }
             _ = throughput_interval.tick() => {
                 // Sample throughput every 10 seconds

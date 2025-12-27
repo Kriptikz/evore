@@ -26,6 +26,7 @@ pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
         let mut ticker = interval(Duration::from_secs(2));
         let mut last_round_id: u64 = 0;
         let mut round_ending_detected = false;
+        let mut initialized = false;
         
         loop {
             ticker.tick().await;
@@ -58,6 +59,18 @@ pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
             // Fetch Round and handle transitions
             if let Some(board) = current_board {
                 let current_round_id = board.round_id;
+                
+                // Initialize pending_round_id on first successful fetch
+                // This is critical for WebSocket deployment tracking
+                if !initialized && current_round_id > 0 {
+                    *state.pending_round_id.write().await = current_round_id;
+                    last_round_id = current_round_id;
+                    initialized = true;
+                    tracing::info!(
+                        "Initialized pending_round_id to {} for deployment tracking",
+                        current_round_id
+                    );
+                }
                 
                 match state.rpc.get_round(current_round_id).await {
                     Ok(round) => {

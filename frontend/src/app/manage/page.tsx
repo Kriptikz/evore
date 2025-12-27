@@ -191,23 +191,23 @@ export default function ManagePage() {
   };
 
   return (
-    <div className="min-h-screen bg-zinc-950">
+    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       <Header />
 
       <main className="max-w-6xl mx-auto px-4 py-8">
         <div className="mb-6">
-          <h1 className="text-2xl font-bold">Advanced Management</h1>
-          <p className="text-zinc-400 text-sm">Full control over managers, deployers, and miners</p>
+          <h1 className="text-2xl font-bold text-white">Advanced Management</h1>
+          <p className="text-slate-400 text-sm">Full control over managers, deployers, and miners</p>
         </div>
 
         {!connected ? (
           <div className="text-center py-20">
-            <h2 className="text-2xl font-bold mb-4">Welcome to Evore</h2>
-            <p className="text-zinc-400 mb-8">
+            <h2 className="text-2xl font-bold mb-4 text-white">Welcome to Evore</h2>
+            <p className="text-slate-400 mb-8">
               Connect your wallet to manage autodeploys
             </p>
             <div className="inline-block">
-              <p className="text-sm text-zinc-500">
+              <p className="text-sm text-slate-500">
                 Click the button in the header to connect
               </p>
             </div>
@@ -216,17 +216,17 @@ export default function ManagePage() {
           <div className="space-y-8">
             {/* Stats Overview */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-                <p className="text-sm text-zinc-400">Manager Accounts</p>
-                <p className="text-2xl font-bold">{managers.length}</p>
+              <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
+                <p className="text-sm text-slate-400">Manager Accounts</p>
+                <p className="text-2xl font-bold text-white">{managers.length}</p>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-                <p className="text-sm text-zinc-400">Active Deployers</p>
-                <p className="text-2xl font-bold">{deployers.length}</p>
+              <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
+                <p className="text-sm text-slate-400">Active Deployers</p>
+                <p className="text-2xl font-bold text-white">{deployers.length}</p>
               </div>
-              <div className="bg-zinc-900 border border-zinc-800 rounded-lg p-4">
-                <p className="text-sm text-zinc-400">Total Autodeploy Balance</p>
-                <p className="text-2xl font-bold text-yellow-400">
+              <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
+                <p className="text-sm text-slate-400">Total Autodeploy Balance</p>
+                <p className="text-2xl font-bold text-amber-400">
                   {(
                     Number(
                       deployers.reduce((sum, d) => sum + d.autodeployBalance, BigInt(0))
@@ -239,14 +239,14 @@ export default function ManagePage() {
 
             {/* Loading State */}
             {loading && (
-              <div className="text-center py-8">
-                <p className="text-zinc-400">Loading...</p>
+              <div className="flex items-center justify-center py-8">
+                <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
               </div>
             )}
 
             {/* Manager Cards */}
             <div className="space-y-4">
-              <h2 className="text-xl font-semibold">Your Managers</h2>
+              <h2 className="text-xl font-semibold text-white">Your Managers</h2>
               
               {/* Bulk Action Bar */}
               {sortedManagers.length > 0 && (
@@ -325,26 +325,26 @@ export default function ManagePage() {
             </div>
 
             {/* Info Section */}
-            <div className="bg-zinc-900/50 border border-zinc-800 rounded-lg p-6">
-              <h3 className="text-lg font-semibold mb-4">How Autodeploy Works</h3>
+            <div className="bg-slate-800/30 border border-slate-700/50 rounded-xl p-6">
+              <h3 className="text-lg font-semibold mb-4 text-white">How Autodeploy Works</h3>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6 text-sm">
                 <div>
-                  <h4 className="font-medium text-purple-400 mb-2">1. Create Manager</h4>
-                  <p className="text-zinc-400">
+                  <h4 className="font-medium text-amber-400 mb-2">1. Create Manager</h4>
+                  <p className="text-slate-400">
                     A manager account holds your authority over managed miners. 
                     Create one to get started.
                   </p>
                 </div>
                 <div>
-                  <h4 className="font-medium text-purple-400 mb-2">2. Set Up Deployer</h4>
-                  <p className="text-zinc-400">
+                  <h4 className="font-medium text-amber-400 mb-2">2. Set Up Deployer</h4>
+                  <p className="text-slate-400">
                     Configure a deployer with a deploy authority (can be a crank service) 
                     and fee percentage.
                   </p>
                 </div>
                 <div>
-                  <h4 className="font-medium text-purple-400 mb-2">3. Fund & Deploy</h4>
-                  <p className="text-zinc-400">
+                  <h4 className="font-medium text-amber-400 mb-2">3. Fund & Deploy</h4>
+                  <p className="text-slate-400">
                     Deposit SOL to your autodeploy balance. The crank will automatically 
                     deploy when configured.
                   </p>

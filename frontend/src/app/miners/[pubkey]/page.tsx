@@ -117,11 +117,14 @@ export default function MinerProfilePage() {
             <h1 className="text-xl text-white font-mono">{truncateAddress(pubkey)}</h1>
           </div>
           <nav className="flex gap-4">
-            <Link href="/rounds" className="text-slate-400 hover:text-white transition-colors">
+            <Link href="/" className="text-slate-400 hover:text-white transition-colors">
               Rounds
             </Link>
             <Link href="/miners" className="text-amber-400 font-medium">
               Miners
+            </Link>
+            <Link href="/autominers" className="text-slate-400 hover:text-white transition-colors">
+              AutoMiners
             </Link>
           </nav>
         </div>
