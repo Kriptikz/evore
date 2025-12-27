@@ -137,6 +137,87 @@ impl ClickHouseClient {
         Ok(result)
     }
     
+    /// Get recent rounds (for listing).
+    pub async fn get_recent_rounds(&self, limit: u32) -> Result<Vec<RoundRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    round_id,
+                    start_slot,
+                    end_slot,
+                    winning_square,
+                    top_miner,
+                    top_miner_reward,
+                    total_deployed,
+                    total_vaulted,
+                    total_winnings,
+                    motherlode,
+                    motherlode_hit,
+                    total_deployments,
+                    unique_miners,
+                    source
+                FROM rounds
+                ORDER BY round_id DESC
+                LIMIT ?
+            "#)
+            .bind(limit)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get a single round by ID.
+    pub async fn get_round_by_id(&self, round_id: u64) -> Result<Option<RoundRow>, ClickHouseError> {
+        let result = self.client
+            .query(r#"
+                SELECT 
+                    round_id,
+                    start_slot,
+                    end_slot,
+                    winning_square,
+                    top_miner,
+                    top_miner_reward,
+                    total_deployed,
+                    total_vaulted,
+                    total_winnings,
+                    motherlode,
+                    motherlode_hit,
+                    total_deployments,
+                    unique_miners,
+                    source
+                FROM rounds
+                WHERE round_id = ?
+            "#)
+            .bind(round_id)
+            .fetch_optional()
+            .await?;
+        Ok(result)
+    }
+    
+    /// Get deployments for a round.
+    pub async fn get_deployments_for_round(&self, round_id: u64) -> Result<Vec<DeploymentRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT 
+                    round_id,
+                    miner_pubkey,
+                    square_id,
+                    amount,
+                    deployed_slot,
+                    sol_earned,
+                    ore_earned,
+                    is_winner,
+                    is_top_miner
+                FROM deployments
+                WHERE round_id = ?
+                ORDER BY amount DESC
+            "#)
+            .bind(round_id)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
     // ========== Deployments ==========
     
     /// Create an inserter for deployments.
@@ -902,6 +983,39 @@ pub struct DeploymentInsert {
     pub deployed_slot: u64,  // 0 if unknown from websocket mismatch
     pub ore_earned: u64,
     pub sol_earned: u64,
+    pub is_winner: u8,
+    pub is_top_miner: u8,
+}
+
+/// Round row for queries.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RoundRow {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub winning_square: u8,
+    pub top_miner: String,
+    pub top_miner_reward: u64,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub motherlode: u64,
+    pub motherlode_hit: u8,
+    pub total_deployments: u32,
+    pub unique_miners: u32,
+    pub source: String,
+}
+
+/// Deployment row for queries.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct DeploymentRow {
+    pub round_id: u64,
+    pub miner_pubkey: String,
+    pub square_id: u8,
+    pub amount: u64,
+    pub deployed_slot: u64,
+    pub sol_earned: u64,
+    pub ore_earned: u64,
     pub is_winner: u8,
     pub is_top_miner: u8,
 }

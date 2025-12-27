@@ -975,6 +975,14 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/requests/ip-activity", get(get_ip_activity))
         // Database sizes
         .route("/database/sizes", get(get_database_sizes))
+        // Backfill workflow
+        .route("/backfill/rounds", post(crate::backfill::backfill_rounds))
+        .route("/rounds/pending", get(crate::backfill::get_pending_rounds))
+        .route("/fetch-txns/{round_id}", post(crate::backfill::fetch_round_transactions))
+        .route("/reconstruct/{round_id}", post(crate::backfill::reconstruct_round))
+        .route("/verify/{round_id}", get(crate::backfill::get_round_for_verification))
+        .route("/verify/{round_id}", post(crate::backfill::verify_round))
+        .route("/finalize/{round_id}", post(crate::backfill::finalize_backfill_round))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth::require_admin_auth,

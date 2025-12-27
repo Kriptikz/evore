@@ -167,6 +167,54 @@ export interface WsThroughputSummary {
   avg_process_time_us: number;
 }
 
+// Backfill workflow types
+export interface BackfillRoundsResponse {
+  rounds_fetched: number;
+  rounds_skipped: number;
+  stopped_at_round: number | null;
+}
+
+export interface RoundStatus {
+  round_id: number;
+  meta_fetched: boolean;
+  transactions_fetched: boolean;
+  reconstructed: boolean;
+  verified: boolean;
+  finalized: boolean;
+  transaction_count: number;
+  deployment_count: number;
+  verification_notes: string;
+}
+
+export interface PendingRoundsResponse {
+  pending: RoundStatus[];
+  total: number;
+}
+
+export interface FetchTxnsResponse {
+  round_id: number;
+  transactions_fetched: number;
+  status: string;
+}
+
+export interface ReconstructResponse {
+  round_id: number;
+  deployments_reconstructed: number;
+  status: string;
+}
+
+export interface VerifyResponse {
+  round_id: number;
+  verified: boolean;
+  message: string;
+}
+
+export interface FinalizeResponse {
+  round_id: number;
+  deployments_stored: number;
+  message: string;
+}
+
 // Server metrics types
 export interface ServerMetricsRow {
   timestamp: number; // seconds since epoch
@@ -574,6 +622,40 @@ class ApiClient {
 
   async getDatabaseSizes(): Promise<DatabaseSizesResponse> {
     return this.request("GET", "/admin/database/sizes", { requireAuth: true });
+  }
+
+  // ========== Backfill Workflow ==========
+
+  async backfillRounds(stopAtRound?: number, maxPages?: number): Promise<BackfillRoundsResponse> {
+    const params = new URLSearchParams();
+    if (stopAtRound) params.set("stop_at_round", stopAtRound.toString());
+    if (maxPages) params.set("max_pages", maxPages.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("POST", `/admin/backfill/rounds${query}`, { requireAuth: true });
+  }
+
+  async getPendingRounds(): Promise<PendingRoundsResponse> {
+    return this.request("GET", "/admin/rounds/pending", { requireAuth: true });
+  }
+
+  async fetchRoundTransactions(roundId: number): Promise<FetchTxnsResponse> {
+    return this.request("POST", `/admin/fetch-txns/${roundId}`, { requireAuth: true });
+  }
+
+  async reconstructRound(roundId: number): Promise<ReconstructResponse> {
+    return this.request("POST", `/admin/reconstruct/${roundId}`, { requireAuth: true });
+  }
+
+  async getRoundForVerification(roundId: number): Promise<RoundStatus> {
+    return this.request("GET", `/admin/verify/${roundId}`, { requireAuth: true });
+  }
+
+  async verifyRound(roundId: number, notes?: string): Promise<VerifyResponse> {
+    return this.request("POST", `/admin/verify/${roundId}`, { requireAuth: true, body: { notes } });
+  }
+
+  async finalizeRound(roundId: number): Promise<FinalizeResponse> {
+    return this.request("POST", `/admin/finalize/${roundId}`, { requireAuth: true });
   }
 }
 

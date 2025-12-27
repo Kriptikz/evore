@@ -38,6 +38,8 @@ mod sse;
 mod tasks;
 mod middleware;
 mod websocket;
+mod finalization;
+mod backfill;
 
 // Keep these for reference but don't compile:
 // - main_old.rs
@@ -200,6 +202,10 @@ async fn main() -> anyhow::Result<()> {
         
         // Metrics
         .route("/metrics", get(routes::get_metrics))
+        
+        // Historical rounds (from ClickHouse)
+        .route("/rounds", get(routes::get_rounds))
+        .route("/rounds/{round_id}", get(routes::get_round_by_id))
         
         // SSE streams
         .route("/sse/rounds", get(sse::sse_rounds))

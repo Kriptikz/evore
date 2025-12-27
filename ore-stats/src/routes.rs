@@ -394,3 +394,139 @@ pub async fn health() -> &'static str {
     "OK"
 }
 
+// ============================================================================
+// Historical Data Endpoints
+// ============================================================================
+
+/// GET /rounds - Recent historical rounds
+pub async fn get_rounds(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<PaginationParams>,
+) -> Result<Json<RoundsListResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = params.per_page.unwrap_or(50).min(100) as u32;
+    
+    match state.clickhouse.get_recent_rounds(limit).await {
+        Ok(rounds) => Ok(Json(RoundsListResponse {
+            rounds: rounds.into_iter().map(|r| RoundSummary {
+                round_id: r.round_id,
+                start_slot: r.start_slot,
+                end_slot: r.end_slot,
+                winning_square: r.winning_square,
+                top_miner: r.top_miner,
+                total_deployed: r.total_deployed,
+                total_winnings: r.total_winnings,
+                unique_miners: r.unique_miners,
+                motherlode: r.motherlode,
+                motherlode_hit: r.motherlode_hit > 0,
+            }).collect(),
+        })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Database error: {}", e) }),
+        )),
+    }
+}
+
+/// GET /rounds/{round_id} - Single historical round with full details
+pub async fn get_round_by_id(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+) -> Result<Json<RoundDetailResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get round
+    let round = match state.clickhouse.get_round_by_id(round_id).await {
+        Ok(Some(r)) => r,
+        Ok(None) => return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse { error: "Round not found".to_string() }),
+        )),
+        Err(e) => return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Database error: {}", e) }),
+        )),
+    };
+    
+    // Get deployments
+    let deployments = match state.clickhouse.get_deployments_for_round(round_id).await {
+        Ok(d) => d,
+        Err(e) => return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: format!("Database error: {}", e) }),
+        )),
+    };
+    
+    Ok(Json(RoundDetailResponse {
+        round_id: round.round_id,
+        start_slot: round.start_slot,
+        end_slot: round.end_slot,
+        winning_square: round.winning_square,
+        top_miner: round.top_miner,
+        top_miner_reward: round.top_miner_reward,
+        total_deployed: round.total_deployed,
+        total_vaulted: round.total_vaulted,
+        total_winnings: round.total_winnings,
+        unique_miners: round.unique_miners,
+        motherlode: round.motherlode,
+        motherlode_hit: round.motherlode_hit > 0,
+        source: round.source,
+        deployments: deployments.into_iter().map(|d| DeploymentSummary {
+            miner_pubkey: d.miner_pubkey,
+            square_id: d.square_id,
+            amount: d.amount,
+            deployed_slot: d.deployed_slot,
+            sol_earned: d.sol_earned,
+            ore_earned: d.ore_earned,
+            is_winner: d.is_winner > 0,
+            is_top_miner: d.is_top_miner > 0,
+        }).collect(),
+    }))
+}
+
+#[derive(Serialize)]
+pub struct RoundsListResponse {
+    pub rounds: Vec<RoundSummary>,
+}
+
+#[derive(Serialize)]
+pub struct RoundSummary {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub winning_square: u8,
+    pub top_miner: String,
+    pub total_deployed: u64,
+    pub total_winnings: u64,
+    pub unique_miners: u32,
+    pub motherlode: u64,
+    pub motherlode_hit: bool,
+}
+
+#[derive(Serialize)]
+pub struct RoundDetailResponse {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub winning_square: u8,
+    pub top_miner: String,
+    pub top_miner_reward: u64,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub unique_miners: u32,
+    pub motherlode: u64,
+    pub motherlode_hit: bool,
+    pub source: String,
+    pub deployments: Vec<DeploymentSummary>,
+}
+
+#[derive(Serialize)]
+pub struct DeploymentSummary {
+    pub miner_pubkey: String,
+    pub square_id: u8,
+    pub amount: u64,
+    pub deployed_slot: u64,
+    pub sol_earned: u64,
+    pub ore_earned: u64,
+    pub is_winner: bool,
+    pub is_top_miner: bool,
+}
+

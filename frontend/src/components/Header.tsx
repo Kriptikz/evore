@@ -22,6 +22,12 @@ export function Header() {
               AutoMiners
             </Link>
             <Link 
+              href="/rounds" 
+              className={`text-sm ${pathname === '/rounds' ? 'text-white' : 'text-zinc-400 hover:text-zinc-300'}`}
+            >
+              Rounds
+            </Link>
+            <Link 
               href="/manage" 
               className={`text-sm ${pathname === '/manage' ? 'text-white' : 'text-zinc-400 hover:text-zinc-300'}`}
             >

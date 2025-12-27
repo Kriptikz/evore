@@ -2,7 +2,7 @@
 //!
 //! - RPC polling (every 2 seconds)
 //! - Miners polling (every 30 seconds with incremental updates)
-//! - Round transition detection
+//! - Round transition detection and finalization
 //! - Metrics snapshots
 
 use std::collections::BTreeMap;
@@ -14,40 +14,34 @@ use steel::Pubkey;
 use tokio::time::interval;
 
 use crate::app_state::{AppState, LiveRound};
+use crate::finalization::{capture_round_snapshot, finalize_round};
 use crate::helius_api::ProgramAccountV2;
 
 /// Spawn the RPC polling task
 /// Updates Board, Treasury, Round, and Miners caches every 2 seconds
+/// Also handles round transition detection, snapshot capture, and finalization
 pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(2));
         let mut last_round_id: u64 = 0;
+        let mut round_ending_detected = false;
         
         loop {
             ticker.tick().await;
             
             // Fetch Board
-            match state.rpc.get_board().await {
+            let board_result = state.rpc.get_board().await;
+            let current_board = match board_result {
                 Ok(board) => {
-                    let current_round_id = board.round_id;
-                    
-                    // Detect round transition
-                    if last_round_id != 0 && current_round_id != last_round_id {
-                        tracing::info!(
-                            "Round transition detected: {} -> {}",
-                            last_round_id, current_round_id
-                        );
-                        // TODO: Trigger round finalization for last_round_id
-                    }
-                    last_round_id = current_round_id;
-                    
                     let mut cache = state.board_cache.write().await;
                     *cache = Some(board);
+                    Some(board)
                 }
                 Err(e) => {
                     tracing::warn!("Failed to fetch board: {}", e);
+                    None
                 }
-            }
+            };
             
             // Fetch Treasury
             match state.rpc.get_treasury().await {
@@ -60,23 +54,95 @@ pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
                 }
             }
             
-            // Fetch Round (if we have board)
-            if let Some(board) = state.board_cache.read().await.as_ref() {
-                let round_id = board.round_id;
-                match state.rpc.get_round(round_id).await {
+            // Fetch Round and handle transitions
+            if let Some(board) = current_board {
+                let current_round_id = board.round_id;
+                
+                match state.rpc.get_round(current_round_id).await {
                     Ok(round) => {
                         let current_slot = *state.slot_cache.read().await;
-                        let live_round = LiveRound::from_board_and_round(board, &round);
+                        let live_round = LiveRound::from_board_and_round(&board, &round);
                         
                         let mut cache = state.round_cache.write().await;
                         let mut live = live_round;
                         live.update_slots_remaining(current_slot);
+                        
+                        // Check if round is ending (slots_remaining <= 0)
+                        if live.slots_remaining <= 0 && !round_ending_detected {
+                            tracing::info!(
+                                "Round {} ending detected (slots_remaining={}), capturing snapshot...",
+                                current_round_id, live.slots_remaining
+                            );
+                            round_ending_detected = true;
+                            
+                            // Capture snapshot before round resets
+                            drop(cache); // Release lock before async operation
+                            if let Some(snapshot) = capture_round_snapshot(&state).await {
+                                let mut snapshot_cache = state.round_snapshot.write().await;
+                                *snapshot_cache = Some(snapshot);
+                                tracing::info!("Round {} snapshot captured", current_round_id);
+                            } else {
+                                tracing::warn!("Failed to capture snapshot for round {}", current_round_id);
+                            }
+                            
+                            // Re-acquire cache lock
+                            cache = state.round_cache.write().await;
+                        }
+                        
                         *cache = Some(live);
                     }
                     Err(e) => {
-                        tracing::warn!("Failed to fetch round {}: {}", round_id, e);
+                        tracing::warn!("Failed to fetch round {}: {}", current_round_id, e);
                     }
                 }
+                
+                // Detect round transition (new round started)
+                if last_round_id != 0 && current_round_id != last_round_id {
+                    tracing::info!(
+                        "Round transition detected: {} -> {}",
+                        last_round_id, current_round_id
+                    );
+                    
+                    // Finalize the previous round using captured snapshot
+                    let snapshot_opt = {
+                        let mut snapshot_cache = state.round_snapshot.write().await;
+                        snapshot_cache.take()
+                    };
+                    
+                    if let Some(snapshot) = snapshot_opt {
+                        if snapshot.round_id == last_round_id {
+                            // Spawn finalization in background (don't block polling)
+                            let state_clone = state.clone();
+                            tokio::spawn(async move {
+                                // Wait a moment for slot_hash to be populated
+                                tokio::time::sleep(Duration::from_secs(2)).await;
+                                
+                                match finalize_round(&state_clone, snapshot).await {
+                                    Ok(()) => {
+                                        tracing::info!("Round {} finalized successfully", last_round_id);
+                                    }
+                                    Err(e) => {
+                                        tracing::error!("Failed to finalize round {}: {}", last_round_id, e);
+                                    }
+                                }
+                            });
+                        } else {
+                            tracing::warn!(
+                                "Snapshot round_id {} doesn't match expected {}",
+                                snapshot.round_id, last_round_id
+                            );
+                        }
+                    } else {
+                        tracing::warn!("No snapshot available for round {} finalization", last_round_id);
+                    }
+                    
+                    // Clear deployment tracking for new round
+                    state.pending_deployments.write().await.clear();
+                    *state.pending_round_id.write().await = current_round_id;
+                    round_ending_detected = false;
+                }
+                
+                last_round_id = current_round_id;
             }
             
             // Note: Miners are fetched by spawn_miners_polling() separately

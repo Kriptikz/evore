@@ -59,6 +59,34 @@ pub struct AppState {
     // Cleared on new round, used during round finalization
     pub pending_deployments: Arc<RwLock<HashMap<String, HashMap<u8, (u64, u64)>>>>,
     pub pending_round_id: Arc<RwLock<u64>>,
+    
+    // Round finalization: Snapshot captured when round ends, used after reset
+    pub round_snapshot: Arc<RwLock<Option<RoundSnapshot>>>,
+}
+
+/// Snapshot of round state captured when round ends (slots_left <= 0)
+/// Used for finalization after the round resets
+#[derive(Debug, Clone)]
+pub struct RoundSnapshot {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    
+    /// Per-miner, per-square deployments with slot timing
+    /// miner_pubkey -> { square_id -> (amount, slot) }
+    pub deployments: HashMap<String, HashMap<u8, (u64, u64)>>,
+    
+    /// Miner states at round end (for snapshots)
+    pub miners: HashMap<String, Miner>,
+    
+    /// Treasury state at round end
+    pub treasury: Treasury,
+    
+    /// Round state (without slot_hash - that comes after reset)
+    pub round: Round,
+    
+    /// Timestamp when snapshot was captured
+    pub captured_at: u64,
 }
 
 impl AppState {
@@ -91,6 +119,7 @@ impl AppState {
             deployment_broadcast: deployment_tx,
             pending_deployments: Arc::new(RwLock::new(HashMap::new())),
             pending_round_id: Arc::new(RwLock::new(0)),
+            round_snapshot: Arc::new(RwLock::new(None)),
         }
     }
     
