@@ -104,6 +104,20 @@ pub struct DeleteQuery {
     pub delete_deployments: Option<bool>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct BulkDeleteRequest {
+    pub round_ids: Vec<u64>,
+    pub delete_rounds: bool,
+    pub delete_deployments: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkDeleteResponse {
+    pub deleted_count: u32,
+    pub failed_count: u32,
+    pub message: String,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RoundDataStatus {
     pub round_id: u64,
@@ -450,6 +464,57 @@ pub async fn delete_round_data(
         message: format!(
             "Deleted: round={}, deployments={}",
             round_deleted, deployments_deleted
+        ),
+    }))
+}
+
+/// POST /admin/rounds/bulk-delete
+/// Delete multiple rounds and/or their deployments
+pub async fn bulk_delete_rounds(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkDeleteRequest>,
+) -> Result<Json<BulkDeleteResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let mut deleted_count = 0u32;
+    let mut failed_count = 0u32;
+    
+    tracing::info!(
+        "Bulk deleting {} rounds: rounds={}, deployments={}",
+        req.round_ids.len(), req.delete_rounds, req.delete_deployments
+    );
+    
+    for round_id in &req.round_ids {
+        let mut success = true;
+        
+        if req.delete_deployments {
+            if let Err(e) = state.clickhouse.delete_deployments_for_round(*round_id).await {
+                tracing::error!("Failed to delete deployments for round {}: {}", round_id, e);
+                success = false;
+            }
+        }
+        
+        if req.delete_rounds {
+            if let Err(e) = state.clickhouse.delete_round(*round_id).await {
+                tracing::error!("Failed to delete round {}: {}", round_id, e);
+                success = false;
+            }
+        }
+        
+        // Reset PostgreSQL status
+        reset_round_reconstruction_status(&state.postgres, *round_id, req.delete_rounds).await;
+        
+        if success {
+            deleted_count += 1;
+        } else {
+            failed_count += 1;
+        }
+    }
+    
+    Ok(Json(BulkDeleteResponse {
+        deleted_count,
+        failed_count,
+        message: format!(
+            "Deleted {} rounds, {} failed",
+            deleted_count, failed_count
         ),
     }))
 }

@@ -242,6 +242,12 @@ export interface DeleteResponse {
   message: string;
 }
 
+export interface BulkDeleteResponse {
+  deleted_count: number;
+  failed_count: number;
+  message: string;
+}
+
 export interface RoundDataStatus {
   round_id: number;
   round_exists: boolean;
@@ -707,6 +713,17 @@ class ApiClient {
     params.set("limit", limit.toString());
     if (missingDeploymentsOnly) params.set("missing_deployments_only", "true");
     return this.request("GET", `/admin/rounds/data?${params.toString()}`, { requireAuth: true });
+  }
+
+  async bulkDeleteRounds(roundIds: number[], deleteRounds: boolean, deleteDeployments: boolean): Promise<BulkDeleteResponse> {
+    return this.request("POST", "/admin/rounds/bulk-delete", {
+      requireAuth: true,
+      body: {
+        round_ids: roundIds,
+        delete_rounds: deleteRounds,
+        delete_deployments: deleteDeployments,
+      },
+    });
   }
 }
 

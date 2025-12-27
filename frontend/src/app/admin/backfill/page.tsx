@@ -102,19 +102,28 @@ const truncate = (s: string) => s.length > 12 ? `${s.slice(0, 6)}...${s.slice(-4
 
 function RoundDataRow({
   round,
-  onDelete,
+  selected,
+  onSelect,
   loading,
 }: {
   round: RoundWithData;
-  onDelete: (roundId: number, deleteRound: boolean, deleteDeployments: boolean) => void;
-  loading: number | null;
+  selected: boolean;
+  onSelect: (roundId: number, selected: boolean) => void;
+  loading: boolean;
 }) {
-  const [showConfirm, setShowConfirm] = useState(false);
-  const isLoading = loading === round.round_id;
   const hasMissingDeployments = round.deployment_count === 0;
 
   return (
-    <tr className={`border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30 ${hasMissingDeployments ? 'bg-red-500/5' : ''}`}>
+    <tr className={`border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30 ${hasMissingDeployments ? 'bg-red-500/5' : ''} ${selected ? 'bg-blue-500/10' : ''}`}>
+      <td className="px-4 py-3">
+        <input
+          type="checkbox"
+          checked={selected}
+          onChange={(e) => onSelect(round.round_id, e.target.checked)}
+          disabled={loading}
+          className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500"
+        />
+      </td>
       <td className="px-4 py-3 text-white font-mono">{round.round_id}</td>
       <td className="px-4 py-3 text-slate-400 text-sm">◼ {round.winning_square}</td>
       <td className="px-4 py-3 text-slate-400 text-sm font-mono">{truncate(round.top_miner)}</td>
@@ -137,50 +146,6 @@ function RoundDataRow({
         }`}>
           {round.source}
         </span>
-      </td>
-      <td className="px-4 py-3">
-        {showConfirm ? (
-          <div className="flex gap-2">
-            <button
-              onClick={() => {
-                onDelete(round.round_id, false, true);
-                setShowConfirm(false);
-              }}
-              disabled={isLoading}
-              className="px-2 py-1 text-xs bg-orange-500 hover:bg-orange-600 text-white rounded"
-            >
-              Deploys
-            </button>
-            <button
-              onClick={() => {
-                onDelete(round.round_id, true, true);
-                setShowConfirm(false);
-              }}
-              disabled={isLoading}
-              className="px-2 py-1 text-xs bg-red-500 hover:bg-red-600 text-white rounded"
-            >
-              All
-            </button>
-            <button
-              onClick={() => setShowConfirm(false)}
-              className="px-2 py-1 text-xs bg-slate-600 hover:bg-slate-500 text-white rounded"
-            >
-              Cancel
-            </button>
-          </div>
-        ) : (
-          <button
-            onClick={() => setShowConfirm(true)}
-            disabled={isLoading}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-              isLoading
-                ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                : "bg-red-500/20 hover:bg-red-500/30 text-red-400"
-            }`}
-          >
-            {isLoading ? "..." : "Delete"}
-          </button>
-        )}
       </td>
     </tr>
   );
@@ -206,6 +171,8 @@ export default function BackfillPage() {
   const [roundsData, setRoundsData] = useState<RoundWithData[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [showMissingOnly, setShowMissingOnly] = useState(false);
+  const [selectedRounds, setSelectedRounds] = useState<Set<number>>(new Set());
+  const [bulkDeleting, setBulkDeleting] = useState(false);
 
   const fetchPendingRounds = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -305,19 +272,50 @@ export default function BackfillPage() {
     }
   };
 
-  const handleDelete = async (roundId: number, deleteRound: boolean, deleteDeployments: boolean) => {
-    setActionLoading(roundId);
+  const handleSelectRound = (roundId: number, selected: boolean) => {
+    setSelectedRounds(prev => {
+      const next = new Set(prev);
+      if (selected) {
+        next.add(roundId);
+      } else {
+        next.delete(roundId);
+      }
+      return next;
+    });
+  };
+
+  const handleSelectAll = () => {
+    setSelectedRounds(new Set(roundsData.map(r => r.round_id)));
+  };
+
+  const handleDeselectAll = () => {
+    setSelectedRounds(new Set());
+  };
+
+  const handleSelectMissing = () => {
+    setSelectedRounds(new Set(roundsData.filter(r => r.deployment_count === 0).map(r => r.round_id)));
+  };
+
+  const handleBulkDelete = async (deleteRounds: boolean, deleteDeployments: boolean) => {
+    if (selectedRounds.size === 0) return;
+    
+    setBulkDeleting(true);
     setMessage(null);
     setError(null);
     try {
-      const res = await api.deleteRoundData(roundId, deleteRound, deleteDeployments);
-      setMessage(`Round ${roundId}: ${res.message}`);
+      const res = await api.bulkDeleteRounds(
+        Array.from(selectedRounds),
+        deleteRounds,
+        deleteDeployments
+      );
+      setMessage(res.message);
+      setSelectedRounds(new Set());
       fetchPendingRounds();
       fetchRoundsData();
     } catch (err) {
-      setError(err instanceof Error ? err.message : `Delete failed for round ${roundId}`);
+      setError(err instanceof Error ? err.message : "Bulk delete failed");
     } finally {
-      setActionLoading(null);
+      setBulkDeleting(false);
     }
   };
 
@@ -408,32 +406,99 @@ export default function BackfillPage() {
                   {showMissingOnly ? "All rounds have deployment data!" : "No rounds found. Start a backfill."}
                 </div>
               ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b border-slate-700">
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Round</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Win</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Top Miner</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deployed</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Winnings</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deploys</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Source</th>
-                        <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Actions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {roundsData.map((round) => (
-                        <RoundDataRow
-                          key={round.round_id}
-                          round={round}
-                          onDelete={handleDelete}
-                          loading={actionLoading}
-                        />
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                <>
+                  {/* Selection Actions Bar */}
+                  {selectedRounds.size > 0 && (
+                    <div className="mx-4 mt-4 p-4 bg-blue-500/10 border border-blue-500/30 rounded-lg flex items-center justify-between">
+                      <span className="text-blue-400">
+                        {selectedRounds.size} round{selectedRounds.size > 1 ? 's' : ''} selected
+                      </span>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleBulkDelete(false, true)}
+                          disabled={bulkDeleting}
+                          className="px-3 py-1.5 text-sm bg-orange-500 hover:bg-orange-600 text-white rounded-lg disabled:opacity-50"
+                        >
+                          {bulkDeleting ? "Deleting..." : "Delete Deployments Only"}
+                        </button>
+                        <button
+                          onClick={() => handleBulkDelete(true, true)}
+                          disabled={bulkDeleting}
+                          className="px-3 py-1.5 text-sm bg-red-500 hover:bg-red-600 text-white rounded-lg disabled:opacity-50"
+                        >
+                          {bulkDeleting ? "Deleting..." : "Delete All Data"}
+                        </button>
+                        <button
+                          onClick={handleDeselectAll}
+                          disabled={bulkDeleting}
+                          className="px-3 py-1.5 text-sm bg-slate-600 hover:bg-slate-500 text-white rounded-lg disabled:opacity-50"
+                        >
+                          Clear
+                        </button>
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full">
+                      <thead>
+                        <tr className="border-b border-slate-700">
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400 w-12">
+                            <input
+                              type="checkbox"
+                              checked={selectedRounds.size === roundsData.length && roundsData.length > 0}
+                              onChange={(e) => e.target.checked ? handleSelectAll() : handleDeselectAll()}
+                              className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500"
+                            />
+                          </th>
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Round</th>
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Win</th>
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Top Miner</th>
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deployed</th>
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Winnings</th>
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Deploys</th>
+                          <th className="text-left px-4 py-3 text-sm font-medium text-slate-400">Source</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {roundsData.map((round) => (
+                          <RoundDataRow
+                            key={round.round_id}
+                            round={round}
+                            selected={selectedRounds.has(round.round_id)}
+                            onSelect={handleSelectRound}
+                            loading={bulkDeleting}
+                          />
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  {/* Quick Selection Buttons */}
+                  <div className="px-4 py-3 border-t border-slate-700 flex gap-2">
+                    <button
+                      onClick={handleSelectAll}
+                      disabled={bulkDeleting || roundsData.length === 0}
+                      className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg disabled:opacity-50"
+                    >
+                      Select All
+                    </button>
+                    <button
+                      onClick={handleSelectMissing}
+                      disabled={bulkDeleting || missingCount === 0}
+                      className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg disabled:opacity-50"
+                    >
+                      Select Missing ({missingCount})
+                    </button>
+                    <button
+                      onClick={handleDeselectAll}
+                      disabled={bulkDeleting || selectedRounds.size === 0}
+                      className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg disabled:opacity-50"
+                    >
+                      Deselect All
+                    </button>
+                  </div>
+                </>
               )}
             </div>
           </>
