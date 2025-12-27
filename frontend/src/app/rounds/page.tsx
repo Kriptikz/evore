@@ -57,8 +57,8 @@ interface LiveRound {
   unique_miners: number;
 }
 
-// API endpoint
-const API_BASE = process.env.NEXT_PUBLIC_ORE_STATS_API || "http://localhost:3000";
+// API endpoint - use env var or relative URL for same-origin
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 // Format functions
 const formatSol = (lamports: number) => (lamports / 1e9).toFixed(4);
