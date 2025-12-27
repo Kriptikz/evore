@@ -246,7 +246,7 @@ export default function RpcMetricsPage() {
                       errors.map((row, i) => (
                         <tr key={i} className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30">
                           <td className="px-4 py-3 text-slate-400 text-sm font-mono">
-                            {new Date(row.timestamp).toLocaleTimeString()} {/* timestamp is in ms */}
+                            {new Date(row.timestamp).toLocaleTimeString()}
                           </td>
                           <td className="px-4 py-3 text-white font-mono text-sm">{row.method}</td>
                           <td className="px-4 py-3 text-slate-300">{row.provider}</td>
@@ -289,7 +289,7 @@ export default function RpcMetricsPage() {
                             <div
                               key={i}
                               className="flex-1 min-w-1 group relative"
-                              title={`${new Date(row.minute * 1000).toLocaleTimeString()}: ${row.total_requests} requests`}
+                              title={`${new Date(row.minute).toLocaleTimeString()}: ${row.total_requests} requests`}
                             >
                               <div
                                 className={`w-full rounded-t transition-all ${
@@ -305,10 +305,10 @@ export default function RpcMetricsPage() {
                       </div>
                       <div className="flex justify-between text-xs text-slate-500">
                         <span>
-                          {timeseries.length > 0 && new Date(timeseries[Math.max(0, timeseries.length - 60)].minute * 1000).toLocaleTimeString()}
+                          {timeseries.length > 0 && new Date(timeseries[Math.max(0, timeseries.length - 60)].minute).toLocaleTimeString()}
                         </span>
                         <span>
-                          {timeseries.length > 0 && new Date(timeseries[timeseries.length - 1].minute * 1000).toLocaleTimeString()}
+                          {timeseries.length > 0 && new Date(timeseries[timeseries.length - 1].minute).toLocaleTimeString()}
                         </span>
                       </div>
                       <p className="text-xs text-slate-500 text-center">

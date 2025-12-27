@@ -277,7 +277,7 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    toUnixTimestamp64Milli(timestamp) AS timestamp,
+                    timestamp,
                     program,
                     provider,
                     method,
@@ -303,7 +303,7 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    toUnixTimestamp(minute) AS minute,
+                    minute,
                     sum(total_requests) AS total_requests,
                     sum(success_count) AS success_count,
                     sum(error_count) AS error_count,
@@ -324,7 +324,7 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    toUnixTimestamp(toDateTime(day)) AS day,
+                    day,
                     program,
                     provider,
                     total_requests,
@@ -673,7 +673,8 @@ pub struct RpcProviderRow {
 /// Individual RPC error row.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcErrorRow {
-    pub timestamp: i64, // Unix timestamp in milliseconds
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: time::OffsetDateTime,
     pub program: String,
     pub provider: String,
     pub method: String,
@@ -686,7 +687,8 @@ pub struct RpcErrorRow {
 /// Time series row for RPC metrics (minute granularity).
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcTimeseriesRow {
-    pub minute: u32, // Unix timestamp in seconds
+    #[serde(with = "time::serde::rfc3339")]
+    pub minute: time::OffsetDateTime,
     pub total_requests: u64,
     pub success_count: u64,
     pub error_count: u64,
@@ -696,7 +698,8 @@ pub struct RpcTimeseriesRow {
 /// Daily summary row.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcDailyRow {
-    pub day: u32, // Unix timestamp in seconds (start of day)
+    #[serde(with = "time::serde::iso8601")]
+    pub day: time::Date,
     pub program: String,
     pub provider: String,
     pub total_requests: u64,
