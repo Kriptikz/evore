@@ -15,7 +15,7 @@ use solana_sdk::commitment_config::CommitmentConfig;
 use tokio::sync::RwLock;
 use tokio::time::{interval, Instant};
 
-use crate::app_state::{AppState, LiveBroadcastData, LiveDeployment, LiveRound};
+use crate::app_state::{AppState, LiveBroadcastData, LiveDeployment};
 use crate::clickhouse::{ClickHouseClient, WsEventInsert, WsThroughputInsert};
 
 /// WebSocket manager for all subscriptions
@@ -343,27 +343,16 @@ pub async fn subscribe_to_program_accounts(
             // Only process if this is a NEW round (id > current)
             // Ignore old rounds from checkpoints
             if round.id > current_round_id {
-                tracing::info!("New round detected: {} -> {}", current_round_id, round.id);
+                tracing::info!("WebSocket: New round detected: {} -> {}", current_round_id, round.id);
                 current_round_id = round.id;
                 
                 // Update state and clear deployment tracking for new round
+                // These are the ONLY caches WebSocket is allowed to update
                 *state.pending_round_id.write().await = round.id;
                 state.pending_deployments.write().await.clear();
             }
-            
-            // Only update round cache if this is the current round
-            if round.id == current_round_id {
-                if let Some(board) = state.board_cache.read().await.as_ref() {
-                    let pending = state.pending_deployments.read().await;
-                    let mut live_round = LiveRound::from_board_and_round(board, round);
-                    live_round.unique_miners = pending.len() as u32;
-                    drop(pending);
-                    
-                    let mut cache = state.round_cache.write().await;
-                    *cache = Some(live_round);
-                }
-            }
-            // Ignore old round updates (checkpoints, etc.)
+            // NOTE: We do NOT update round_cache here - that's done by RPC polling only
+            // WebSocket data can be unreliable, so RPC is the source of truth for caches
         }
         // Try to parse as Miner
         else if let Ok(miner) = Miner::try_from_bytes(&data) {
@@ -414,19 +403,10 @@ pub async fn subscribe_to_program_accounts(
                     );
                 }
                 
-                // Update unique miners count
-                let unique_count = pending.len();
                 drop(pending);
-                
-                if let Some(round) = state.round_cache.write().await.as_mut() {
-                    round.unique_miners = unique_count as u32;
-                }
             }
-            
-            // Always update miner cache (for any round - keeps cache fresh)
-            // BTreeMap keyed by authority string for sorted pagination
-            let mut cache = state.miners_cache.write().await;
-            cache.insert(miner.authority.to_string(), *miner);
+            // NOTE: We do NOT update miners_cache here - that's done by RPC polling only
+            // WebSocket data can be unreliable, so RPC is the source of truth for caches
         }
             }
             _ = sync_interval.tick() => {

@@ -455,6 +455,60 @@ pub async fn get_live_round(
     get_round(State(state)).await
 }
 
+/// Live deployment info for one miner
+#[derive(Serialize)]
+pub struct LiveDeploymentEntry {
+    pub miner_pubkey: String,
+    pub amounts: [u64; 25],
+    pub slot: u64,
+    pub total_amount: u64,
+}
+
+/// Response for live deployments endpoint
+#[derive(Serialize)]
+pub struct LiveDeploymentsResponse {
+    pub round_id: u64,
+    pub deployments: Vec<LiveDeploymentEntry>,
+}
+
+/// GET /live/deployments - Get all current deployments for the live round
+/// Returns cached deployments from miner polling (updated every ~2s)
+pub async fn get_live_deployments(
+    State(state): State<Arc<AppState>>,
+) -> Json<LiveDeploymentsResponse> {
+    let round_id = *state.deployments_cache_round_id.read().await;
+    let cache = state.deployments_cache.read().await;
+    
+    let mut deployments = Vec::new();
+    
+    for (miner_pubkey, squares) in cache.iter() {
+        let mut amounts = [0u64; 25];
+        let mut total_amount = 0u64;
+        let mut max_slot = 0u64;
+        
+        for (square_id, (amount, slot)) in squares {
+            amounts[*square_id as usize] = *amount;
+            total_amount += *amount;
+            max_slot = max_slot.max(*slot);
+        }
+        
+        deployments.push(LiveDeploymentEntry {
+            miner_pubkey: miner_pubkey.clone(),
+            amounts,
+            slot: max_slot,
+            total_amount,
+        });
+    }
+    
+    // Sort by total amount descending
+    deployments.sort_by(|a, b| b.total_amount.cmp(&a.total_amount));
+    
+    Json(LiveDeploymentsResponse {
+        round_id,
+        deployments,
+    })
+}
+
 /// Health check
 pub async fn health() -> &'static str {
     "OK"

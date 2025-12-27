@@ -5,7 +5,7 @@
 //! - Round transition detection and finalization
 //! - Metrics snapshots
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -153,6 +153,11 @@ pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
                     // Clear deployment tracking for new round
                     state.pending_deployments.write().await.clear();
                     *state.pending_round_id.write().await = current_round_id;
+                    
+                    // Clear deployments cache for new round
+                    state.deployments_cache.write().await.clear();
+                    *state.deployments_cache_round_id.write().await = current_round_id;
+                    
                     round_ending_detected = false;
                 }
                 
@@ -168,6 +173,7 @@ pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
 /// Uses Helius v2 getProgramAccountsV2 for efficient bulk fetching
 /// - Initial: Full fetch of all miners
 /// - Subsequent: Incremental updates using changedSinceSlot (every 2s)
+/// Also tracks deployments by comparing miner state changes
 pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         // Wait for slot to be available first
@@ -181,6 +187,7 @@ pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()>
             
             let current_slot = *state.slot_cache.read().await;
             let last_slot = *state.miners_last_slot.read().await;
+            let pending_round_id = *state.pending_round_id.read().await;
             
             if !initial_load_done {
                 // Initial full load
@@ -191,6 +198,11 @@ pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()>
                         tracing::info!("Initial miners cache loaded: {} miners at slot {}", count, current_slot);
                         initial_load_done = true;
                         
+                        // Initialize deployments cache with current round miners
+                        if pending_round_id > 0 {
+                            initialize_deployments_cache(&state, pending_round_id, current_slot).await;
+                        }
+                        
                         // Update last slot
                         let mut slot = state.miners_last_slot.write().await;
                         *slot = current_slot;
@@ -200,9 +212,12 @@ pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()>
                     }
                 }
             } else if current_slot > last_slot {
+                // Check for round transition before update
+                let cached_round_id = *state.deployments_cache_round_id.read().await;
+                
                 // Incremental update - only fetches miners changed since last_slot
                 let slot_delta = current_slot - last_slot;
-                match fetch_miners_changed_since(&state, last_slot).await {
+                match fetch_miners_changed_since_with_deployments(&state, last_slot, current_slot).await {
                     Ok(count) => {
                         // Only log if there were changes (reduces noise)
                         if count > 0 {
@@ -219,6 +234,11 @@ pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()>
                     Err(e) => {
                         tracing::warn!("Failed to fetch miner updates: {}", e);
                     }
+                }
+                
+                // If round transitioned, reinitialize deployments cache
+                if pending_round_id > 0 && pending_round_id != cached_round_id {
+                    initialize_deployments_cache(&state, pending_round_id, current_slot).await;
                 }
             }
         }
@@ -253,6 +273,15 @@ pub async fn fetch_all_miners(state: &AppState) -> anyhow::Result<usize> {
 
 /// Fetch miners that changed since a slot
 async fn fetch_miners_changed_since(state: &AppState, since_slot: u64) -> anyhow::Result<usize> {
+    fetch_miners_changed_since_with_deployments(state, since_slot, since_slot + 1).await
+}
+
+/// Fetch miners that changed since a slot and track deployments
+async fn fetch_miners_changed_since_with_deployments(
+    state: &AppState, 
+    since_slot: u64,
+    current_slot: u64,
+) -> anyhow::Result<usize> {
     let accounts = {
         let mut helius = state.helius.write().await;
         helius.get_ore_miners_changed_since(since_slot, Some(5000)).await?
@@ -262,18 +291,118 @@ async fn fetch_miners_changed_since(state: &AppState, since_slot: u64) -> anyhow
         return Ok(0);
     }
     
-    let mut cache = state.miners_cache.write().await;
+    let pending_round_id = *state.pending_round_id.read().await;
+    let cached_round_id = *state.deployments_cache_round_id.read().await;
+    
+    let mut miners_cache = state.miners_cache.write().await;
+    let mut deployments_cache = state.deployments_cache.write().await;
     let mut count = 0;
     
     for acc in &accounts {
-        if let Some((authority, miner)) = parse_miner_account(acc) {
-            // Insert with String key for sorted BTreeMap
-            cache.insert(authority.to_string(), miner);
+        if let Some((authority, new_miner)) = parse_miner_account(acc) {
+            let authority_str = authority.to_string();
+            
+            // Check if this miner deployed in the current round
+            if new_miner.round_id == pending_round_id && pending_round_id > 0 && pending_round_id == cached_round_id {
+                // Get the old state (if any) to detect new deployments
+                let old_miner = miners_cache.get(&authority_str);
+                
+                // Track new deployments by comparing squares
+                let new_deployments = detect_new_deployments(
+                    old_miner,
+                    &new_miner,
+                    pending_round_id,
+                    current_slot,
+                );
+                
+                if !new_deployments.is_empty() {
+                    let miner_deps = deployments_cache.entry(authority_str.clone()).or_default();
+                    
+                    for (square_id, amount) in new_deployments {
+                        // Only add if this square wasn't already tracked
+                        if !miner_deps.contains_key(&square_id) {
+                            miner_deps.insert(square_id, (amount, current_slot));
+                        }
+                    }
+                    // Note: SSE broadcasts come from WebSocket only, not from miner polling
+                }
+            }
+            
+            // Update miners cache
+            miners_cache.insert(authority_str, new_miner);
             count += 1;
         }
     }
     
     Ok(count)
+}
+
+/// Detect new deployments by comparing old and new miner state
+fn detect_new_deployments(
+    old_miner: Option<&Miner>,
+    new_miner: &Miner,
+    pending_round_id: u64,
+    _slot: u64,
+) -> Vec<(u8, u64)> {
+    let mut new_deployments = Vec::new();
+    
+    // Only track if miner is in the current round
+    if new_miner.round_id != pending_round_id {
+        return new_deployments;
+    }
+    
+    for (square_id, &new_amount) in new_miner.deployed.iter().enumerate() {
+        if new_amount > 0 {
+            let old_amount = old_miner
+                .filter(|m| m.round_id == pending_round_id)
+                .map(|m| m.deployed[square_id])
+                .unwrap_or(0);
+            
+            // Detect new or increased deployment
+            if new_amount > old_amount {
+                // This is a new/additional deployment on this square
+                new_deployments.push((square_id as u8, new_amount - old_amount));
+            }
+        }
+    }
+    
+    new_deployments
+}
+
+/// Initialize deployments cache for a new round
+async fn initialize_deployments_cache(state: &AppState, round_id: u64, current_slot: u64) {
+    let miners = state.miners_cache.read().await;
+    let mut deployments = state.deployments_cache.write().await;
+    
+    // Clear old deployments
+    deployments.clear();
+    
+    // Populate with current round's miners
+    for (authority, miner) in miners.iter() {
+        if miner.round_id == round_id {
+            let mut miner_deps: HashMap<u8, (u64, u64)> = HashMap::new();
+            
+            for (square_id, &amount) in miner.deployed.iter().enumerate() {
+                if amount > 0 {
+                    // Use current_slot as we don't know the exact deployment slot
+                    miner_deps.insert(square_id as u8, (amount, current_slot));
+                }
+            }
+            
+            if !miner_deps.is_empty() {
+                deployments.insert(authority.clone(), miner_deps);
+            }
+        }
+    }
+    
+    // Update round id
+    *state.deployments_cache_round_id.write().await = round_id;
+    
+    tracing::info!(
+        "Deployments cache initialized for round {}: {} miners with deployments",
+        round_id,
+        deployments.len()
+    );
 }
 
 /// Parse a Miner account from program account data

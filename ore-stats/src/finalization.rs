@@ -44,8 +44,12 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         }
     }
     
-    // Get pending deployments (per-miner, per-square)
-    let deployments = state.pending_deployments.read().await.clone();
+    // Get deployments from miner cache (more reliable than websocket)
+    // This includes all miners with round_id == current round, with accurate amounts
+    let deployments_cache = state.deployments_cache.read().await.clone();
+    
+    // Also get websocket deployments for slot timing data (as fallback/merge)
+    let ws_deployments = state.pending_deployments.read().await.clone();
     
     // Get miners who participated in this round (from freshly refreshed cache)
     let all_miners = state.miners_cache.read().await;
@@ -62,11 +66,30 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // Get round state (may not have slot_hash yet)
     let round = state.rpc.get_round(round_id).await.ok()?;
     
+    // Merge deployments cache with websocket data for best slot accuracy
+    // Use deployments_cache as base, then try to get more accurate slots from websocket
+    let mut merged_deployments = deployments_cache.clone();
+    for (miner, ws_squares) in &ws_deployments {
+        let entry = merged_deployments.entry(miner.clone()).or_default();
+        for (square_id, (amount, ws_slot)) in ws_squares {
+            // If we have websocket slot data and it's non-zero, use it for more accuracy
+            if let Some((cached_amount, cached_slot)) = entry.get(square_id) {
+                // Keep the cached amount (authoritative), but use websocket slot if better
+                if *ws_slot > 0 && (*cached_slot == 0 || *ws_slot < *cached_slot) {
+                    entry.insert(*square_id, (*cached_amount, *ws_slot));
+                }
+            } else if *amount > 0 {
+                // Websocket has data we don't have in cache (shouldn't happen but be safe)
+                entry.insert(*square_id, (*amount, *ws_slot));
+            }
+        }
+    }
+    
     let snapshot = RoundSnapshot {
         round_id,
         start_slot,
         end_slot,
-        deployments,
+        deployments: merged_deployments,
         miners: round_miners,
         treasury,
         round,
@@ -77,7 +100,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     };
     
     tracing::info!(
-        "Captured snapshot for round {}: {} miners, {} deployment entries",
+        "Captured snapshot for round {}: {} miners, {} deployment entries (merged from cache + websocket)",
         round_id,
         snapshot.miners.len(),
         snapshot.deployments.len()

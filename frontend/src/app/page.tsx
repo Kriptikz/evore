@@ -160,7 +160,7 @@ function SquareGrid({
             }}
           >
             <span className={`font-bold text-lg ${isWinner ? "text-amber-300" : "text-white/90"}`}>
-              {idx}
+              {idx + 1}
             </span>
             <span className={`text-[10px] ${isWinner ? "text-amber-200/80" : "text-white/60"}`}>
               {formatSol(amount)}
@@ -305,7 +305,7 @@ function RoundsList({
           </div>
           <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">
             <span className="bg-slate-700/80 px-1.5 py-0.5 rounded">
-              ◼ {round.winning_square}
+              ◼ {round.winning_square + 1}
             </span>
             <span>{formatSol(round.total_winnings)} SOL</span>
           </div>
@@ -487,7 +487,7 @@ function DeploymentsGroupedBySlot({
                             }`}
                             title={`${formatSol(group.amounts[squareId])} SOL`}
                           >
-                            ◼{squareId}: {formatSol(group.amounts[squareId])}
+                            ◼{squareId + 1}: {formatSol(group.amounts[squareId])}
                           </span>
                         );
                       })}
@@ -601,7 +601,7 @@ function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisp
                           className="px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-400"
                           title={`${formatSol(group.amounts[squareId])} SOL`}
                         >
-                          ◼{squareId}: {formatSol(group.amounts[squareId])}
+                          ◼{squareId + 1}: {formatSol(group.amounts[squareId])}
                         </span>
                       ))}
                     </div>
@@ -819,7 +819,7 @@ function RoundDetailView({
                   </div>
                   <div>
                     <p className="text-2xl font-bold text-blue-400">
-                      ◼ {winningSquare}
+                      ◼ {winningSquare !== undefined ? winningSquare + 1 : '-'}
                     </p>
                     <p className="text-xs text-slate-500">Winning Square</p>
                   </div>
@@ -904,7 +904,7 @@ function RoundDetailView({
       )}
       
       {/* Live Deployments Table */}
-      {isLive && liveDeployments.length > 0 && (
+      {isLive && (
         <LiveDeploymentsTable deployments={liveDeployments} />
       )}
     </div>
@@ -949,6 +949,47 @@ function HomePageContent() {
       setPrevRoundId(liveRound.round_id);
     }
   }, [liveRound?.round_id, prevRoundId]);
+  
+  // Load existing deployments when viewing live round
+  const fetchLiveDeployments = useCallback(async () => {
+    try {
+      const res = await fetch(`${API_BASE}/live/deployments`);
+      if (!res.ok) return;
+      const data = await res.json();
+      
+      // Convert API response to display format
+      const deployments: LiveDeploymentDisplay[] = [];
+      for (const entry of data.deployments) {
+        entry.amounts.forEach((amount: number, squareId: number) => {
+          if (amount > 0) {
+            deployments.push({
+              miner_pubkey: entry.miner_pubkey,
+              square_id: squareId,
+              amount,
+              slot: entry.slot,
+            });
+          }
+        });
+      }
+      
+      // Merge with existing SSE deployments (avoid duplicates)
+      setLiveDeployments((prev) => {
+        // Create a key for each deployment: miner + square
+        const existing = new Set(prev.map(d => `${d.miner_pubkey}-${d.square_id}`));
+        const newDeps = deployments.filter(d => !existing.has(`${d.miner_pubkey}-${d.square_id}`));
+        return [...newDeps, ...prev]; // Put loaded deployments first, SSE after
+      });
+    } catch (err) {
+      console.error("Failed to fetch live deployments:", err);
+    }
+  }, []);
+  
+  // Fetch existing deployments when switching to live round view
+  useEffect(() => {
+    if (selectedRoundId === 0 && liveRound) {
+      fetchLiveDeployments();
+    }
+  }, [selectedRoundId, liveRound?.round_id, fetchLiveDeployments]);
 
   const fetchRoundDetail = useCallback(async (roundId: number) => {
     if (roundId === 0) {

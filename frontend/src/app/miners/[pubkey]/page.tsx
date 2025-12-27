@@ -155,9 +155,9 @@ function MinerDeploymentsGrouped({
                         ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/50"
                         : "bg-slate-700 text-slate-400"
                     }`}
-                    title={`Square ${squareId}: ${formatSol(group.amounts[squareId])}`}
+                    title={`Square ${squareId + 1}: ${formatSol(group.amounts[squareId])}`}
                   >
-                    ◼{squareId}: {formatSol(group.amounts[squareId])}
+                    ◼{squareId + 1}: {formatSol(group.amounts[squareId])}
                   </span>
                 ))}
               </div>

@@ -62,7 +62,7 @@ use websocket::WebSocketManager;
 async fn main() -> anyhow::Result<()> {
     // Load environment
     dotenvy::dotenv().ok();
-    
+
     // Initialize tracing
     let env_filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("info,ore_stats=debug"));
@@ -70,7 +70,7 @@ async fn main() -> anyhow::Result<()> {
         .with(fmt::layer())
         .with(env_filter)
         .init();
-    
+
     tracing::info!("Starting ore-stats server...");
     
     // ========== Database Connections ==========
@@ -101,7 +101,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Connected to PostgreSQL");
     
     // ========== RPC Client ==========
-    
+
     let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
     let rpc = Arc::new(AppRpc::new(rpc_url.clone(), Some(clickhouse.clone())));
     tracing::info!("RPC client initialized");
@@ -198,6 +198,7 @@ async fn main() -> anyhow::Result<()> {
         
         // Live data
         .route("/live/round", get(routes::get_live_round))
+        .route("/live/deployments", get(routes::get_live_deployments))
         .route("/slot", get(routes::get_slot))
         
         // RPC proxy
@@ -260,6 +261,6 @@ async fn main() -> anyhow::Result<()> {
     miners_handle.abort();
     metrics_handle.abort();
     evore_handle.abort();
-    
+
     Ok(())
 }

@@ -64,6 +64,13 @@ pub struct AppState {
     pub pending_deployments: Arc<RwLock<HashMap<String, HashMap<u8, (u64, u64)>>>>,
     pub pending_round_id: Arc<RwLock<u64>>,
     
+    // Deployments cache: Updated by miner cache comparisons
+    // Maps: miner_pubkey -> { square_id -> (amount, slot) }
+    // More reliable than WebSocket: detects deployments on each miner cache update
+    // Cleared when round transitions, used for finalization + live display
+    pub deployments_cache: Arc<RwLock<HashMap<String, HashMap<u8, (u64, u64)>>>>,
+    pub deployments_cache_round_id: Arc<RwLock<u64>>,
+    
     // Round finalization: Snapshot captured when round ends, used after reset
     pub round_snapshot: Arc<RwLock<Option<RoundSnapshot>>>,
 }
@@ -125,6 +132,8 @@ impl AppState {
             pending_deployments: Arc::new(RwLock::new(HashMap::new())),
             pending_round_id: Arc::new(RwLock::new(0)),
             round_snapshot: Arc::new(RwLock::new(None)),
+            deployments_cache: Arc::new(RwLock::new(HashMap::new())),
+            deployments_cache_round_id: Arc::new(RwLock::new(0)),
         }
     }
     

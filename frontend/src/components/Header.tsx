@@ -148,7 +148,7 @@ export function Header() {
                 <div className="flex items-center gap-1.5 px-2 py-0.5 bg-purple-500/10 border border-purple-500/30 rounded">
                   <span>💎</span>
                   <span className="text-purple-400 font-medium">Motherlode:</span>
-                  <span className="text-purple-300 font-mono">{formatSol(treasury.motherlode)}</span>
+                  <span className="text-purple-300 font-mono">{formatOre(treasury.motherlode)} ORE</span>
                 </div>
               )}
               
