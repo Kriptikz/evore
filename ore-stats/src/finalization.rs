@@ -2,6 +2,13 @@
 //!
 //! Captures round snapshots when rounds end and finalizes them
 //! after the round resets (when slot_hash and top_miner become available).
+//!
+//! Uses a multi-source approach for data accuracy:
+//! 1. GPA miners snapshot (getProgramAccounts) - source of truth for miner counts & amounts
+//! 2. Miners cache (v2 endpoint) - provides slot timing data from polling
+//! 3. WebSocket pending_deployments - provides real-time slot data
+//!
+//! We combine all three to get the most accurate deployment data with slots.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -18,8 +25,14 @@ use crate::clickhouse::{
 use crate::tasks::fetch_all_miners;
 
 /// Capture a snapshot of the current round state
-/// Called ~5 seconds after round ends to ensure all miner data is settled
-/// Does a FULL miner cache refresh (websocket data is unreliable)
+/// 
+/// Process:
+/// 1. IMMEDIATELY take a GPA miners snapshot (source of truth - this worked 100% in old system)
+/// 2. Log WebSocket pending_deployments count for debugging
+/// 3. Wait 5 seconds for v2 endpoint to settle
+/// 4. Refresh miners_cache (v2 endpoint) for slot timing data
+/// 5. Compare GPA vs miners_cache and log differences
+/// 6. Use GPA as source of truth, merge slot data from cache/websocket
 pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // Get current round info
     let round_cache = state.round_cache.read().await;
@@ -29,36 +42,175 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     let end_slot = live_round.end_slot;
     drop(round_cache);
     
-    tracing::info!("Waiting 5 seconds before capturing miner snapshot for round {}...", round_id);
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // === STEP 1: IMMEDIATELY take GPA miners snapshot (source of truth) ===
+    tracing::info!("Round {} ending - taking GPA miners snapshot IMMEDIATELY...", round_id);
     
-    // Do a FULL miner cache refresh - websocket data is unreliable
-    tracing::info!("Refreshing full miner cache before snapshot...");
-    match fetch_all_miners(state).await {
-        Ok(count) => {
-            tracing::info!("Refreshed miner cache: {} miners", count);
+    let gpa_miners = match state.rpc.get_all_miners_gpa().await {
+        Ok(miners) => {
+            let total_count = miners.len();
+            let round_miners: HashMap<String, Miner> = miners
+                .into_iter()
+                .filter(|(_, m)| m.round_id == round_id)
+                .collect();
+            tracing::info!(
+                "GPA snapshot: {} total miners, {} with round_id={}",
+                total_count,
+                round_miners.len(),
+                round_id
+            );
+            round_miners
         }
         Err(e) => {
-            tracing::error!("Failed to refresh miner cache: {}", e);
-            // Continue anyway with existing cache data
+            tracing::error!("Failed to get GPA miners snapshot: {}. Will fall back to cache.", e);
+            HashMap::new()
+        }
+    };
+    
+    // === STEP 2: Log WebSocket pending_deployments count ===
+    let ws_deployments = state.pending_deployments.read().await.clone();
+    let ws_unique_miners = ws_deployments.len();
+    let ws_total_squares: usize = ws_deployments.values().map(|s| s.len()).sum();
+    
+    tracing::info!(
+        "WebSocket pending_deployments for round {}: {} unique miners, {} square entries",
+        round_id, ws_unique_miners, ws_total_squares
+    );
+    
+    // === STEP 3: Wait 5 seconds for v2 endpoint to settle ===
+    tracing::info!("Waiting 5 seconds before refreshing miners cache (v2 endpoint)...");
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    
+    // === STEP 4: Refresh miners_cache (v2 endpoint) for slot timing ===
+    tracing::info!("Refreshing miners cache (v2 endpoint) for slot timing data...");
+    match fetch_all_miners(state).await {
+        Ok(count) => {
+            tracing::info!("V2 miners cache refreshed: {} miners", count);
+        }
+        Err(e) => {
+            tracing::error!("Failed to refresh miners cache: {}", e);
         }
     }
     
-    // Get deployments from miner cache (more reliable than websocket)
-    // This includes all miners with round_id == current round, with accurate amounts
-    let deployments_cache = state.deployments_cache.read().await.clone();
-    
-    // Also get websocket deployments for slot timing data (as fallback/merge)
-    let ws_deployments = state.pending_deployments.read().await.clone();
-    
-    // Get miners who participated in this round (from freshly refreshed cache)
+    // Get miners from v2 cache (for slot timing from deployments_cache)
     let all_miners = state.miners_cache.read().await;
-    let round_miners: HashMap<String, Miner> = all_miners
+    let cache_round_miners: HashMap<String, Miner> = all_miners
         .iter()
         .filter(|(_, m)| m.round_id == round_id)
         .map(|(k, v)| (k.clone(), *v))
         .collect();
     drop(all_miners);
+    
+    // Get deployments cache (has slot timing from polling)
+    let deployments_cache = state.deployments_cache.read().await.clone();
+    
+    // === STEP 5: Compare GPA vs miners_cache and log differences ===
+    let gpa_count = gpa_miners.len();
+    let cache_count = cache_round_miners.len();
+    
+    if gpa_count != cache_count {
+        tracing::warn!(
+            "DATA MISMATCH - Round {}: GPA has {} miners, v2 cache has {} miners (diff={})",
+            round_id, gpa_count, cache_count, 
+            (gpa_count as i64 - cache_count as i64).abs()
+        );
+        
+        // Find miners in GPA but not in cache
+        let gpa_only: Vec<&String> = gpa_miners.keys()
+            .filter(|k| !cache_round_miners.contains_key(*k))
+            .collect();
+        if !gpa_only.is_empty() {
+            tracing::warn!(
+                "  Miners in GPA but NOT in v2 cache ({}): {:?}",
+                gpa_only.len(),
+                gpa_only.iter().take(5).collect::<Vec<_>>()
+            );
+        }
+        
+        // Find miners in cache but not in GPA
+        let cache_only: Vec<&String> = cache_round_miners.keys()
+            .filter(|k| !gpa_miners.contains_key(*k))
+            .collect();
+        if !cache_only.is_empty() {
+            tracing::warn!(
+                "  Miners in v2 cache but NOT in GPA ({}): {:?}",
+                cache_only.len(),
+                cache_only.iter().take(5).collect::<Vec<_>>()
+            );
+        }
+    } else {
+        tracing::info!(
+            "Round {}: GPA and v2 cache agree on {} miners",
+            round_id, gpa_count
+        );
+    }
+    
+    // === STEP 6: Build combined snapshot ===
+    // Use GPA as source of truth for miners/amounts, merge slot data from cache/websocket
+    
+    // Source of truth: GPA miners (if available), fallback to cache
+    let source_miners = if !gpa_miners.is_empty() {
+        tracing::info!("Using GPA miners as source of truth ({} miners)", gpa_miners.len());
+        gpa_miners
+    } else {
+        tracing::warn!("GPA empty, falling back to v2 cache ({} miners)", cache_round_miners.len());
+        cache_round_miners.clone()
+    };
+    
+    // Build combined deployments: amounts from source_miners, slots from cache/websocket
+    let mut combined_deployments: HashMap<String, HashMap<u8, (u64, u64)>> = HashMap::new();
+    
+    for (miner_pubkey, miner) in &source_miners {
+        let mut miner_squares: HashMap<u8, (u64, u64)> = HashMap::new();
+        
+        for (square_id, &amount) in miner.deployed.iter().enumerate() {
+            if amount == 0 {
+                continue;
+            }
+            
+            let square_id_u8 = square_id as u8;
+            
+            // Try to find slot from:
+            // 1. WebSocket pending_deployments (most accurate if available)
+            // 2. Deployments cache (from polling)
+            // 3. Default to start_slot if no slot data found
+            
+            let slot = ws_deployments
+                .get(miner_pubkey)
+                .and_then(|squares| squares.get(&square_id_u8))
+                .map(|(_, slot)| *slot)
+                .or_else(|| {
+                    deployments_cache
+                        .get(miner_pubkey)
+                        .and_then(|squares| squares.get(&square_id_u8))
+                        .map(|(_, slot)| *slot)
+                })
+                .unwrap_or(start_slot); // Default to start_slot if no slot data
+            
+            miner_squares.insert(square_id_u8, (amount, slot));
+        }
+        
+        if !miner_squares.is_empty() {
+            combined_deployments.insert(miner_pubkey.clone(), miner_squares);
+        }
+    }
+    
+    // Count deployments with known slots vs defaulted
+    let mut known_slots = 0u32;
+    let mut defaulted_slots = 0u32;
+    for (_, squares) in &combined_deployments {
+        for (_, (_, slot)) in squares {
+            if *slot == start_slot {
+                defaulted_slots += 1;
+            } else {
+                known_slots += 1;
+            }
+        }
+    }
+    
+    tracing::info!(
+        "Combined deployments: {} miners, {} squares with known slots, {} defaulted to start_slot",
+        combined_deployments.len(), known_slots, defaulted_slots
+    );
     
     // Get treasury state
     let treasury = state.treasury_cache.read().await.clone()?;
@@ -66,31 +218,12 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // Get round state (may not have slot_hash yet)
     let round = state.rpc.get_round(round_id).await.ok()?;
     
-    // Merge deployments cache with websocket data for best slot accuracy
-    // Use deployments_cache as base, then try to get more accurate slots from websocket
-    let mut merged_deployments = deployments_cache.clone();
-    for (miner, ws_squares) in &ws_deployments {
-        let entry = merged_deployments.entry(miner.clone()).or_default();
-        for (square_id, (amount, ws_slot)) in ws_squares {
-            // If we have websocket slot data and it's non-zero, use it for more accuracy
-            if let Some((cached_amount, cached_slot)) = entry.get(square_id) {
-                // Keep the cached amount (authoritative), but use websocket slot if better
-                if *ws_slot > 0 && (*cached_slot == 0 || *ws_slot < *cached_slot) {
-                    entry.insert(*square_id, (*cached_amount, *ws_slot));
-                }
-            } else if *amount > 0 {
-                // Websocket has data we don't have in cache (shouldn't happen but be safe)
-                entry.insert(*square_id, (*amount, *ws_slot));
-            }
-        }
-    }
-    
     let snapshot = RoundSnapshot {
         round_id,
         start_slot,
         end_slot,
-        deployments: merged_deployments,
-        miners: round_miners,
+        deployments: combined_deployments,
+        miners: source_miners,
         treasury,
         round,
         captured_at: std::time::SystemTime::now()
@@ -100,7 +233,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     };
     
     tracing::info!(
-        "Captured snapshot for round {}: {} miners, {} deployment entries (merged from cache + websocket)",
+        "Captured snapshot for round {}: {} miners (GPA source), {} deployment entries",
         round_id,
         snapshot.miners.len(),
         snapshot.deployments.len()

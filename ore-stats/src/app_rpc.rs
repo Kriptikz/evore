@@ -473,6 +473,74 @@ impl AppRpc {
             }
         }
     }
+    
+    /// Get all ORE Miner accounts using standard getProgramAccounts RPC
+    /// This is the source of truth for miner data - more reliable than v2 endpoint
+    /// Returns a HashMap keyed by authority pubkey string
+    pub async fn get_all_miners_gpa(&self) -> Result<std::collections::HashMap<String, Miner>> {
+        use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
+        use solana_client::rpc_filter::RpcFilterType;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        
+        self.rate_limit().await;
+        let start = Instant::now();
+        
+        let ctx = RpcContext {
+            method: "getProgramAccounts".to_string(),
+            target_type: "miner".to_string(),
+            target_address: evore::ore_api::PROGRAM_ID.to_string(),
+            is_batch: true,
+            batch_size: 0, // Unknown until we get results
+        };
+        
+        // Filter for Miner accounts by size (size_of::<Miner>() + 8 for discriminator)
+        let miner_size = std::mem::size_of::<Miner>() as u64 + 8;
+        
+        let config = RpcProgramAccountsConfig {
+            filters: Some(vec![RpcFilterType::DataSize(miner_size)]),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                data_slice: None,
+                commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+                min_context_slot: None,
+            },
+            with_context: None,
+            sort_results: None,
+        };
+        
+        let result = self.client
+            .get_program_accounts_with_config(&evore::ore_api::PROGRAM_ID, config)
+            .await;
+        
+        let duration_ms = start.elapsed().as_millis() as u32;
+        
+        match result {
+            Ok(accounts) => {
+                let mut miners = std::collections::HashMap::new();
+                let mut total_size = 0u32;
+                
+                for (pubkey, account) in &accounts {
+                    total_size += account.data.len() as u32;
+                    
+                    if let Ok(miner) = Miner::try_from_bytes(&account.data) {
+                        miners.insert(miner.authority.to_string(), *miner);
+                    }
+                }
+                
+                tracing::info!(
+                    "GPA miners snapshot: {} accounts fetched, {} miners parsed in {}ms",
+                    accounts.len(), miners.len(), duration_ms
+                );
+                
+                self.log_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
+                Ok(miners)
+            }
+            Err(e) => {
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                Err(e.into())
+            }
+        }
+    }
 }
 
 /// Extract provider name from RPC URL for metrics
