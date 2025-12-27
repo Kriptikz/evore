@@ -673,7 +673,6 @@ pub struct RpcProviderRow {
 /// Individual RPC error row.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcErrorRow {
-    #[serde(with = "time::serde::rfc3339")]
     pub timestamp: time::OffsetDateTime,
     pub program: String,
     pub provider: String,
@@ -687,7 +686,6 @@ pub struct RpcErrorRow {
 /// Time series row for RPC metrics (minute granularity).
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcTimeseriesRow {
-    #[serde(with = "time::serde::rfc3339")]
     pub minute: time::OffsetDateTime,
     pub total_requests: u64,
     pub success_count: u64,
@@ -698,8 +696,7 @@ pub struct RpcTimeseriesRow {
 /// Daily summary row.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcDailyRow {
-    #[serde(with = "time::serde::iso8601")]
-    pub day: time::Date,
+    pub day: time::Date,  // Native Date type from ClickHouse
     pub program: String,
     pub provider: String,
     pub total_requests: u64,
