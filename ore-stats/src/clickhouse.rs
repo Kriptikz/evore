@@ -162,6 +162,26 @@ impl ClickHouseClient {
         Ok(count)
     }
     
+    /// Sum of all deployment amounts for a round (for validation against round total_deployed).
+    pub async fn sum_deployments_for_round(&self, round_id: u64) -> Result<u64, ClickHouseError> {
+        let sum: u64 = self.client
+            .query("SELECT sum(amount) FROM deployments WHERE round_id = ?")
+            .bind(round_id)
+            .fetch_one()
+            .await?;
+        Ok(sum)
+    }
+    
+    /// Get deployment count and sum for a round (combined for efficiency).
+    pub async fn get_deployment_stats_for_round(&self, round_id: u64) -> Result<(u64, u64), ClickHouseError> {
+        let row: (u64, u64) = self.client
+            .query("SELECT count(), sum(amount) FROM deployments WHERE round_id = ?")
+            .bind(round_id)
+            .fetch_one()
+            .await?;
+        Ok(row)
+    }
+    
     /// Get the oldest round ID in the database.
     pub async fn get_oldest_round_id(&self) -> Result<Option<u64>, ClickHouseError> {
         let result: Option<u64> = self.client

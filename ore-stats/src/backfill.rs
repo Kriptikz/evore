@@ -123,6 +123,10 @@ pub struct RoundDataStatus {
     pub round_id: u64,
     pub round_exists: bool,
     pub deployment_count: u64,
+    pub deployments_sum: u64,
+    pub total_deployed: u64,
+    pub is_valid: bool,
+    pub discrepancy: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -138,6 +142,12 @@ pub struct RoundWithData {
     pub motherlode: u64,
     pub deployment_count: u64,
     pub source: String,
+    /// Sum of all deployment amounts in the database
+    pub deployments_sum: u64,
+    /// true if deployments_sum matches total_deployed, false otherwise
+    pub is_valid: bool,
+    /// Difference between total_deployed and deployments_sum (positive = missing, negative = extra)
+    pub discrepancy: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -150,7 +160,10 @@ pub struct RoundsWithDataResponse {
 pub struct RoundsWithDataQuery {
     pub limit: Option<u32>,
     pub offset: Option<u32>,
+    /// Only show rounds with no deployments
     pub missing_deployments_only: Option<bool>,
+    /// Only show rounds where deployments_sum != total_deployed (data integrity issue)
+    pub invalid_only: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -520,22 +533,43 @@ pub async fn bulk_delete_rounds(
 }
 
 /// GET /admin/rounds/{round_id}/status
-/// Check if round exists and has deployment data
+/// Check if round exists and has valid deployment data
 pub async fn get_round_data_status(
     State(state): State<Arc<AppState>>,
     Path(round_id): Path<u64>,
 ) -> Result<Json<RoundDataStatus>, (StatusCode, Json<ErrorResponse>)> {
     let round_exists = state.clickhouse.round_exists(round_id).await.unwrap_or(false);
-    let deployment_count = state.clickhouse.count_deployments_for_round(round_id).await.unwrap_or(0);
+    let (deployment_count, deployments_sum) = state.clickhouse
+        .get_deployment_stats_for_round(round_id)
+        .await
+        .unwrap_or((0, 0));
+    
+    // Get round's total_deployed for validation
+    let total_deployed = if round_exists {
+        state.clickhouse.get_round_by_id(round_id).await
+            .ok()
+            .flatten()
+            .map(|r| r.total_deployed)
+            .unwrap_or(0)
+    } else {
+        0
+    };
+    
+    let discrepancy = total_deployed as i64 - deployments_sum as i64;
+    let is_valid = round_exists && deployment_count > 0 && discrepancy == 0;
     
     Ok(Json(RoundDataStatus {
         round_id,
         round_exists,
         deployment_count,
+        deployments_sum,
+        total_deployed,
+        is_valid,
+        discrepancy,
     }))
 }
 
-/// GET /admin/rounds/data?limit=50&offset=0&missing_deployments_only=false
+/// GET /admin/rounds/data?limit=50&offset=0&missing_deployments_only=false&invalid_only=false
 /// Get rounds with their deployment counts for admin verification
 pub async fn get_rounds_with_data(
     State(state): State<Arc<AppState>>,
@@ -543,6 +577,7 @@ pub async fn get_rounds_with_data(
 ) -> Result<Json<RoundsWithDataResponse>, (StatusCode, Json<ErrorResponse>)> {
     let limit = params.limit.unwrap_or(50).min(200);
     let missing_only = params.missing_deployments_only.unwrap_or(false);
+    let invalid_only = params.invalid_only.unwrap_or(false);
     
     // Get recent rounds from ClickHouse
     let rounds = state.clickhouse.get_recent_rounds(limit).await
@@ -553,13 +588,26 @@ pub async fn get_rounds_with_data(
             )
         })?;
     
-    // Enrich with deployment counts
+    // Enrich with deployment counts and validation
     let mut enriched = Vec::new();
     for r in rounds {
-        let deployment_count = state.clickhouse.count_deployments_for_round(r.round_id).await.unwrap_or(0);
+        // Get both count and sum in one query for efficiency
+        let (deployment_count, deployments_sum) = state.clickhouse
+            .get_deployment_stats_for_round(r.round_id)
+            .await
+            .unwrap_or((0, 0));
+        
+        // Calculate validation: deployments_sum should match total_deployed
+        let discrepancy = r.total_deployed as i64 - deployments_sum as i64;
+        let is_valid = deployment_count > 0 && discrepancy == 0;
         
         // Filter if missing_deployments_only is set
         if missing_only && deployment_count > 0 {
+            continue;
+        }
+        
+        // Filter if invalid_only is set (only show rounds with mismatched totals)
+        if invalid_only && (deployment_count == 0 || is_valid) {
             continue;
         }
         
@@ -575,6 +623,9 @@ pub async fn get_rounds_with_data(
             motherlode: r.motherlode,
             deployment_count,
             source: r.source,
+            deployments_sum,
+            is_valid,
+            discrepancy,
         });
     }
     
