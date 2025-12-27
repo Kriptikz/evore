@@ -311,13 +311,14 @@ pub async fn finalize_round(
             let is_winner = square_id_u8 == winning_square;
             
             // Calculate rewards for winning square
-            let (sol_earned, ore_earned) = if is_winner && total_winnings > 0 {
+            let (sol_earned, ore_earned) = if is_winner {
                 calculate_rewards(
                     amount,
                     &finalized_round,
                     winning_square,
                     total_winnings,
                     is_split_reward,
+                    is_this_top_miner,
                 )
             } else {
                 (0, 0)
@@ -427,12 +428,20 @@ pub async fn finalize_round(
 }
 
 /// Calculate rewards for a deployment on the winning square
+/// 
+/// SOL rewards: Pro-rata share of total_winnings based on deployed amount
+/// 
+/// ORE rewards:
+/// - If is_split: All winners share top_miner_reward proportionally
+/// - If NOT split: Only top_miner gets the full top_miner_reward (1 ORE)
+/// - Motherlode (if > 0): Always split proportionally among all winners
 fn calculate_rewards(
     amount: u64,
     round: &Round,
     winning_square: u8,
     total_winnings: u64,
-    _is_split: bool,
+    is_split: bool,
+    is_this_top_miner: bool,
 ) -> (u64, u64) {
     let square_total = round.deployed[winning_square as usize];
     
@@ -440,12 +449,30 @@ fn calculate_rewards(
         return (0, 0);
     }
     
-    // SOL share proportional to deployment amount
-    let sol_share = (amount as u128 * total_winnings as u128 / square_total as u128) as u64;
+    // SOL share: pro-rata based on deployment amount on winning square
+    let sol_share = if total_winnings > 0 {
+        (amount as u128 * total_winnings as u128 / square_total as u128) as u64
+    } else {
+        0
+    };
     
-    // ORE rewards - simplified for now
-    // TODO: Implement proper ORE calculation based on treasury mechanics
-    let ore_share = 0u64;
+    // ORE rewards calculation
+    let mut ore_share: u64 = 0;
+    
+    // 1. Top miner reward (1 ORE = top_miner_reward)
+    if is_split {
+        // Split reward: all winners share proportionally
+        ore_share += (amount as u128 * round.top_miner_reward as u128 / square_total as u128) as u64;
+    } else if is_this_top_miner {
+        // Not split: only top_miner gets the full 1 ORE
+        ore_share += round.top_miner_reward;
+    }
+    // If not split and not top_miner, they get 0 from top_miner_reward
+    
+    // 2. Motherlode (if hit): always split proportionally among all winners
+    if round.motherlode > 0 {
+        ore_share += (amount as u128 * round.motherlode as u128 / square_total as u128) as u64;
+    }
     
     (sol_share, ore_share)
 }
