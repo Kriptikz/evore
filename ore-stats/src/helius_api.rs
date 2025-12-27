@@ -75,24 +75,64 @@ impl HeliusApi {
         }
     }
     
-    /// Log RPC metrics to ClickHouse if configured
-    fn log_rpc_metrics(&self, method: &str, duration_ms: u32, status: &str, request_size: u32, response_size: u32, batch_size: u16) {
+    /// Log successful RPC call to ClickHouse
+    fn log_success(&self, method: &str, target_type: &str, target_address: &str, duration_ms: u32, result_count: u32, response_size: u32) {
         if let Some(ref ch) = self.clickhouse {
-            let insert = RpcRequestInsert {
-                program: "ore-stats".to_string(),
-                provider: self.provider_name.clone(),
-                api_key_id: self.api_key_id.clone(),
-                method: method.to_string(),
-                is_batch: if batch_size > 1 { 1 } else { 0 },
-                batch_size,
-                status: status.to_string(),
-                duration_ms,
-                request_size,
-                response_size,
-                rate_limit_remaining: -1,
-            };
+            let insert = RpcRequestInsert::new(
+                "ore-stats",
+                &self.provider_name,
+                &self.api_key_id,
+                method,
+                target_type,
+            )
+            .with_target(target_address)
+            .success(duration_ms, result_count, response_size);
             
-            // Fire and forget - don't block on metrics logging
+            let ch = ch.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ch.insert_rpc_metric(insert).await {
+                    tracing::warn!("Failed to log HeliusApi RPC metrics: {}", e);
+                }
+            });
+        }
+    }
+    
+    /// Log paginated RPC call to ClickHouse
+    fn log_paginated_success(&self, method: &str, target_type: &str, target_address: &str, page_num: u16, cursor: &str, duration_ms: u32, result_count: u32, response_size: u32) {
+        if let Some(ref ch) = self.clickhouse {
+            let insert = RpcRequestInsert::new(
+                "ore-stats",
+                &self.provider_name,
+                &self.api_key_id,
+                method,
+                target_type,
+            )
+            .with_target(target_address)
+            .with_pagination(page_num, cursor)
+            .success(duration_ms, result_count, response_size);
+            
+            let ch = ch.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ch.insert_rpc_metric(insert).await {
+                    tracing::warn!("Failed to log HeliusApi RPC metrics: {}", e);
+                }
+            });
+        }
+    }
+    
+    /// Log error RPC call to ClickHouse
+    fn log_error(&self, method: &str, target_type: &str, target_address: &str, duration_ms: u32, error: &str) {
+        if let Some(ref ch) = self.clickhouse {
+            let insert = RpcRequestInsert::new(
+                "ore-stats",
+                &self.provider_name,
+                &self.api_key_id,
+                method,
+                target_type,
+            )
+            .with_target(target_address)
+            .error(duration_ms, "", error);
+            
             let ch = ch.clone();
             tokio::spawn(async move {
                 if let Err(e) = ch.insert_rpc_metric(insert).await {
@@ -172,6 +212,9 @@ impl HeliusApi {
             Some(Value::Object(filters_obj))
         };
 
+        // Save cursor string before moving pagination_token
+        let cursor_str = pagination_token.as_deref().unwrap_or("").to_string();
+        
         // Request options for getTransactionsForAddress
         let opts = GetTransactionsOptions {
             transaction_details: "full".to_string(),
@@ -213,7 +256,7 @@ impl HeliusApi {
             .map_err(|e| HeliusError::InvalidResponse(format!("JSON parse error: {}", e)))?;
 
         if let Some(err) = resp.error {
-            self.log_rpc_metrics("getTransactionsForAddress", duration_ms, "error", request_size, response_size, 1);
+            self.log_error("getTransactionsForAddress", "address", &address.to_string(), duration_ms, &err.message);
             return Err(HeliusError::InvalidResponse(format!(
                 "code: {}, message: {}, data: {:?}",
                 err.code, err.message, err.data
@@ -221,11 +264,12 @@ impl HeliusApi {
         }
 
         let result = resp.result.ok_or_else(|| {
-            self.log_rpc_metrics("getTransactionsForAddress", duration_ms, "error", request_size, response_size, 1);
+            self.log_error("getTransactionsForAddress", "address", &address.to_string(), duration_ms, "null result");
             HeliusError::InvalidResponse("result is null with no error".to_string())
         })?;
 
-        self.log_rpc_metrics("getTransactionsForAddress", duration_ms, "success", request_size, response_size, 1);
+        let tx_count = result.data.len() as u32;
+        self.log_paginated_success("getTransactionsForAddress", "address", &address.to_string(), 0, &cursor_str, duration_ms, tx_count, response_size);
         
         Ok(AddressTransactionsPage {
             transactions: result.data,
@@ -1190,7 +1234,7 @@ impl HeliusApi {
             .map_err(|e| HeliusError::InvalidResponse(format!("JSON parse error: {}", e)))?;
 
         if let Some(err) = resp.error {
-            self.log_rpc_metrics("getProgramAccountsV2", duration_ms, "error", request_size, response_size, 1);
+            self.log_error("getProgramAccountsV2", "program", &program_id.to_string(), duration_ms, &err.message);
             return Err(HeliusError::InvalidResponse(format!(
                 "code: {}, message: {}, data: {:?}",
                 err.code, err.message, err.data
@@ -1198,13 +1242,13 @@ impl HeliusApi {
         }
 
         let result = resp.result.ok_or_else(|| {
-            self.log_rpc_metrics("getProgramAccountsV2", duration_ms, "error", request_size, response_size, 1);
+            self.log_error("getProgramAccountsV2", "program", &program_id.to_string(), duration_ms, "null result");
             HeliusError::InvalidResponse("result is null with no error".to_string())
         })?;
 
-        // Log with batch_size = number of accounts returned
-        let accounts_count = result.accounts.len() as u16;
-        self.log_rpc_metrics("getProgramAccountsV2", duration_ms, "success", request_size, response_size, accounts_count.max(1));
+        let accounts_count = result.accounts.len() as u32;
+        let cursor_str = options.cursor.as_deref().unwrap_or("");
+        self.log_paginated_success("getProgramAccountsV2", "program", &program_id.to_string(), 0, cursor_str, duration_ms, accounts_count, response_size);
         
         Ok(GetProgramAccountsV2Page {
             accounts: result.accounts,

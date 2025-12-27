@@ -51,7 +51,10 @@ pub async fn request_logging_middleware(
     // Execute the request
     let response = next.run(request).await;
     
-    let duration_ms = start.elapsed().as_millis() as u32;
+    // Measure in microseconds for sub-ms precision, store as ms (rounded up for sub-ms)
+    let duration_us = start.elapsed().as_micros() as u32;
+    // Convert to ms, rounding up so sub-ms requests show as 1ms minimum
+    let duration_ms = ((duration_us + 999) / 1000).max(1);
     let status_code = response.status().as_u16();
     
     // Log to ClickHouse asynchronously

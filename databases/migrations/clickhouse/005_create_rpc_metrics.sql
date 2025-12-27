@@ -1,24 +1,36 @@
 -- ClickHouse Migration 005: RPC Metrics
--- Usage tracking for ore-stats and crank to identify inefficiencies and issues
+-- Detailed usage tracking for ore-stats and crank RPC calls
 
--- Individual RPC request logs
+-- Individual RPC request logs with full details
 CREATE TABLE IF NOT EXISTS ore_stats.rpc_requests (
     timestamp DateTime64(3) DEFAULT now64(3),
     
     -- Source identification
     program LowCardinality(String),         -- 'ore-stats', 'crank'
     provider LowCardinality(String),        -- 'helius', 'triton', 'quicknode', etc.
-    api_key_id LowCardinality(String),      -- Short identifier for the key (e.g., 'helius-primary', 'helius-backup')
+    api_key_id LowCardinality(String),      -- Short identifier for the key
     
     -- Request details
-    method LowCardinality(String),          -- 'getBalance', 'getMultipleAccounts', 'sendTransaction', etc.
-    is_batch UInt8 DEFAULT 0,               -- 1 if batch request
-    batch_size UInt16 DEFAULT 1,            -- Number of requests in batch
+    method LowCardinality(String),          -- 'getAccountInfo', 'getProgramAccountsV2', etc.
+    target_type LowCardinality(String),     -- 'board', 'round', 'treasury', 'miner', 'token', 'slot', 'balance', 'program'
+    target_address String DEFAULT '',        -- Pubkey being queried (if applicable)
+    
+    -- Batch info
+    is_batch UInt8 DEFAULT 0,
+    batch_size UInt16 DEFAULT 1,
+    
+    -- Pagination info (for paginated calls like getProgramAccountsV2)
+    is_paginated UInt8 DEFAULT 0,
+    page_number UInt16 DEFAULT 0,           -- Which page of results (0 = first/only)
+    cursor String DEFAULT '',                -- Pagination cursor if used
     
     -- Response details
-    status LowCardinality(String),          -- 'success', 'error', 'timeout', 'rate_limited'
-    error_code String DEFAULT '',           -- RPC error code if failed
-    error_message String DEFAULT '',        -- Error message (truncated)
+    status LowCardinality(String),          -- 'success', 'error', 'timeout', 'rate_limited', 'not_found'
+    error_code String DEFAULT '',
+    error_message String DEFAULT '',
+    
+    -- Result counts (for multi-result queries)
+    result_count UInt32 DEFAULT 0,          -- Number of items returned
     
     -- Timing (milliseconds)
     duration_ms UInt32,
@@ -27,9 +39,9 @@ CREATE TABLE IF NOT EXISTS ore_stats.rpc_requests (
     request_size UInt32 DEFAULT 0,
     response_size UInt32 DEFAULT 0,
     
-    -- Rate limit info (if available from headers)
-    rate_limit_remaining Int32 DEFAULT -1,  -- -1 if unknown
-    rate_limit_reset Int32 DEFAULT -1       -- Seconds until reset, -1 if unknown
+    -- Rate limit info
+    rate_limit_remaining Int32 DEFAULT -1,
+    rate_limit_reset Int32 DEFAULT -1
     
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
@@ -40,12 +52,13 @@ TTL timestamp + INTERVAL 30 DAY;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.rpc_metrics_minute
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(minute)
-ORDER BY (minute, program, provider, method)
+ORDER BY (minute, program, provider, method, target_type)
 AS SELECT
     toStartOfMinute(timestamp) AS minute,
     program,
     provider,
     method,
+    target_type,
     
     -- Counts
     count() AS total_requests,
@@ -53,50 +66,57 @@ AS SELECT
     countIf(status = 'error') AS error_count,
     countIf(status = 'timeout') AS timeout_count,
     countIf(status = 'rate_limited') AS rate_limited_count,
+    countIf(status = 'not_found') AS not_found_count,
     
     -- Batch stats
-    sum(batch_size) AS total_operations,  -- Actual operations (batch unrolled)
+    sum(batch_size) AS total_operations,
+    sum(result_count) AS total_results,
     
     -- Timing
-    avg(duration_ms) AS avg_duration_ms,
+    sum(duration_ms) AS total_duration_ms,
+    count() AS duration_count,  -- For computing avg later
     max(duration_ms) AS max_duration_ms,
-    quantile(0.95)(duration_ms) AS p95_duration_ms,
+    min(duration_ms) AS min_duration_ms,
     
     -- Data transfer
     sum(request_size) AS total_request_bytes,
     sum(response_size) AS total_response_bytes
     
 FROM ore_stats.rpc_requests
-GROUP BY minute, program, provider, method;
+GROUP BY minute, program, provider, method, target_type;
 
 -- Hourly rollup for longer retention
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.rpc_metrics_hourly
 ENGINE = SummingMergeTree()
 PARTITION BY toYYYYMM(hour)
-ORDER BY (hour, program, provider, method)
+ORDER BY (hour, program, provider, method, target_type)
 TTL hour + INTERVAL 365 DAY
 AS SELECT
     toStartOfHour(timestamp) AS hour,
     program,
     provider,
     method,
+    target_type,
     
     count() AS total_requests,
     countIf(status = 'success') AS success_count,
     countIf(status = 'error') AS error_count,
     countIf(status = 'timeout') AS timeout_count,
     countIf(status = 'rate_limited') AS rate_limited_count,
+    countIf(status = 'not_found') AS not_found_count,
     
     sum(batch_size) AS total_operations,
+    sum(result_count) AS total_results,
     
-    avg(duration_ms) AS avg_duration_ms,
+    sum(duration_ms) AS total_duration_ms,
+    count() AS duration_count,
     max(duration_ms) AS max_duration_ms,
     
     sum(request_size) AS total_request_bytes,
     sum(response_size) AS total_response_bytes
     
 FROM ore_stats.rpc_requests
-GROUP BY hour, program, provider, method;
+GROUP BY hour, program, provider, method, target_type;
 
 -- Daily summary for long-term trends
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.rpc_metrics_daily
@@ -115,43 +135,43 @@ AS SELECT
     countIf(status = 'rate_limited') AS rate_limited_count,
     
     sum(batch_size) AS total_operations,
-    avg(duration_ms) AS avg_duration_ms,
+    sum(result_count) AS total_results,
+    
+    sum(duration_ms) AS total_duration_ms,
+    count() AS duration_count,
     
     sum(request_size) AS total_request_bytes,
     sum(response_size) AS total_response_bytes,
     
-    -- Unique methods used
     uniqExact(method) AS unique_methods
     
 FROM ore_stats.rpc_requests
 GROUP BY day, program, provider;
 
--- WebSocket connection metrics (for tracking WS stability)
+-- WebSocket connection events
 CREATE TABLE IF NOT EXISTS ore_stats.ws_events (
     timestamp DateTime64(3) DEFAULT now64(3),
     
     program LowCardinality(String),
     provider LowCardinality(String),
-    subscription_type LowCardinality(String),  -- 'account', 'slot', 'program'
-    subscription_key String DEFAULT '',         -- Pubkey or identifier being watched
+    subscription_type LowCardinality(String),  -- 'slot', 'program', 'account'
+    subscription_key String DEFAULT '',
     
-    event LowCardinality(String),              -- 'connected', 'disconnected', 'error', 'reconnecting'
+    event LowCardinality(String),              -- 'connecting', 'connected', 'disconnected', 'error'
     
-    -- For disconnects/errors
     error_message String DEFAULT '',
-    disconnect_reason String DEFAULT '',        -- 'timeout', 'server_closed', 'error', 'manual'
+    disconnect_reason String DEFAULT '',
     
-    -- Connection stats at time of event
-    uptime_seconds UInt32 DEFAULT 0,           -- How long was this connection up
-    messages_received UInt64 DEFAULT 0,        -- Total messages on this connection
-    reconnect_count UInt16 DEFAULT 0           -- How many times has this reconnected
+    uptime_seconds UInt32 DEFAULT 0,
+    messages_received UInt64 DEFAULT 0,
+    reconnect_count UInt16 DEFAULT 0
     
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)
 ORDER BY (program, provider, subscription_type, timestamp)
 TTL timestamp + INTERVAL 14 DAY;
 
--- WebSocket message throughput (sampled, not every message)
+-- WebSocket throughput samples
 CREATE TABLE IF NOT EXISTS ore_stats.ws_throughput (
     timestamp DateTime DEFAULT now(),
     
@@ -159,12 +179,9 @@ CREATE TABLE IF NOT EXISTS ore_stats.ws_throughput (
     provider LowCardinality(String),
     subscription_type LowCardinality(String),
     
-    -- Message counts in this sample period
     messages_received UInt32,
     bytes_received UInt64,
-    
-    -- Latency (if measurable)
-    avg_process_time_us UInt32 DEFAULT 0       -- Microseconds to process message
+    avg_process_time_us UInt32 DEFAULT 0
     
 ) ENGINE = MergeTree()
 PARTITION BY toYYYYMM(timestamp)

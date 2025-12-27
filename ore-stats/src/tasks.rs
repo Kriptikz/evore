@@ -237,17 +237,17 @@ pub fn spawn_metrics_snapshot(state: Arc<AppState>) -> tokio::task::JoinHandle<(
             let memory_used = get_memory_usage();
             
             // Query recent request stats from ClickHouse (last minute)
-            let (requests_total, requests_success, requests_error, avg_latency) = 
-                get_request_stats(&state.clickhouse).await.unwrap_or((0, 0, 0, 0.0));
+            let stats = state.clickhouse.get_recent_request_stats().await
+                .unwrap_or_default();
             
             let metrics = ServerMetrics {
-                requests_total,
-                requests_success,
-                requests_error,
-                latency_p50: 0.0, // Would need histogram for percentiles
-                latency_p95: 0.0,
-                latency_p99: 0.0,
-                latency_avg: avg_latency,
+                requests_total: stats.total,
+                requests_success: stats.success,
+                requests_error: stats.errors,
+                latency_p50: stats.p50,
+                latency_p95: stats.p95,
+                latency_p99: stats.p99,
+                latency_avg: stats.avg_duration,
                 active_connections: 0, // Would need connection tracking
                 memory_used,
                 cache_hits: (miners_count + ore_holders_count) as u64,
@@ -259,7 +259,7 @@ pub fn spawn_metrics_snapshot(state: Arc<AppState>) -> tokio::task::JoinHandle<(
             } else {
                 tracing::debug!(
                     "Metrics snapshot: slot={}, miners={}, ore_holders={}, requests={}, mem={}MB",
-                    slot, miners_count, ore_holders_count, requests_total, memory_used / 1024 / 1024
+                    slot, miners_count, ore_holders_count, stats.total, memory_used / 1024 / 1024
                 );
             }
         }
@@ -289,12 +289,6 @@ fn get_memory_usage() -> u64 {
         // Fallback for non-Linux systems
         0
     }
-}
-
-/// Get request stats from the last minute
-async fn get_request_stats(clickhouse: &crate::clickhouse::ClickHouseClient) -> anyhow::Result<(u64, u64, u64, f32)> {
-    let stats = clickhouse.get_recent_request_stats().await?;
-    Ok((stats.total, stats.success, stats.errors, stats.avg_duration))
 }
 
 /// Spawn task to clean up stale data

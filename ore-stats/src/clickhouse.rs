@@ -227,18 +227,23 @@ impl ClickHouseClient {
                     program,
                     provider,
                     method,
+                    target_type,
                     sum(total_requests) AS total_requests,
                     sum(success_count) AS success_count,
                     sum(error_count) AS error_count,
                     sum(timeout_count) AS timeout_count,
                     sum(rate_limited_count) AS rate_limited_count,
-                    avg(avg_duration_ms) AS avg_duration_ms,
+                    sum(not_found_count) AS not_found_count,
+                    sum(total_operations) AS total_operations,
+                    sum(total_results) AS total_results,
+                    sum(total_duration_ms) / sum(duration_count) AS avg_duration_ms,
                     max(max_duration_ms) AS max_duration_ms,
+                    min(min_duration_ms) AS min_duration_ms,
                     sum(total_request_bytes) AS total_request_bytes,
                     sum(total_response_bytes) AS total_response_bytes
-                FROM rpc_metrics_hourly
-                WHERE hour > now() - INTERVAL ? HOUR
-                GROUP BY program, provider, method
+                FROM rpc_metrics_minute
+                WHERE minute > now() - INTERVAL ? HOUR
+                GROUP BY program, provider, method, target_type
                 ORDER BY total_requests DESC
             "#)
             .bind(hours)
@@ -257,12 +262,16 @@ impl ClickHouseClient {
                     sum(total_requests) AS total_requests,
                     sum(success_count) AS success_count,
                     sum(error_count) AS error_count,
+                    sum(timeout_count) AS timeout_count,
                     sum(rate_limited_count) AS rate_limited_count,
-                    avg(avg_duration_ms) AS avg_duration_ms,
+                    sum(total_operations) AS total_operations,
+                    sum(total_results) AS total_results,
+                    sum(total_duration_ms) / sum(duration_count) AS avg_duration_ms,
+                    max(max_duration_ms) AS max_duration_ms,
                     sum(total_request_bytes) AS total_request_bytes,
                     sum(total_response_bytes) AS total_response_bytes
-                FROM rpc_metrics_hourly
-                WHERE hour > now() - INTERVAL ? HOUR
+                FROM rpc_metrics_minute
+                WHERE minute > now() - INTERVAL ? HOUR
                 GROUP BY program, provider
                 ORDER BY total_requests DESC
             "#)
@@ -281,6 +290,8 @@ impl ClickHouseClient {
                     program,
                     provider,
                     method,
+                    target_type,
+                    target_address,
                     status,
                     error_code,
                     error_message,
@@ -307,7 +318,11 @@ impl ClickHouseClient {
                     sum(total_requests) AS total_requests,
                     sum(success_count) AS success_count,
                     sum(error_count) AS error_count,
-                    avg(avg_duration_ms) AS avg_duration_ms
+                    sum(timeout_count) AS timeout_count,
+                    sum(total_operations) AS total_operations,
+                    sum(total_results) AS total_results,
+                    sum(total_duration_ms) / sum(duration_count) AS avg_duration_ms,
+                    max(max_duration_ms) AS max_duration_ms
                 FROM rpc_metrics_minute
                 WHERE minute > now() - INTERVAL ? HOUR
                 GROUP BY minute
@@ -331,9 +346,12 @@ impl ClickHouseClient {
                     success_count,
                     error_count,
                     rate_limited_count,
-                    avg_duration_ms,
+                    total_operations,
+                    total_results,
+                    total_duration_ms / duration_count AS avg_duration_ms,
                     total_request_bytes,
-                    total_response_bytes
+                    total_response_bytes,
+                    unique_methods
                 FROM rpc_metrics_daily
                 WHERE day > today() - INTERVAL ? DAY
                 ORDER BY day DESC, total_requests DESC
@@ -637,7 +655,10 @@ impl ClickHouseClient {
                     count() AS total,
                     countIf(status_code >= 200 AND status_code < 400) AS success,
                     countIf(status_code >= 400) AS errors,
-                    avg(duration_ms) AS avg_duration
+                    avg(duration_ms) AS avg_duration,
+                    quantile(0.5)(duration_ms) AS p50,
+                    quantile(0.95)(duration_ms) AS p95,
+                    quantile(0.99)(duration_ms) AS p99
                 FROM ore_stats.request_logs
                 WHERE timestamp > now64(3) - INTERVAL 1 MINUTE
             "#)
@@ -875,20 +896,150 @@ pub struct MinerSnapshot {
     pub lifetime_ore: u64,
 }
 
-/// RPC request metrics.
+/// RPC request metrics with detailed tracking.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcRequestInsert {
+    // Source identification
     pub program: String,
     pub provider: String,
     pub api_key_id: String,
+    
+    // Request details
     pub method: String,
+    pub target_type: String,         // 'board', 'round', 'treasury', 'miner', 'token', 'slot', 'balance', 'program'
+    #[serde(default)]
+    pub target_address: String,       // Pubkey being queried (if applicable)
+    
+    // Batch info
     pub is_batch: u8,
-    pub batch_size: u16,       // UInt16 in ClickHouse
+    pub batch_size: u16,              // UInt16 in ClickHouse
+    
+    // Pagination info
+    #[serde(default)]
+    pub is_paginated: u8,
+    #[serde(default)]
+    pub page_number: u16,
+    #[serde(default)]
+    pub cursor: String,
+    
+    // Response details
     pub status: String,
+    #[serde(default)]
+    pub error_code: String,
+    #[serde(default)]
+    pub error_message: String,
+    #[serde(default)]
+    pub result_count: u32,            // Number of items returned
+    
+    // Timing
     pub duration_ms: u32,
-    pub request_size: u32,     // UInt32 in ClickHouse
-    pub response_size: u32,    // UInt32 in ClickHouse
+    
+    // Data sizes
+    pub request_size: u32,            // UInt32 in ClickHouse
+    pub response_size: u32,           // UInt32 in ClickHouse
+    
+    // Rate limit info
     pub rate_limit_remaining: i32,
+    #[serde(default = "default_rate_limit")]
+    pub rate_limit_reset: i32,
+}
+
+fn default_rate_limit() -> i32 {
+    -1
+}
+
+impl RpcRequestInsert {
+    /// Create a new RPC request insert with common fields.
+    pub fn new(
+        program: impl Into<String>,
+        provider: impl Into<String>,
+        api_key_id: impl Into<String>,
+        method: impl Into<String>,
+        target_type: impl Into<String>,
+    ) -> Self {
+        Self {
+            program: program.into(),
+            provider: provider.into(),
+            api_key_id: api_key_id.into(),
+            method: method.into(),
+            target_type: target_type.into(),
+            target_address: String::new(),
+            is_batch: 0,
+            batch_size: 1,
+            is_paginated: 0,
+            page_number: 0,
+            cursor: String::new(),
+            status: "pending".into(),
+            error_code: String::new(),
+            error_message: String::new(),
+            result_count: 0,
+            duration_ms: 0,
+            request_size: 0,
+            response_size: 0,
+            rate_limit_remaining: -1,
+            rate_limit_reset: -1,
+        }
+    }
+    
+    /// Set the target address being queried.
+    pub fn with_target(mut self, address: impl Into<String>) -> Self {
+        self.target_address = address.into();
+        self
+    }
+    
+    /// Mark as a batch request.
+    pub fn with_batch(mut self, size: u16) -> Self {
+        self.is_batch = if size > 1 { 1 } else { 0 };
+        self.batch_size = size;
+        self
+    }
+    
+    /// Mark as paginated with cursor.
+    pub fn with_pagination(mut self, page: u16, cursor: impl Into<String>) -> Self {
+        self.is_paginated = 1;
+        self.page_number = page;
+        self.cursor = cursor.into();
+        self
+    }
+    
+    /// Set success result.
+    pub fn success(mut self, duration_ms: u32, result_count: u32, response_size: u32) -> Self {
+        self.status = "success".into();
+        self.duration_ms = duration_ms;
+        self.result_count = result_count;
+        self.response_size = response_size;
+        self
+    }
+    
+    /// Set error result.
+    pub fn error(mut self, duration_ms: u32, code: impl Into<String>, message: impl Into<String>) -> Self {
+        self.status = "error".into();
+        self.duration_ms = duration_ms;
+        self.error_code = code.into();
+        self.error_message = message.into();
+        self
+    }
+    
+    /// Set timeout result.
+    pub fn timeout(mut self, duration_ms: u32) -> Self {
+        self.status = "timeout".into();
+        self.duration_ms = duration_ms;
+        self
+    }
+    
+    /// Set rate limited result.
+    pub fn rate_limited(mut self, duration_ms: u32) -> Self {
+        self.status = "rate_limited".into();
+        self.duration_ms = duration_ms;
+        self
+    }
+    
+    /// Set not found result.
+    pub fn not_found(mut self, duration_ms: u32) -> Self {
+        self.status = "not_found".into();
+        self.duration_ms = duration_ms;
+        self
+    }
 }
 
 /// Rate limit event for admin monitoring.
@@ -933,19 +1084,24 @@ pub struct AutomationStateInsert {
 // RPC Metrics Query Results
 // ============================================================================
 
-/// Summary row for RPC metrics (grouped by program, provider, method).
+/// Summary row for RPC metrics (grouped by program, provider, method, target_type).
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcSummaryRow {
     pub program: String,
     pub provider: String,
     pub method: String,
+    pub target_type: String,
     pub total_requests: u64,
     pub success_count: u64,
     pub error_count: u64,
     pub timeout_count: u64,
     pub rate_limited_count: u64,
+    pub not_found_count: u64,
+    pub total_operations: u64,
+    pub total_results: u64,
     pub avg_duration_ms: f64,
     pub max_duration_ms: u32,
+    pub min_duration_ms: u32,
     pub total_request_bytes: u64,
     pub total_response_bytes: u64,
 }
@@ -958,8 +1114,12 @@ pub struct RpcProviderRow {
     pub total_requests: u64,
     pub success_count: u64,
     pub error_count: u64,
+    pub timeout_count: u64,
     pub rate_limited_count: u64,
+    pub total_operations: u64,
+    pub total_results: u64,
     pub avg_duration_ms: f64,
+    pub max_duration_ms: u32,
     pub total_request_bytes: u64,
     pub total_response_bytes: u64,
 }
@@ -972,6 +1132,8 @@ pub struct RpcErrorRow {
     pub program: String,
     pub provider: String,
     pub method: String,
+    pub target_type: String,
+    pub target_address: String,
     pub status: String,
     pub error_code: String,
     pub error_message: String,
@@ -986,7 +1148,11 @@ pub struct RpcTimeseriesRow {
     pub total_requests: u64,
     pub success_count: u64,
     pub error_count: u64,
+    pub timeout_count: u64,
+    pub total_operations: u64,
+    pub total_results: u64,
     pub avg_duration_ms: f64,
+    pub max_duration_ms: u32,
 }
 
 /// Daily summary row.
@@ -1000,9 +1166,12 @@ pub struct RpcDailyRow {
     pub success_count: u64,
     pub error_count: u64,
     pub rate_limited_count: u64,
+    pub total_operations: u64,
+    pub total_results: u64,
     pub avg_duration_ms: f64,
     pub total_request_bytes: u64,
     pub total_response_bytes: u64,
+    pub unique_methods: u64,
 }
 
 // ============================================================================
@@ -1186,6 +1355,9 @@ pub struct RecentRequestStats {
     pub success: u64,
     pub errors: u64,
     pub avg_duration: f32,
+    pub p50: f32,
+    pub p95: f32,
+    pub p99: f32,
 }
 
 #[cfg(test)]

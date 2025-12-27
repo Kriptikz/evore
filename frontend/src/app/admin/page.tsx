@@ -95,7 +95,7 @@ export default function AdminDashboard() {
               />
               <MetricCard
                 title="Current Slot"
-                value={formatNumber(metrics.current_slot)}
+                value={metrics.current_slot.toLocaleString()}
                 color="blue"
                 icon={
                   <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">

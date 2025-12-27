@@ -28,14 +28,14 @@ use crate::clickhouse::{ClickHouseClient, RpcRequestInsert};
 /// Minimum time between RPC requests (rate limiting)
 const MIN_REQUEST_INTERVAL_MS: u64 = 40; // 25 req/s max
 
-/// RPC metrics for a single request
+/// RPC metrics context for a single request
 #[derive(Debug, Clone)]
-pub struct RpcMetrics {
+pub struct RpcContext {
     pub method: String,
-    pub duration_ms: u32,
-    pub status: String,
-    pub request_size: u32,
-    pub response_size: u32,
+    pub target_type: String,
+    pub target_address: String,
+    pub is_batch: bool,
+    pub batch_size: u16,
 }
 
 /// Central RPC gateway with metrics tracking
@@ -97,24 +97,67 @@ impl AppRpc {
         *last = Instant::now();
     }
     
-    /// Log metrics to ClickHouse if configured
-    async fn log_metrics(&self, metrics: RpcMetrics) {
+    /// Log successful RPC call to ClickHouse
+    async fn log_success(&self, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
         if let Some(ref ch) = self.clickhouse {
-            let insert = RpcRequestInsert {
-                program: self.program_name.clone(),
-                provider: self.provider_name.clone(),
-                api_key_id: self.api_key_id.clone(),
-                method: metrics.method,
-                is_batch: 0,
-                batch_size: 1,
-                status: metrics.status,
-                duration_ms: metrics.duration_ms,
-                request_size: metrics.request_size,
-                response_size: metrics.response_size,
-                rate_limit_remaining: -1, // Unknown for standard client
-            };
+            let insert = RpcRequestInsert::new(
+                &self.program_name,
+                &self.provider_name,
+                &self.api_key_id,
+                &ctx.method,
+                &ctx.target_type,
+            )
+            .with_target(&ctx.target_address)
+            .with_batch(ctx.batch_size)
+            .success(duration_ms, result_count, response_size);
             
             // Fire and forget - don't block on metrics logging
+            let ch = ch.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ch.insert_rpc_metric(insert).await {
+                    tracing::warn!("Failed to log RPC metrics: {}", e);
+                }
+            });
+        }
+    }
+    
+    /// Log error RPC call to ClickHouse
+    async fn log_error(&self, ctx: &RpcContext, duration_ms: u32, error: &str) {
+        if let Some(ref ch) = self.clickhouse {
+            let insert = RpcRequestInsert::new(
+                &self.program_name,
+                &self.provider_name,
+                &self.api_key_id,
+                &ctx.method,
+                &ctx.target_type,
+            )
+            .with_target(&ctx.target_address)
+            .with_batch(ctx.batch_size)
+            .error(duration_ms, "", error);
+            
+            let ch = ch.clone();
+            tokio::spawn(async move {
+                if let Err(e) = ch.insert_rpc_metric(insert).await {
+                    tracing::warn!("Failed to log RPC metrics: {}", e);
+                }
+            });
+        }
+    }
+    
+    /// Log not found RPC call to ClickHouse
+    async fn log_not_found(&self, ctx: &RpcContext, duration_ms: u32) {
+        if let Some(ref ch) = self.clickhouse {
+            let insert = RpcRequestInsert::new(
+                &self.program_name,
+                &self.provider_name,
+                &self.api_key_id,
+                &ctx.method,
+                &ctx.target_type,
+            )
+            .with_target(&ctx.target_address)
+            .with_batch(ctx.batch_size)
+            .not_found(duration_ms);
+            
             let ch = ch.clone();
             tokio::spawn(async move {
                 if let Err(e) = ch.insert_rpc_metric(insert).await {
@@ -132,31 +175,25 @@ impl AppRpc {
         let start = Instant::now();
         
         let address = board_pda().0;
-        let result = self.client.get_account_data(&address).await;
+        let ctx = RpcContext {
+            method: "getAccountInfo".to_string(),
+            target_type: "board".to_string(),
+            target_address: address.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
         
+        let result = self.client.get_account_data(&address).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getAccountInfo".to_string(),
-                    duration_ms,
-                    status: "success".to_string(),
-                    request_size: 32, // pubkey size
-                    response_size: data.len() as u32,
-                }).await;
-                
+                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let board = Board::try_from_bytes(&data)?;
                 Ok(*board)
             }
             Err(e) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getAccountInfo".to_string(),
-                    duration_ms,
-                    status: "error".to_string(),
-                    request_size: 32,
-                    response_size: 0,
-                }).await;
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
@@ -168,31 +205,25 @@ impl AppRpc {
         let start = Instant::now();
         
         let address = round_pda(round_id).0;
-        let result = self.client.get_account_data(&address).await;
+        let ctx = RpcContext {
+            method: "getAccountInfo".to_string(),
+            target_type: "round".to_string(),
+            target_address: address.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
         
+        let result = self.client.get_account_data(&address).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getAccountInfo".to_string(),
-                    duration_ms,
-                    status: "success".to_string(),
-                    request_size: 32,
-                    response_size: data.len() as u32,
-                }).await;
-                
+                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let round = Round::try_from_bytes(&data)?;
                 Ok(*round)
             }
             Err(e) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getAccountInfo".to_string(),
-                    duration_ms,
-                    status: "error".to_string(),
-                    request_size: 32,
-                    response_size: 0,
-                }).await;
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
@@ -203,31 +234,25 @@ impl AppRpc {
         self.rate_limit().await;
         let start = Instant::now();
         
-        let result = self.client.get_account_data(&TREASURY_ADDRESS).await;
+        let ctx = RpcContext {
+            method: "getAccountInfo".to_string(),
+            target_type: "treasury".to_string(),
+            target_address: TREASURY_ADDRESS.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
         
+        let result = self.client.get_account_data(&TREASURY_ADDRESS).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getAccountInfo".to_string(),
-                    duration_ms,
-                    status: "success".to_string(),
-                    request_size: 32,
-                    response_size: data.len() as u32,
-                }).await;
-                
+                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let treasury = Treasury::try_from_bytes(&data)?;
                 Ok(*treasury)
             }
             Err(e) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getAccountInfo".to_string(),
-                    duration_ms,
-                    status: "error".to_string(),
-                    request_size: 32,
-                    response_size: 0,
-                }).await;
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
@@ -239,42 +264,30 @@ impl AppRpc {
         let start = Instant::now();
         
         let address = miner_pda(*authority).0;
-        let result = self.client.get_account_data(&address).await;
+        let ctx = RpcContext {
+            method: "getAccountInfo".to_string(),
+            target_type: "miner".to_string(),
+            target_address: authority.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
         
+        let result = self.client.get_account_data(&address).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getAccountInfo".to_string(),
-                    duration_ms,
-                    status: "success".to_string(),
-                    request_size: 32,
-                    response_size: data.len() as u32,
-                }).await;
-                
+                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let miner = Miner::try_from_bytes(&data)?;
                 Ok(Some(*miner))
             }
             Err(e) => {
                 // Account not found is not an error for optional miner
                 if e.to_string().contains("AccountNotFound") {
-                    self.log_metrics(RpcMetrics {
-                        method: "getAccountInfo".to_string(),
-                        duration_ms,
-                        status: "not_found".to_string(),
-                        request_size: 32,
-                        response_size: 0,
-                    }).await;
+                    self.log_not_found(&ctx, duration_ms).await;
                     Ok(None)
                 } else {
-                    self.log_metrics(RpcMetrics {
-                        method: "getAccountInfo".to_string(),
-                        duration_ms,
-                        status: "error".to_string(),
-                        request_size: 32,
-                        response_size: 0,
-                    }).await;
+                    self.log_error(&ctx, duration_ms, &e.to_string()).await;
                     Err(e.into())
                 }
             }
@@ -286,29 +299,24 @@ impl AppRpc {
         self.rate_limit().await;
         let start = Instant::now();
         
-        let result = self.client.get_balance(pubkey).await;
+        let ctx = RpcContext {
+            method: "getBalance".to_string(),
+            target_type: "balance".to_string(),
+            target_address: pubkey.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
         
+        let result = self.client.get_balance(pubkey).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(balance) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getBalance".to_string(),
-                    duration_ms,
-                    status: "success".to_string(),
-                    request_size: 32,
-                    response_size: 8,
-                }).await;
+                self.log_success(&ctx, duration_ms, 1, 8).await;
                 Ok(balance)
             }
             Err(e) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getBalance".to_string(),
-                    duration_ms,
-                    status: "error".to_string(),
-                    request_size: 32,
-                    response_size: 0,
-                }).await;
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
@@ -319,29 +327,24 @@ impl AppRpc {
         self.rate_limit().await;
         let start = Instant::now();
         
-        let result = self.client.get_slot().await;
+        let ctx = RpcContext {
+            method: "getSlot".to_string(),
+            target_type: "slot".to_string(),
+            target_address: String::new(),
+            is_batch: false,
+            batch_size: 1,
+        };
         
+        let result = self.client.get_slot().await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(slot) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getSlot".to_string(),
-                    duration_ms,
-                    status: "success".to_string(),
-                    request_size: 0,
-                    response_size: 8,
-                }).await;
+                self.log_success(&ctx, duration_ms, 1, 8).await;
                 Ok(slot)
             }
             Err(e) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getSlot".to_string(),
-                    duration_ms,
-                    status: "error".to_string(),
-                    request_size: 0,
-                    response_size: 0,
-                }).await;
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
@@ -352,8 +355,15 @@ impl AppRpc {
         self.rate_limit().await;
         let start = Instant::now();
         
-        let result = self.client.get_multiple_accounts(pubkeys).await;
+        let ctx = RpcContext {
+            method: "getMultipleAccounts".to_string(),
+            target_type: "batch".to_string(),
+            target_address: String::new(),
+            is_batch: true,
+            batch_size: pubkeys.len() as u16,
+        };
         
+        let result = self.client.get_multiple_accounts(pubkeys).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
@@ -362,25 +372,14 @@ impl AppRpc {
                     .filter_map(|a| a.as_ref())
                     .map(|a| a.data.len() as u32)
                     .sum();
+                let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
                     
-                self.log_metrics(RpcMetrics {
-                    method: "getMultipleAccounts".to_string(),
-                    duration_ms,
-                    status: "success".to_string(),
-                    request_size: (pubkeys.len() * 32) as u32,
-                    response_size,
-                }).await;
+                self.log_success(&ctx, duration_ms, found_count, response_size).await;
                 
                 Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect())
             }
             Err(e) => {
-                self.log_metrics(RpcMetrics {
-                    method: "getMultipleAccounts".to_string(),
-                    duration_ms,
-                    status: "error".to_string(),
-                    request_size: (pubkeys.len() * 32) as u32,
-                    response_size: 0,
-                }).await;
+                self.log_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }

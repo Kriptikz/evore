@@ -50,13 +50,18 @@ export interface RpcSummaryRow {
   program: string;
   provider: string;
   method: string;
+  target_type: string;
   total_requests: number;
   success_count: number;
   error_count: number;
   timeout_count: number;
   rate_limited_count: number;
+  not_found_count: number;
+  total_operations: number;
+  total_results: number;
   avg_duration_ms: number;
   max_duration_ms: number;
+  min_duration_ms: number;
   total_request_bytes: number;
   total_response_bytes: number;
 }
@@ -67,8 +72,12 @@ export interface RpcProviderRow {
   total_requests: number;
   success_count: number;
   error_count: number;
+  timeout_count: number;
   rate_limited_count: number;
+  total_operations: number;
+  total_results: number;
   avg_duration_ms: number;
+  max_duration_ms: number;
   total_request_bytes: number;
   total_response_bytes: number;
 }
@@ -78,6 +87,8 @@ export interface RpcErrorRow {
   program: string;
   provider: string;
   method: string;
+  target_type: string;
+  target_address: string;
   status: string;
   error_code: string;
   error_message: string;
@@ -89,7 +100,11 @@ export interface RpcTimeseriesRow {
   total_requests: number;
   success_count: number;
   error_count: number;
+  timeout_count: number;
+  total_operations: number;
+  total_results: number;
   avg_duration_ms: number;
+  max_duration_ms: number;
 }
 
 export interface RpcDailyRow {
@@ -100,9 +115,12 @@ export interface RpcDailyRow {
   success_count: number;
   error_count: number;
   rate_limited_count: number;
+  total_operations: number;
+  total_results: number;
   avg_duration_ms: number;
   total_request_bytes: number;
   total_response_bytes: number;
+  unique_methods: number;
 }
 
 // WebSocket metrics types

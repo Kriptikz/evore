@@ -97,7 +97,7 @@ impl WebSocketManager {
                 let messages_received = Arc::new(AtomicU64::new(0));
                 let messages_ref = messages_received.clone();
                 
-                match subscribe_to_slot_with_metrics(&ws_url, slot_cache.clone(), messages_ref).await {
+                match subscribe_to_slot_with_metrics(&ws_url, slot_cache.clone(), messages_ref, &clickhouse, &provider_name).await {
                     Ok(_) => {
                         let uptime = start_time.elapsed().as_secs() as u32;
                         let msgs = messages_received.load(Ordering::Relaxed);
@@ -203,11 +203,15 @@ async fn subscribe_to_slot_with_metrics(
     ws_url: &str,
     slot_cache: Arc<RwLock<u64>>,
     messages_received: Arc<AtomicU64>,
+    clickhouse: &Option<Arc<ClickHouseClient>>,
+    provider_name: &str,
 ) -> Result<()> {
     let client = PubsubClient::new(ws_url).await?;
     
     let (mut stream, _unsub) = client.slot_subscribe().await?;
     
+    // Log connected event
+    log_ws_event_async(clickhouse, provider_name, "slot", "", "connected", "", "", 0, 0, 0);
     tracing::info!("Slot subscription established");
     
     while let Some(slot_info) = stream.next().await {
