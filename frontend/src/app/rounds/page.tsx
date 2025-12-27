@@ -207,6 +207,110 @@ function RoundsList({
   );
 }
 
+// Group deployments by slot for cleaner display
+function DeploymentsGroupedBySlot({
+  deployments,
+  winningSquare,
+  topMiner,
+}: {
+  deployments: DeploymentSummary[];
+  winningSquare?: number;
+  topMiner: string;
+}) {
+  // Group by slot
+  const groupedBySlot = useMemo(() => {
+    const groups: Map<number, DeploymentSummary[]> = new Map();
+    for (const d of deployments) {
+      const slot = d.deployed_slot;
+      if (!groups.has(slot)) {
+        groups.set(slot, []);
+      }
+      groups.get(slot)!.push(d);
+    }
+    // Sort by slot descending (most recent first)
+    return Array.from(groups.entries()).sort((a, b) => b[0] - a[0]);
+  }, [deployments]);
+
+  if (deployments.length === 0) {
+    return (
+      <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6 text-center text-slate-400">
+        No deployments in this time range
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-700 flex justify-between items-center">
+        <h3 className="text-lg font-semibold text-white">
+          Deployments ({deployments.length})
+        </h3>
+        <span className="text-sm text-slate-400">
+          {groupedBySlot.length} slot{groupedBySlot.length !== 1 ? 's' : ''}
+        </span>
+      </div>
+      <div className="max-h-[500px] overflow-y-auto">
+        {groupedBySlot.slice(0, 50).map(([slot, slotDeployments]) => (
+          <div key={slot} className="border-b border-slate-700/50 last:border-0">
+            {/* Slot header */}
+            <div className="px-4 py-2 bg-slate-900/50 flex justify-between items-center sticky top-0">
+              <span className="text-xs font-mono text-slate-400">
+                Slot {slot.toLocaleString()}
+              </span>
+              <span className="text-xs text-slate-500">
+                {slotDeployments.length} miner{slotDeployments.length !== 1 ? 's' : ''}
+              </span>
+            </div>
+            {/* Miners in this slot */}
+            <div className="divide-y divide-slate-700/30">
+              {slotDeployments.map((d, i) => {
+                const isWinner = d.square_id === winningSquare;
+                const isTopMiner = d.miner_pubkey === topMiner;
+                
+                return (
+                  <div 
+                    key={`${d.miner_pubkey}-${d.square_id}-${i}`}
+                    className="px-4 py-2 flex items-center justify-between hover:bg-slate-700/20"
+                  >
+                    <div className="flex items-center gap-3">
+                      {/* Miner address */}
+                      <span className="font-mono text-sm text-white">
+                        {truncate(d.miner_pubkey)}
+                      </span>
+                      {isTopMiner && <span className="text-yellow-400" title="Top Miner">👑</span>}
+                      {isWinner && !isTopMiner && <span className="text-green-400" title="Winner">✓</span>}
+                    </div>
+                    <div className="flex items-center gap-4">
+                      {/* Square */}
+                      <span className={`px-2 py-0.5 rounded text-xs ${
+                        isWinner ? "bg-yellow-500/20 text-yellow-400" : "bg-slate-700 text-slate-400"
+                      }`}>
+                        ◼ {d.square_id}
+                      </span>
+                      {/* Amount */}
+                      <span className="font-mono text-sm text-white w-24 text-right">
+                        {formatSol(d.amount)}
+                      </span>
+                      {/* Earned */}
+                      {isWinner ? (
+                        <span className="text-emerald-400 text-sm w-24 text-right">
+                          +{formatSol(d.sol_earned)}
+                        </span>
+                      ) : (
+                        <span className="text-slate-600 text-sm w-24 text-right">—</span>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function RoundDetail({
   round,
   liveRound,
@@ -413,68 +517,13 @@ function RoundDetail({
         </div>
       </div>
 
-      {/* Deployments Table (historical only) */}
+      {/* Deployments Table - Grouped by Slot (historical only) */}
       {!isLive && round && (
-        <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
-          <div className="px-6 py-4 border-b border-slate-700">
-            <h3 className="text-lg font-semibold text-white">
-              Deployments ({visibleDeployments.length})
-            </h3>
-          </div>
-          <div className="overflow-x-auto">
-            <table className="w-full">
-              <thead>
-                <tr className="border-b border-slate-700 text-left">
-                  <th className="px-4 py-3 text-xs font-medium text-slate-400">Miner</th>
-                  <th className="px-4 py-3 text-xs font-medium text-slate-400">Square</th>
-                  <th className="px-4 py-3 text-xs font-medium text-slate-400">Amount</th>
-                  <th className="px-4 py-3 text-xs font-medium text-slate-400">Slot</th>
-                  <th className="px-4 py-3 text-xs font-medium text-slate-400">Earned</th>
-                </tr>
-              </thead>
-              <tbody>
-                {visibleDeployments.slice(0, 50).map((d, i) => (
-                  <tr 
-                    key={`${d.miner_pubkey}-${d.square_id}-${i}`}
-                    className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30"
-                  >
-                    <td className="px-4 py-3">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono text-white">
-                          {truncate(d.miner_pubkey)}
-                        </span>
-                        {d.is_top_miner && <span className="text-yellow-400">👑</span>}
-                        {d.is_winner && !d.is_top_miner && <span className="text-green-400">✓</span>}
-                      </div>
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className={`px-2 py-0.5 rounded text-xs ${
-                        d.is_winner ? "bg-yellow-500/20 text-yellow-400" : "bg-slate-700"
-                      }`}>
-                        ◼ {d.square_id}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 font-mono text-white">
-                      {formatSol(d.amount)} SOL
-                    </td>
-                    <td className="px-4 py-3 text-slate-400 font-mono text-sm">
-                      {d.deployed_slot.toLocaleString()}
-                    </td>
-                    <td className="px-4 py-3">
-                      {d.is_winner ? (
-                        <span className="text-emerald-400">
-                          {formatSol(d.sol_earned)} SOL
-                        </span>
-                      ) : (
-                        <span className="text-slate-500">—</span>
-                      )}
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
+        <DeploymentsGroupedBySlot 
+          deployments={visibleDeployments} 
+          winningSquare={winningSquare}
+          topMiner={round.top_miner}
+        />
       )}
     </div>
   );

@@ -215,6 +215,19 @@ export interface FinalizeResponse {
   message: string;
 }
 
+export interface DeleteResponse {
+  round_id: number;
+  round_deleted: boolean;
+  deployments_deleted: boolean;
+  message: string;
+}
+
+export interface RoundDataStatus {
+  round_id: number;
+  round_exists: boolean;
+  deployment_count: number;
+}
+
 // Server metrics types
 export interface ServerMetricsRow {
   timestamp: number; // seconds since epoch
@@ -656,6 +669,17 @@ class ApiClient {
 
   async finalizeRound(roundId: number): Promise<FinalizeResponse> {
     return this.request("POST", `/admin/finalize/${roundId}`, { requireAuth: true });
+  }
+
+  async getRoundDataStatus(roundId: number): Promise<RoundDataStatus> {
+    return this.request("GET", `/admin/rounds/${roundId}/status`, { requireAuth: true });
+  }
+
+  async deleteRoundData(roundId: number, deleteRound = false, deleteDeployments = true): Promise<DeleteResponse> {
+    const params = new URLSearchParams();
+    params.set("delete_round", deleteRound.toString());
+    params.set("delete_deployments", deleteDeployments.toString());
+    return this.request("DELETE", `/admin/rounds/${roundId}?${params.toString()}`, { requireAuth: true });
   }
 }
 

@@ -212,7 +212,8 @@ pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()>
 }
 
 /// Fetch all miners using Helius v2
-async fn fetch_all_miners(state: &AppState) -> anyhow::Result<usize> {
+/// Public for use by finalization module
+pub async fn fetch_all_miners(state: &AppState) -> anyhow::Result<usize> {
     let accounts = {
         let mut helius = state.helius.write().await;
         helius.get_all_ore_miners(Some(5000)).await?

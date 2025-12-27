@@ -90,6 +90,27 @@ pub struct FinalizeResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct DeleteResponse {
+    pub round_id: u64,
+    pub round_deleted: bool,
+    pub deployments_deleted: bool,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct DeleteQuery {
+    pub delete_round: Option<bool>,
+    pub delete_deployments: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoundDataStatus {
+    pub round_id: u64,
+    pub round_exists: bool,
+    pub deployment_count: u64,
+}
+
+#[derive(Debug, Serialize)]
 pub struct ErrorResponse {
     pub error: String,
 }
@@ -335,6 +356,78 @@ pub async fn finalize_backfill_round(
     }))
 }
 
+/// DELETE /admin/rounds/{round_id}?delete_round=true&delete_deployments=true
+/// Delete round and/or deployments for re-backfill
+pub async fn delete_round_data(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+    Query(params): Query<DeleteQuery>,
+) -> Result<Json<DeleteResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let delete_round = params.delete_round.unwrap_or(false);
+    let delete_deployments = params.delete_deployments.unwrap_or(true);
+    
+    tracing::info!(
+        "Deleting round {} data: round={}, deployments={}",
+        round_id, delete_round, delete_deployments
+    );
+    
+    let mut round_deleted = false;
+    let mut deployments_deleted = false;
+    
+    if delete_deployments {
+        match state.clickhouse.delete_deployments_for_round(round_id).await {
+            Ok(_) => {
+                deployments_deleted = true;
+                tracing::info!("Deleted deployments for round {}", round_id);
+            }
+            Err(e) => {
+                tracing::error!("Failed to delete deployments for round {}: {}", round_id, e);
+            }
+        }
+    }
+    
+    if delete_round {
+        match state.clickhouse.delete_round(round_id).await {
+            Ok(_) => {
+                round_deleted = true;
+                tracing::info!("Deleted round {}", round_id);
+            }
+            Err(e) => {
+                tracing::error!("Failed to delete round {}: {}", round_id, e);
+            }
+        }
+    }
+    
+    // Reset reconstruction status in PostgreSQL
+    reset_round_reconstruction_status(&state.postgres, round_id, delete_round).await;
+    
+    Ok(Json(DeleteResponse {
+        round_id,
+        round_deleted,
+        deployments_deleted,
+        message: format!(
+            "Deleted: round={}, deployments={}",
+            round_deleted, deployments_deleted
+        ),
+    }))
+}
+
+/// GET /admin/rounds/{round_id}/status
+/// Check if round exists and has deployment data
+pub async fn get_round_data_status(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+) -> Result<Json<RoundDataStatus>, (StatusCode, Json<ErrorResponse>)> {
+    let round_exists = state.clickhouse.round_exists(round_id).await.unwrap_or(false);
+    let deployment_count = state.clickhouse.count_deployments_for_round(round_id).await.unwrap_or(0);
+    
+    Ok(Json(RoundDataStatus {
+        round_id,
+        round_exists,
+        deployment_count,
+    }))
+}
+
 // ============================================================================
 // Database Helpers
 // ============================================================================
@@ -455,5 +548,39 @@ async fn update_round_status_finalized(pool: &PgPool, round_id: u64) {
     .bind(round_id as i64)
     .execute(pool)
     .await;
+}
+
+async fn reset_round_reconstruction_status(pool: &PgPool, round_id: u64, reset_meta: bool) {
+    if reset_meta {
+        // Delete the row entirely if resetting metadata too
+        let _ = sqlx::query(
+            r#"DELETE FROM round_reconstruction_status WHERE round_id = $1"#
+        )
+        .bind(round_id as i64)
+        .execute(pool)
+        .await;
+    } else {
+        // Just reset the reconstruction/verification/finalization flags
+        let _ = sqlx::query(
+            r#"
+            UPDATE round_reconstruction_status
+            SET transactions_fetched = false,
+                transactions_fetched_at = NULL,
+                reconstructed = false,
+                reconstructed_at = NULL,
+                verified = false,
+                verified_at = NULL,
+                finalized = false,
+                finalized_at = NULL,
+                transaction_count = 0,
+                deployment_count = 0,
+                verification_notes = ''
+            WHERE round_id = $1
+            "#
+        )
+        .bind(round_id as i64)
+        .execute(pool)
+        .await;
+    }
 }
 

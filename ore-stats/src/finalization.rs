@@ -1,10 +1,11 @@
 //! Round finalization logic
 //!
 //! Captures round snapshots when rounds end and finalizes them
-//! after the round resets (when slot_hash becomes available).
+//! after the round resets (when slot_hash and top_miner become available).
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use evore::ore_api::{Miner, Round, Treasury};
 use steel::Pubkey;
@@ -14,9 +15,11 @@ use crate::app_state::{AppState, LiveBroadcastData, RoundSnapshot};
 use crate::clickhouse::{
     ClickHouseClient, DeploymentInsert, MinerSnapshot, RoundInsert, TreasurySnapshot,
 };
+use crate::tasks::fetch_all_miners;
 
 /// Capture a snapshot of the current round state
-/// Called when round is about to end (slots_remaining <= 0)
+/// Called ~5 seconds after round ends to ensure all miner data is settled
+/// Does a FULL miner cache refresh (websocket data is unreliable)
 pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // Get current round info
     let round_cache = state.round_cache.read().await;
@@ -26,10 +29,25 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     let end_slot = live_round.end_slot;
     drop(round_cache);
     
+    tracing::info!("Waiting 5 seconds before capturing miner snapshot for round {}...", round_id);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    
+    // Do a FULL miner cache refresh - websocket data is unreliable
+    tracing::info!("Refreshing full miner cache before snapshot...");
+    match fetch_all_miners(state).await {
+        Ok(count) => {
+            tracing::info!("Refreshed miner cache: {} miners", count);
+        }
+        Err(e) => {
+            tracing::error!("Failed to refresh miner cache: {}", e);
+            // Continue anyway with existing cache data
+        }
+    }
+    
     // Get pending deployments (per-miner, per-square)
     let deployments = state.pending_deployments.read().await.clone();
     
-    // Get miners who participated in this round
+    // Get miners who participated in this round (from freshly refreshed cache)
     let all_miners = state.miners_cache.read().await;
     let round_miners: HashMap<String, Miner> = all_miners
         .iter()
@@ -70,6 +88,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
 
 /// Finalize a round after reset
 /// Called after detecting board.round_id has incremented
+/// Waits until both slot_hash AND top_miner are populated
 pub async fn finalize_round(
     state: &AppState,
     snapshot: RoundSnapshot,
@@ -78,51 +97,32 @@ pub async fn finalize_round(
     
     tracing::info!("Finalizing round {}...", round_id);
     
-    // Fetch the previous round (now with slot_hash populated)
-    let finalized_round = state.rpc.get_round(round_id).await?;
+    // Poll until round has both slot_hash AND top_miner populated
+    let finalized_round = wait_for_round_finalization(state, round_id).await?;
     
-    // Verify we have the slot_hash now
+    // Verify we have the slot_hash
     let rng = finalized_round.rng().ok_or_else(|| {
-        anyhow::anyhow!("Round {} still has no slot_hash after reset", round_id)
+        anyhow::anyhow!("Round {} still has no slot_hash after waiting", round_id)
     })?;
     
     let winning_square = finalized_round.winning_square(rng) as u8;
-    let top_miner_sample = finalized_round.top_miner_sample(rng, winning_square as usize);
     let total_winnings = finalized_round.total_winnings;
     let is_split_reward = finalized_round.is_split_reward(rng);
     
+    // Use top_miner from the on-chain Round account (authoritative)
+    let top_miner_pubkey = finalized_round.top_miner.to_string();
+    
     tracing::info!(
-        "Round {} winning_square={}, total_winnings={}, is_split={}",
-        round_id, winning_square, total_winnings, is_split_reward
+        "Round {} winning_square={}, top_miner={}, total_winnings={}, is_split={}",
+        round_id, winning_square, top_miner_pubkey, total_winnings, is_split_reward
     );
-    
-    // Find miners who deployed on the winning square
-    let winning_miners: Vec<&Miner> = snapshot
-        .miners
-        .values()
-        .filter(|m| m.round_id == round_id && m.deployed[winning_square as usize] > 0)
-        .collect();
-    
-    // Determine top miner using the sample index
-    let top_miner = if !winning_miners.is_empty() {
-        let idx = top_miner_sample as usize % winning_miners.len();
-        Some(winning_miners[idx])
-    } else {
-        None
-    };
-    
-    let top_miner_pubkey = top_miner
-        .map(|m| m.authority.to_string())
-        .unwrap_or_else(|| Pubkey::default().to_string());
     
     // Build deployments for ClickHouse
     let mut all_deployments = Vec::new();
     
     for (miner_pubkey, squares) in &snapshot.deployments {
-        let miner = snapshot.miners.get(miner_pubkey);
-        let is_this_top_miner = top_miner
-            .map(|m| m.authority.to_string() == *miner_pubkey)
-            .unwrap_or(false);
+        // Check if this miner is the top_miner (from on-chain data)
+        let is_this_top_miner = *miner_pubkey == top_miner_pubkey;
         
         for (&square_id, &(amount, slot)) in squares {
             let is_winner = square_id == winning_square;
@@ -260,6 +260,54 @@ fn calculate_rewards(
     let ore_share = 0u64;
     
     (sol_share, ore_share)
+}
+
+/// Wait for round to have both slot_hash and top_miner populated
+/// Polls every 2 seconds, times out after 60 seconds
+async fn wait_for_round_finalization(
+    state: &AppState,
+    round_id: u64,
+) -> anyhow::Result<Round> {
+    let max_attempts = 30; // 60 seconds total
+    let poll_interval = Duration::from_secs(2);
+    
+    for attempt in 1..=max_attempts {
+        match state.rpc.get_round(round_id).await {
+            Ok(round) => {
+                // Check if slot_hash is populated (not all zeros)
+                let has_slot_hash = round.slot_hash != [0u8; 32];
+                
+                // Check if top_miner is populated (not default pubkey)
+                let has_top_miner = round.top_miner != Pubkey::default();
+                
+                if has_slot_hash && has_top_miner {
+                    tracing::info!(
+                        "Round {} ready for finalization (attempt {}): top_miner={}",
+                        round_id, attempt, round.top_miner
+                    );
+                    return Ok(round);
+                }
+                
+                tracing::debug!(
+                    "Round {} not ready (attempt {}): slot_hash={}, top_miner={}",
+                    round_id, attempt, has_slot_hash, has_top_miner
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to fetch round {} (attempt {}): {}",
+                    round_id, attempt, e
+                );
+            }
+        }
+        
+        tokio::time::sleep(poll_interval).await;
+    }
+    
+    Err(anyhow::anyhow!(
+        "Timeout waiting for round {} to have slot_hash and top_miner after {} seconds",
+        round_id, max_attempts * 2
+    ))
 }
 
 #[cfg(test)]

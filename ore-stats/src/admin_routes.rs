@@ -978,6 +978,8 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Backfill workflow
         .route("/backfill/rounds", post(crate::backfill::backfill_rounds))
         .route("/rounds/pending", get(crate::backfill::get_pending_rounds))
+        .route("/rounds/{round_id}/status", get(crate::backfill::get_round_data_status))
+        .route("/rounds/{round_id}", delete(crate::backfill::delete_round_data))
         .route("/fetch-txns/{round_id}", post(crate::backfill::fetch_round_transactions))
         .route("/reconstruct/{round_id}", post(crate::backfill::reconstruct_round))
         .route("/verify/{round_id}", get(crate::backfill::get_round_for_verification))

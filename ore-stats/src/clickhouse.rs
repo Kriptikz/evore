@@ -128,6 +128,40 @@ impl ClickHouseClient {
         Ok(count > 0)
     }
     
+    /// Delete a round by ID (for re-backfill).
+    pub async fn delete_round(&self, round_id: u64) -> Result<u64, ClickHouseError> {
+        // ClickHouse uses ALTER TABLE ... DELETE for MergeTree tables
+        self.client
+            .query("ALTER TABLE rounds DELETE WHERE round_id = ?")
+            .bind(round_id)
+            .execute()
+            .await?;
+        
+        // Return approximate affected rows (ClickHouse DELETE is async)
+        Ok(1)
+    }
+    
+    /// Delete all deployments for a round (for re-backfill).
+    pub async fn delete_deployments_for_round(&self, round_id: u64) -> Result<u64, ClickHouseError> {
+        self.client
+            .query("ALTER TABLE deployments DELETE WHERE round_id = ?")
+            .bind(round_id)
+            .execute()
+            .await?;
+        
+        Ok(1)
+    }
+    
+    /// Count deployments for a round (to check if data exists).
+    pub async fn count_deployments_for_round(&self, round_id: u64) -> Result<u64, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count() FROM deployments WHERE round_id = ?")
+            .bind(round_id)
+            .fetch_one()
+            .await?;
+        Ok(count)
+    }
+    
     /// Get the oldest round ID in the database.
     pub async fn get_oldest_round_id(&self) -> Result<Option<u64>, ClickHouseError> {
         let result: Option<u64> = self.client
