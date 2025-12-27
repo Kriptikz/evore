@@ -393,7 +393,9 @@ pub fn spawn_cleanup_task(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
 // ============================================================================
 
 /// Spawn the EVORE accounts polling task
-/// Fetches Managers, Deployers, and Auth balances every 5 seconds
+/// Fetches Managers, Deployers, and Auth balances
+/// - Initial: Full fetch of all accounts
+/// - Subsequent: Incremental updates using changedSinceSlot (every 5s)
 pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     use crate::evore_cache::{
         parse_manager, parse_deployer, managed_miner_auth_pda, CachedAuthBalance,
@@ -405,17 +407,25 @@ pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> 
         
         let mut ticker = interval(Duration::from_secs(5));
         let mut initial_load_done = false;
+        let mut last_sync_slot: u64 = 0;
         
         loop {
             ticker.tick().await;
             
-            // Fetch all EVORE accounts
+            // Fetch EVORE accounts
             let helius = state.helius.clone();
             
-            // Fetch Managers
+            // Get current slot for tracking what we've synced
+            let current_slot = *state.slot_cache.read().await;
+            
+            // Fetch Managers (full or incremental)
             let managers_result = {
                 let mut api = helius.write().await;
-                api.get_all_evore_managers(None).await
+                if initial_load_done && last_sync_slot > 0 {
+                    api.get_evore_managers_changed_since(last_sync_slot, None).await
+                } else {
+                    api.get_all_evore_managers(None).await
+                }
             };
             
             match managers_result {
@@ -439,7 +449,9 @@ pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> 
                     }
                     
                     if !initial_load_done {
-                        tracing::info!("EVORE: Loaded {} managers", count);
+                        tracing::info!("EVORE: Loaded {} managers (full)", count);
+                    } else if count > 0 {
+                        tracing::debug!("EVORE: Updated {} managers (incremental)", count);
                     }
                 }
                 Err(e) => {
@@ -447,10 +459,14 @@ pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> 
                 }
             }
             
-            // Fetch Deployers
+            // Fetch Deployers (full or incremental)
             let deployers_result = {
                 let mut api = helius.write().await;
-                api.get_all_evore_deployers(None).await
+                if initial_load_done && last_sync_slot > 0 {
+                    api.get_evore_deployers_changed_since(last_sync_slot, None).await
+                } else {
+                    api.get_all_evore_deployers(None).await
+                }
             };
             
             match deployers_result {
@@ -473,12 +489,26 @@ pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> 
                     }
                     
                     if !initial_load_done {
-                        tracing::info!("EVORE: Loaded {} deployers", count);
+                        tracing::info!("EVORE: Loaded {} deployers (full)", count);
+                    } else if count > 0 {
+                        tracing::debug!("EVORE: Updated {} deployers (incremental)", count);
                     }
                 }
                 Err(e) => {
                     tracing::warn!("Failed to fetch EVORE deployers: {}", e);
                 }
+            }
+            
+            // Update last sync slot after managers/deployers are loaded
+            if current_slot > 0 {
+                last_sync_slot = current_slot;
+            }
+            
+            if !initial_load_done {
+                initial_load_done = true;
+                tracing::info!(
+                    "EVORE: Initial load complete (will use changedSinceSlot for future updates)"
+                );
             }
             
             // Fetch Auth balances for all managers

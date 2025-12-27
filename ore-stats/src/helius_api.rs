@@ -1637,6 +1637,24 @@ impl HeliusApi {
         &mut self,
         limit_per_page: Option<u32>,
     ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        self.get_evore_managers_since(None, limit_per_page).await
+    }
+    
+    /// Fetch EVORE Manager accounts changed since a slot (incremental updates).
+    pub async fn get_evore_managers_changed_since(
+        &mut self,
+        since_slot: u64,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        self.get_evore_managers_since(Some(since_slot), limit_per_page).await
+    }
+    
+    /// Internal: Fetch EVORE managers with optional changedSinceSlot.
+    async fn get_evore_managers_since(
+        &mut self,
+        since_slot: Option<u64>,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
         let mut all_accounts = Vec::new();
         let mut cursor: Option<String> = None;
         
@@ -1651,7 +1669,7 @@ impl HeliusApi {
                         encoding: Some("base64".to_string()),
                         limit: Some(limit_per_page.unwrap_or(1000)),
                         cursor: cursor.clone(),
-                        changed_since_slot: None,
+                        changed_since_slot: since_slot,
                         filters: vec![
                             ProgramAccountFilter::DataSize(manager_size),
                         ],
@@ -1668,13 +1686,35 @@ impl HeliusApi {
             cursor = page.cursor;
         }
         
-        tracing::info!("Fetched {} EVORE manager accounts", all_accounts.len());
+        if since_slot.is_some() {
+            tracing::debug!("Fetched {} EVORE managers changed since slot {}", all_accounts.len(), since_slot.unwrap());
+        } else {
+            tracing::info!("Fetched {} EVORE manager accounts (full)", all_accounts.len());
+        }
         Ok(all_accounts)
     }
     
     /// Fetch all EVORE Deployer accounts using getProgramAccountsV2.
     pub async fn get_all_evore_deployers(
         &mut self,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        self.get_evore_deployers_since(None, limit_per_page).await
+    }
+    
+    /// Fetch EVORE Deployer accounts changed since a slot (incremental updates).
+    pub async fn get_evore_deployers_changed_since(
+        &mut self,
+        since_slot: u64,
+        limit_per_page: Option<u32>,
+    ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
+        self.get_evore_deployers_since(Some(since_slot), limit_per_page).await
+    }
+    
+    /// Internal: Fetch EVORE deployers with optional changedSinceSlot.
+    async fn get_evore_deployers_since(
+        &mut self,
+        since_slot: Option<u64>,
         limit_per_page: Option<u32>,
     ) -> Result<Vec<ProgramAccountV2>, HeliusError> {
         let mut all_accounts = Vec::new();
@@ -1691,7 +1731,7 @@ impl HeliusApi {
                         encoding: Some("base64".to_string()),
                         limit: Some(limit_per_page.unwrap_or(1000)),
                         cursor: cursor.clone(),
-                        changed_since_slot: None,
+                        changed_since_slot: since_slot,
                         filters: vec![
                             ProgramAccountFilter::DataSize(deployer_size),
                         ],
@@ -1708,7 +1748,11 @@ impl HeliusApi {
             cursor = page.cursor;
         }
         
-        tracing::info!("Fetched {} EVORE deployer accounts", all_accounts.len());
+        if since_slot.is_some() {
+            tracing::debug!("Fetched {} EVORE deployers changed since slot {}", all_accounts.len(), since_slot.unwrap());
+        } else {
+            tracing::info!("Fetched {} EVORE deployer accounts (full)", all_accounts.len());
+        }
         Ok(all_accounts)
     }
     

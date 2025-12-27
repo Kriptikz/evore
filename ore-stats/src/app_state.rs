@@ -199,12 +199,14 @@ pub enum LiveBroadcastData {
 }
 
 /// Live deployment from WebSocket
+/// Batched: all squares for one miner at one slot in a single event
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LiveDeployment {
     pub round_id: u64,
     pub miner_pubkey: String,
-    pub square_id: u8,
-    pub amount: u64,
+    /// Array of 25 amounts, index = square_id, value = amount deployed on that square
+    pub amounts: [u64; 25],
+    /// The slot when this deployment occurred
     pub slot: u64,
 }
 

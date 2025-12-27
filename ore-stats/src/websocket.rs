@@ -377,31 +377,41 @@ pub async fn subscribe_to_program_accounts(
                     .entry(miner_pubkey.clone())
                     .or_insert_with(std::collections::HashMap::new);
                 
-                // Check each square for NEW deployments
+                // Collect all NEW deployments for this miner in this update
+                // Build a batched amounts array (index = square_id)
+                let mut amounts = [0u64; 25];
+                let mut has_new_deployments = false;
+                
                 for (square_id, &amount) in miner.deployed.iter().enumerate() {
                     if amount > 0 {
                         let square_id_u8 = square_id as u8;
                         
-                        // Only broadcast if this is a NEW deployment on this square
+                        // Only include if this is a NEW deployment on this square
                         // (miner can only deploy once per square per round)
                         if !miner_squares.contains_key(&square_id_u8) {
                             // Record this deployment with slot (for Phase 2 finalization)
                             miner_squares.insert(square_id_u8, (amount, slot));
                             
-                            let deployment = LiveDeployment {
-                                round_id: current_round_id,
-                                miner_pubkey: miner_pubkey.clone(),
-                                square_id: square_id_u8,
-                                amount,
-                                slot,
-                            };
-                            
-                            // Broadcast deployment
-                            let _ = state.deployment_broadcast.send(
-                                LiveBroadcastData::Deployment(deployment)
-                            );
+                            // Add to batched amounts array
+                            amounts[square_id] = amount;
+                            has_new_deployments = true;
                         }
                     }
+                }
+                
+                // Send one batched event per miner per slot (if there are new deployments)
+                if has_new_deployments {
+                    let deployment = LiveDeployment {
+                        round_id: current_round_id,
+                        miner_pubkey: miner_pubkey.clone(),
+                        amounts,
+                        slot,
+                    };
+                    
+                    // Broadcast batched deployment
+                    let _ = state.deployment_broadcast.send(
+                        LiveBroadcastData::Deployment(deployment)
+                    );
                 }
                 
                 // Update unique miners count
