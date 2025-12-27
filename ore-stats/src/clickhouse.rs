@@ -277,7 +277,7 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    timestamp,
+                    toUnixTimestamp64Milli(timestamp) AS timestamp,
                     program,
                     provider,
                     method,
@@ -303,7 +303,7 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    minute,
+                    toUnixTimestamp(minute) AS minute,
                     sum(total_requests) AS total_requests,
                     sum(success_count) AS success_count,
                     sum(error_count) AS error_count,
@@ -324,7 +324,7 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    day,
+                    toUnixTimestamp(toDateTime(day)) AS day,
                     program,
                     provider,
                     total_requests,
@@ -673,7 +673,7 @@ pub struct RpcProviderRow {
 /// Individual RPC error row.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcErrorRow {
-    pub timestamp: String, // DateTime64 comes as string
+    pub timestamp: i64, // Unix timestamp in milliseconds
     pub program: String,
     pub provider: String,
     pub method: String,
@@ -686,7 +686,7 @@ pub struct RpcErrorRow {
 /// Time series row for RPC metrics (minute granularity).
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcTimeseriesRow {
-    pub minute: String, // DateTime comes as string
+    pub minute: u32, // Unix timestamp in seconds
     pub total_requests: u64,
     pub success_count: u64,
     pub error_count: u64,
@@ -696,7 +696,7 @@ pub struct RpcTimeseriesRow {
 /// Daily summary row.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RpcDailyRow {
-    pub day: String, // Date comes as string
+    pub day: u32, // Unix timestamp in seconds (start of day)
     pub program: String,
     pub provider: String,
     pub total_requests: u64,
