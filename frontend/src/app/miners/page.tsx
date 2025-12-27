@@ -2,7 +2,9 @@
 
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import { api, LeaderboardEntry, OffsetResponse } from "@/lib/api";
+import { Header } from "@/components/Header";
 
 type MetricType = "net_sol" | "sol_earned" | "ore_earned" | "rounds_won";
 type RangeType = "all" | "last_60" | "last_100" | "today";
@@ -29,6 +31,7 @@ function truncateAddress(addr: string): string {
 }
 
 export default function MinersPage() {
+  const router = useRouter();
   const [leaderboard, setLeaderboard] = useState<OffsetResponse<LeaderboardEntry> | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -36,7 +39,8 @@ export default function MinersPage() {
   const [metric, setMetric] = useState<MetricType>("net_sol");
   const [range, setRange] = useState<RangeType>("all");
   const [page, setPage] = useState(1);
-  const [search, setSearch] = useState("");
+  const [searchAddress, setSearchAddress] = useState("");
+  const [searchError, setSearchError] = useState<string | null>(null);
 
   const fetchLeaderboard = useCallback(async () => {
     setLoading(true);
@@ -88,6 +92,27 @@ export default function MinersPage() {
     }
   };
 
+  const handleGoToMiner = () => {
+    const address = searchAddress.trim();
+    if (!address) {
+      setSearchError("Please enter an address");
+      return;
+    }
+    // Basic validation: Solana addresses are 32-44 chars, base58
+    if (address.length < 32 || address.length > 44) {
+      setSearchError("Invalid address format");
+      return;
+    }
+    setSearchError(null);
+    router.push(`/miners/${address}`);
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleGoToMiner();
+    }
+  };
+
   const formatValue = (entry: LeaderboardEntry): string => {
     switch (metric) {
       case "net_sol":
@@ -109,31 +134,10 @@ export default function MinersPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
-      {/* Header */}
-      <header className="border-b border-slate-800/50 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-2xl font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-              ORE Stats
-            </Link>
-            <span className="text-slate-500">/</span>
-            <h1 className="text-xl text-white font-semibold">Miners Leaderboard</h1>
-          </div>
-          <nav className="flex gap-4">
-            <Link href="/" className="text-slate-400 hover:text-white transition-colors">
-              Rounds
-            </Link>
-            <Link href="/miners" className="text-amber-400 font-medium">
-              Miners
-            </Link>
-            <Link href="/autominers" className="text-slate-400 hover:text-white transition-colors">
-              AutoMiners
-            </Link>
-          </nav>
-        </div>
-      </header>
+      <Header />
 
       <main className="max-w-7xl mx-auto px-4 py-8">
+        <h1 className="text-2xl font-bold text-white mb-6">Miners Leaderboard</h1>
         {/* Filters */}
         <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6 mb-8">
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
@@ -177,16 +181,33 @@ export default function MinersPage() {
               </div>
             </div>
 
-            {/* Search */}
+            {/* Go to Miner */}
             <div>
-              <label className="block text-sm text-slate-400 mb-2">Search Miner</label>
-              <input
-                type="text"
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                placeholder="Enter miner address..."
-                className="w-full px-4 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-              />
+              <label className="block text-sm text-slate-400 mb-2">Go to Miner</label>
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={searchAddress}
+                  onChange={(e) => {
+                    setSearchAddress(e.target.value);
+                    setSearchError(null);
+                  }}
+                  onKeyDown={handleSearchKeyDown}
+                  placeholder="Enter miner address..."
+                  className={`flex-1 px-4 py-2 bg-slate-900 border rounded-lg text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50 ${
+                    searchError ? "border-red-500" : "border-slate-700"
+                  }`}
+                />
+                <button
+                  onClick={handleGoToMiner}
+                  className="px-4 py-2 bg-amber-500 hover:bg-amber-600 text-black font-medium rounded-lg transition-colors whitespace-nowrap"
+                >
+                  View Profile
+                </button>
+              </div>
+              {searchError && (
+                <p className="text-red-400 text-xs mt-1">{searchError}</p>
+              )}
             </div>
           </div>
         </div>
@@ -249,9 +270,7 @@ export default function MinersPage() {
                   </tr>
                 </thead>
                 <tbody>
-                  {leaderboard.data
-                    .filter(entry => !search || entry.miner_pubkey.toLowerCase().includes(search.toLowerCase()))
-                    .map((entry, idx) => (
+                  {leaderboard.data.map((entry, idx) => (
                     <tr
                       key={entry.miner_pubkey}
                       className="border-b border-slate-700/30 hover:bg-slate-700/30 transition-colors"

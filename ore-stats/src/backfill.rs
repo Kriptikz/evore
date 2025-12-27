@@ -154,12 +154,24 @@ pub struct RoundWithData {
 pub struct RoundsWithDataResponse {
     pub rounds: Vec<RoundWithData>,
     pub total: u32,
+    /// Whether there are more rounds available
+    pub has_more: bool,
+    /// Cursor for next page (use as `before` param)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// Current page number (if using page-based pagination)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RoundsWithDataQuery {
+    /// Number of rounds per page (default 50, max 200)
     pub limit: Option<u32>,
-    pub offset: Option<u32>,
+    /// Page number (1-based, for offset pagination)
+    pub page: Option<u32>,
+    /// Cursor: get rounds before this round_id (for cursor-based pagination)
+    pub before: Option<u64>,
     /// Only show rounds with no deployments
     pub missing_deployments_only: Option<bool>,
     /// Only show rounds where deployments_sum != total_deployed (data integrity issue)
@@ -569,8 +581,14 @@ pub async fn get_round_data_status(
     }))
 }
 
-/// GET /admin/rounds/data?limit=50&offset=0&missing_deployments_only=false&invalid_only=false
-/// Get rounds with their deployment counts for admin verification
+/// GET /admin/rounds/data - Get rounds with deployment counts for admin verification
+/// 
+/// Query params:
+/// - `limit`: Number of rounds per page (default 50, max 200)
+/// - `page`: Page number (1-based) for offset pagination
+/// - `before`: Cursor - get rounds before this round_id (more efficient for deep pagination)
+/// - `missing_deployments_only`: Only show rounds with no deployments
+/// - `invalid_only`: Only show rounds where deployments don't match total_deployed
 pub async fn get_rounds_with_data(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RoundsWithDataQuery>,
@@ -579,8 +597,23 @@ pub async fn get_rounds_with_data(
     let missing_only = params.missing_deployments_only.unwrap_or(false);
     let invalid_only = params.invalid_only.unwrap_or(false);
     
-    // Get recent rounds from ClickHouse
-    let rounds = state.clickhouse.get_recent_rounds(limit).await
+    // Determine pagination mode
+    let (before_round_id, offset) = if let Some(before) = params.before {
+        // Cursor-based pagination
+        (Some(before), None)
+    } else if let Some(page) = params.page {
+        // Offset-based pagination (page 1 = offset 0)
+        let page = page.max(1);
+        (None, Some((page - 1) * limit))
+    } else {
+        // No pagination, get latest
+        (None, None)
+    };
+    
+    // Get rounds from ClickHouse with pagination
+    let (rounds, has_more) = state.clickhouse
+        .get_rounds_paginated(before_round_id, offset, limit)
+        .await
         .map_err(|e| {
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -629,11 +662,22 @@ pub async fn get_rounds_with_data(
         });
     }
     
+    // Get next cursor (last round_id in results before filtering)
+    // Note: We use the last enriched round since filtering may change what's available
+    let next_cursor = if has_more {
+        enriched.last().map(|r| r.round_id)
+    } else {
+        None
+    };
+    
     let total = enriched.len() as u32;
     
     Ok(Json(RoundsWithDataResponse {
         rounds: enriched,
         total,
+        has_more,
+        next_cursor,
+        page: params.page,
     }))
 }
 

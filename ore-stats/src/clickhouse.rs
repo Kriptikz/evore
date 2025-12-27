@@ -221,6 +221,121 @@ impl ClickHouseClient {
         Ok(results)
     }
     
+    /// Get rounds with pagination support.
+    /// - `before_round_id`: If provided, returns rounds with round_id < this value (cursor-based)
+    /// - `offset`: If provided and before_round_id is None, skips this many rounds (offset-based)
+    /// - `limit`: Max number of rounds to return
+    /// Returns (rounds, has_more)
+    pub async fn get_rounds_paginated(
+        &self,
+        before_round_id: Option<u64>,
+        offset: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<RoundRow>, bool), ClickHouseError> {
+        // Fetch one extra to determine if there are more
+        let fetch_limit = limit + 1;
+        
+        let results: Vec<RoundRow> = if let Some(before_id) = before_round_id {
+            // Cursor-based pagination - rounds before this ID
+            self.client
+                .query(r#"
+                    SELECT 
+                        round_id,
+                        start_slot,
+                        end_slot,
+                        winning_square,
+                        top_miner,
+                        top_miner_reward,
+                        total_deployed,
+                        total_vaulted,
+                        total_winnings,
+                        motherlode,
+                        motherlode_hit,
+                        total_deployments,
+                        unique_miners,
+                        source,
+                        created_at
+                    FROM rounds
+                    WHERE round_id < ?
+                    ORDER BY round_id DESC
+                    LIMIT ?
+                "#)
+                .bind(before_id)
+                .bind(fetch_limit)
+                .fetch_all()
+                .await?
+        } else if let Some(skip) = offset {
+            // Offset-based pagination
+            self.client
+                .query(r#"
+                    SELECT 
+                        round_id,
+                        start_slot,
+                        end_slot,
+                        winning_square,
+                        top_miner,
+                        top_miner_reward,
+                        total_deployed,
+                        total_vaulted,
+                        total_winnings,
+                        motherlode,
+                        motherlode_hit,
+                        total_deployments,
+                        unique_miners,
+                        source,
+                        created_at
+                    FROM rounds
+                    ORDER BY round_id DESC
+                    LIMIT ? OFFSET ?
+                "#)
+                .bind(fetch_limit)
+                .bind(skip)
+                .fetch_all()
+                .await?
+        } else {
+            // No pagination, just get latest
+            self.client
+                .query(r#"
+                    SELECT 
+                        round_id,
+                        start_slot,
+                        end_slot,
+                        winning_square,
+                        top_miner,
+                        top_miner_reward,
+                        total_deployed,
+                        total_vaulted,
+                        total_winnings,
+                        motherlode,
+                        motherlode_hit,
+                        total_deployments,
+                        unique_miners,
+                        source,
+                        created_at
+                    FROM rounds
+                    ORDER BY round_id DESC
+                    LIMIT ?
+                "#)
+                .bind(fetch_limit)
+                .fetch_all()
+                .await?
+        };
+        
+        let has_more = results.len() > limit as usize;
+        let rounds: Vec<RoundRow> = results.into_iter().take(limit as usize).collect();
+        
+        Ok((rounds, has_more))
+    }
+    
+    /// Get total count of rounds in database.
+    pub async fn get_rounds_count(&self) -> Result<u64, ClickHouseError> {
+        let result: u64 = self.client
+            .query("SELECT count() FROM rounds")
+            .fetch_one()
+            .await?;
+        Ok(result)
+    }
+    
     /// Get a single round by ID.
     pub async fn get_round_by_id(&self, round_id: u64) -> Result<Option<RoundRow>, ClickHouseError> {
         let result = self.client

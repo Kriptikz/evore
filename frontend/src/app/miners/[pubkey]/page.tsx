@@ -1,12 +1,25 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useMemo } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { api, MinerStats, HistoricalDeployment, CursorResponse } from "@/lib/api";
+import { Header } from "@/components/Header";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const ORE_DECIMALS = 11;
+
+// Grouped deployment for a single round
+interface RoundDeploymentGroup {
+  round_id: number;
+  amounts: number[];  // 25 squares
+  total_amount: number;
+  sol_earned: number;
+  ore_earned: number;
+  is_winner: boolean;
+  is_top_miner: boolean;
+  deployed_slot: number;  // First slot for this round
+}
 
 function formatSol(lamports: number): string {
   const sol = lamports / LAMPORTS_PER_SOL;
@@ -27,6 +40,157 @@ function truncateAddress(addr: string): string {
 }
 
 type TabType = "overview" | "deployments" | "wins";
+
+function MinerDeploymentsGrouped({
+  deployments,
+  loadingDeployments,
+  hasMore,
+  onLoadMore,
+}: {
+  deployments: HistoricalDeployment[];
+  loadingDeployments: boolean;
+  hasMore: boolean;
+  onLoadMore: () => void;
+}) {
+  // Group deployments by round
+  const groupedByRound = useMemo(() => {
+    const groups: Map<number, RoundDeploymentGroup> = new Map();
+    
+    for (const d of deployments) {
+      if (!groups.has(d.round_id)) {
+        groups.set(d.round_id, {
+          round_id: d.round_id,
+          amounts: new Array(25).fill(0),
+          total_amount: 0,
+          sol_earned: 0,
+          ore_earned: 0,
+          is_winner: false,
+          is_top_miner: false,
+          deployed_slot: d.deployed_slot,
+        });
+      }
+      
+      const group = groups.get(d.round_id)!;
+      group.amounts[d.square_id] += d.amount;
+      group.total_amount += d.amount;
+      group.sol_earned += d.sol_earned;
+      group.ore_earned += d.ore_earned;
+      if (d.is_winner) group.is_winner = true;
+      if (d.is_top_miner) group.is_top_miner = true;
+      // Use earliest slot
+      if (d.deployed_slot < group.deployed_slot && d.deployed_slot > 0) {
+        group.deployed_slot = d.deployed_slot;
+      }
+    }
+    
+    // Sort by round_id descending (newest first)
+    return Array.from(groups.values()).sort((a, b) => b.round_id - a.round_id);
+  }, [deployments]);
+
+  if (deployments.length === 0 && !loadingDeployments) {
+    return (
+      <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-8 text-center text-slate-400">
+        No deployment history found
+      </div>
+    );
+  }
+
+  return (
+    <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
+      <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
+        <h3 className="text-lg font-semibold text-white">
+          Deployment History ({groupedByRound.length} rounds)
+        </h3>
+      </div>
+      
+      <div className="max-h-[600px] overflow-y-auto divide-y divide-slate-700/30">
+        {groupedByRound.map((group) => {
+          const deployedSquares = group.amounts
+            .map((amt, idx) => amt > 0 ? idx : -1)
+            .filter(idx => idx >= 0);
+          
+          return (
+            <div
+              key={group.round_id}
+              className="px-6 py-4 hover:bg-slate-700/20 transition-colors"
+            >
+              {/* Round Header */}
+              <div className="flex items-center justify-between mb-3">
+                <div className="flex items-center gap-3">
+                  <Link
+                    href={`/?round=${group.round_id}`}
+                    className="text-lg font-bold text-amber-400 hover:text-amber-300 font-mono"
+                  >
+                    Round #{group.round_id}
+                  </Link>
+                  {group.is_top_miner && (
+                    <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 text-xs rounded-full">
+                      👑 Top Miner
+                    </span>
+                  )}
+                  {group.is_winner && !group.is_top_miner && (
+                    <span className="px-2 py-1 bg-green-500/20 text-green-400 text-xs rounded-full">
+                      Winner
+                    </span>
+                  )}
+                </div>
+                <div className="flex items-center gap-4 text-sm">
+                  <span className="font-mono text-white">{formatSol(group.total_amount)}</span>
+                  {group.sol_earned > 0 && (
+                    <span className="text-green-400 font-mono">+{formatSol(group.sol_earned)}</span>
+                  )}
+                  {group.ore_earned > 0 && (
+                    <span className="text-amber-400 font-mono">+{formatOre(group.ore_earned)}</span>
+                  )}
+                </div>
+              </div>
+              
+              {/* Squares Grid */}
+              <div className="flex flex-wrap gap-1.5">
+                {deployedSquares.map((squareId) => (
+                  <span
+                    key={squareId}
+                    className={`px-2 py-1 rounded text-xs ${
+                      group.is_winner && group.amounts[squareId] > 0
+                        ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/50"
+                        : "bg-slate-700 text-slate-400"
+                    }`}
+                    title={`Square ${squareId}: ${formatSol(group.amounts[squareId])}`}
+                  >
+                    ◼{squareId}: {formatSol(group.amounts[squareId])}
+                  </span>
+                ))}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Load More */}
+      {hasMore && (
+        <div className="p-4 border-t border-slate-700/50 text-center">
+          <button
+            onClick={onLoadMore}
+            disabled={loadingDeployments}
+            className={`px-6 py-2 rounded-lg transition-colors ${
+              loadingDeployments
+                ? "bg-slate-700 text-slate-500 cursor-not-allowed"
+                : "bg-amber-500 hover:bg-amber-600 text-black font-medium"
+            }`}
+          >
+            {loadingDeployments ? "Loading..." : "Load More Rounds"}
+          </button>
+        </div>
+      )}
+      
+      {loadingDeployments && groupedByRound.length === 0 && (
+        <div className="flex items-center justify-center p-8">
+          <div className="w-6 h-6 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      )}
+    </div>
+  );
+}
 
 export default function MinerProfilePage() {
   const params = useParams();
@@ -102,33 +266,7 @@ export default function MinerProfilePage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
-      {/* Header */}
-      <header className="border-b border-slate-800/50 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-2xl font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-              ORE Stats
-            </Link>
-            <span className="text-slate-500">/</span>
-            <Link href="/miners" className="text-slate-400 hover:text-white transition-colors">
-              Miners
-            </Link>
-            <span className="text-slate-500">/</span>
-            <h1 className="text-xl text-white font-mono">{truncateAddress(pubkey)}</h1>
-          </div>
-          <nav className="flex gap-4">
-            <Link href="/" className="text-slate-400 hover:text-white transition-colors">
-              Rounds
-            </Link>
-            <Link href="/miners" className="text-amber-400 font-medium">
-              Miners
-            </Link>
-            <Link href="/autominers" className="text-slate-400 hover:text-white transition-colors">
-              AutoMiners
-            </Link>
-          </nav>
-        </div>
-      </header>
+      <Header />
 
       <main className="max-w-7xl mx-auto px-4 py-8">
         {/* Address Header */}
@@ -284,94 +422,12 @@ export default function MinerProfilePage() {
             )}
 
             {(activeTab === "deployments" || activeTab === "wins") && (
-              <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-                <table className="w-full">
-                  <thead>
-                    <tr className="border-b border-slate-700/50 bg-slate-800/80">
-                      <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">Round</th>
-                      <th className="text-center px-6 py-4 text-sm font-medium text-slate-400">Square</th>
-                      <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">Deployed</th>
-                      <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">SOL Earned</th>
-                      <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">ORE Earned</th>
-                      <th className="text-center px-6 py-4 text-sm font-medium text-slate-400">Status</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {deployments.length === 0 && !loadingDeployments && (
-                      <tr>
-                        <td colSpan={6} className="text-center py-8 text-slate-400">
-                          No deployment history found
-                        </td>
-                      </tr>
-                    )}
-                    {deployments.map((d, idx) => (
-                      <tr
-                        key={`${d.round_id}-${d.square_id}-${idx}`}
-                        className="border-b border-slate-700/30 hover:bg-slate-700/30 transition-colors"
-                      >
-                        <td className="px-6 py-4">
-                          <Link
-                            href={`/rounds?round=${d.round_id}`}
-                            className="text-amber-400 hover:text-amber-300 font-mono"
-                          >
-                            #{d.round_id}
-                          </Link>
-                        </td>
-                        <td className="px-6 py-4 text-center">
-                          <span className={`inline-flex items-center justify-center w-8 h-8 rounded-lg text-sm font-bold ${
-                            d.is_winner ? "bg-yellow-500/20 text-yellow-400 ring-2 ring-yellow-500/50" : "bg-slate-700 text-slate-300"
-                          }`}>
-                            {d.square_id}
-                          </span>
-                        </td>
-                        <td className="px-6 py-4 text-right font-mono text-white">
-                          {formatSol(d.amount)}
-                        </td>
-                        <td className="px-6 py-4 text-right font-mono text-green-400">
-                          {d.sol_earned > 0 ? formatSol(d.sol_earned) : "-"}
-                        </td>
-                        <td className="px-6 py-4 text-right font-mono text-amber-400">
-                          {d.ore_earned > 0 ? formatOre(d.ore_earned) : "-"}
-                        </td>
-                        <td className="px-6 py-4 text-center">
-                          <div className="flex items-center justify-center gap-2">
-                            {d.is_winner && (
-                              <span className="px-2 py-1 bg-green-500/20 text-green-400 text-xs rounded-full">
-                                Winner
-                              </span>
-                            )}
-                            {d.is_top_miner && (
-                              <span className="px-2 py-1 bg-yellow-500/20 text-yellow-400 text-xs rounded-full">
-                                👑 Top
-                              </span>
-                            )}
-                            {!d.is_winner && !d.is_top_miner && (
-                              <span className="text-slate-500 text-sm">—</span>
-                            )}
-                          </div>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-
-                {/* Load More */}
-                {deploymentsResponse?.has_more && (
-                  <div className="p-4 border-t border-slate-700/50 text-center">
-                    <button
-                      onClick={loadMoreDeployments}
-                      disabled={loadingDeployments}
-                      className={`px-6 py-2 rounded-lg transition-colors ${
-                        loadingDeployments
-                          ? "bg-slate-700 text-slate-500 cursor-not-allowed"
-                          : "bg-amber-500 hover:bg-amber-600 text-black font-medium"
-                      }`}
-                    >
-                      {loadingDeployments ? "Loading..." : "Load More"}
-                    </button>
-                  </div>
-                )}
-              </div>
+              <MinerDeploymentsGrouped 
+                deployments={deployments}
+                loadingDeployments={loadingDeployments}
+                hasMore={deploymentsResponse?.has_more || false}
+                onLoadMore={loadMoreDeployments}
+              />
             )}
           </>
         )}

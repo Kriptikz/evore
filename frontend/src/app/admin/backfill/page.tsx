@@ -171,8 +171,14 @@ export default function BackfillPage() {
   const [roundsData, setRoundsData] = useState<RoundWithData[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [showMissingOnly, setShowMissingOnly] = useState(false);
+  const [showInvalidOnly, setShowInvalidOnly] = useState(false);
   const [selectedRounds, setSelectedRounds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  
+  // Pagination state
+  const [hasMore, setHasMore] = useState(false);
+  const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [loadingMore, setLoadingMore] = useState(false);
 
   const fetchPendingRounds = useCallback(async () => {
     if (!isAuthenticated) return;
@@ -187,19 +193,53 @@ export default function BackfillPage() {
     }
   }, [isAuthenticated]);
 
-  const fetchRoundsData = useCallback(async () => {
+  const fetchRoundsData = useCallback(async (reset = true) => {
     if (!isAuthenticated) return;
     setDataLoading(true);
     try {
-      const res = await api.getRoundsWithData(100, showMissingOnly);
+      const res = await api.getRoundsWithData({
+        limit: 100,
+        missingDeploymentsOnly: showMissingOnly,
+        invalidOnly: showInvalidOnly,
+      });
       setRoundsData(res.rounds);
+      setHasMore(res.has_more);
+      setNextCursor(res.next_cursor ?? null);
       setError(null);
+      if (reset) {
+        setSelectedRounds(new Set());
+      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to fetch rounds data");
     } finally {
       setDataLoading(false);
     }
-  }, [isAuthenticated, showMissingOnly]);
+  }, [isAuthenticated, showMissingOnly, showInvalidOnly]);
+  
+  const loadMoreRoundsData = useCallback(async () => {
+    if (!isAuthenticated || !hasMore || !nextCursor || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const res = await api.getRoundsWithData({
+        limit: 100,
+        before: nextCursor,
+        missingDeploymentsOnly: showMissingOnly,
+        invalidOnly: showInvalidOnly,
+      });
+      if (res.rounds.length > 0) {
+        setRoundsData(prev => [...prev, ...res.rounds]);
+        setHasMore(res.has_more);
+        setNextCursor(res.next_cursor ?? null);
+      } else {
+        setHasMore(false);
+        setNextCursor(null);
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load more rounds");
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [isAuthenticated, hasMore, nextCursor, loadingMore, showMissingOnly, showInvalidOnly]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -212,9 +252,9 @@ export default function BackfillPage() {
 
   useEffect(() => {
     if (isAuthenticated) {
-      fetchRoundsData();
+      fetchRoundsData(true);
     }
-  }, [showMissingOnly, fetchRoundsData, isAuthenticated]);
+  }, [showMissingOnly, showInvalidOnly, fetchRoundsData, isAuthenticated]);
 
   const handleBackfill = async () => {
     setBackfillLoading(true);
@@ -374,18 +414,39 @@ export default function BackfillPage() {
                   <input
                     type="checkbox"
                     checked={showMissingOnly}
-                    onChange={(e) => setShowMissingOnly(e.target.checked)}
+                    onChange={(e) => {
+                      setShowMissingOnly(e.target.checked);
+                      if (e.target.checked) setShowInvalidOnly(false);
+                    }}
                     className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500"
                   />
-                  <span className="text-sm text-slate-300">Show missing deployments only</span>
+                  <span className="text-sm text-slate-300">Missing deployments only</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={showInvalidOnly}
+                    onChange={(e) => {
+                      setShowInvalidOnly(e.target.checked);
+                      if (e.target.checked) setShowMissingOnly(false);
+                    }}
+                    className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-orange-500"
+                  />
+                  <span className="text-sm text-slate-300">Invalid data only</span>
                 </label>
               </div>
-              <button
-                onClick={fetchRoundsData}
-                className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
-              >
-                Refresh
-              </button>
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-slate-400">
+                  {roundsData.length} rounds loaded
+                  {hasMore && " (more available)"}
+                </span>
+                <button
+                  onClick={() => fetchRoundsData(true)}
+                  className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
+                >
+                  Refresh
+                </button>
+              </div>
             </div>
 
             {/* Rounds Data Table */}
@@ -498,6 +559,26 @@ export default function BackfillPage() {
                       Deselect All
                     </button>
                   </div>
+                  
+                  {/* Load More Button */}
+                  {hasMore && (
+                    <div className="mt-4">
+                      <button
+                        onClick={loadMoreRoundsData}
+                        disabled={loadingMore}
+                        className="w-full py-3 bg-slate-700 hover:bg-slate-600 text-white rounded-lg disabled:opacity-50 transition-colors flex items-center justify-center gap-2"
+                      >
+                        {loadingMore ? (
+                          <>
+                            <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                            Loading...
+                          </>
+                        ) : (
+                          "Load More Rounds"
+                        )}
+                      </button>
+                    </div>
+                  )}
                 </>
               )}
             </div>

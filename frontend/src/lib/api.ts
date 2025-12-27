@@ -187,11 +187,17 @@ export interface RoundWithData {
   motherlode: number;
   deployment_count: number;
   source: string;
+  deployments_sum?: number;
+  is_valid?: boolean;
+  discrepancy?: number;
 }
 
 export interface RoundsWithDataResponse {
   rounds: RoundWithData[];
   total: number;
+  has_more: boolean;
+  next_cursor?: number;
+  page?: number;
 }
 
 export interface RoundStatus {
@@ -781,11 +787,21 @@ class ApiClient {
     return this.request("DELETE", `/admin/rounds/${roundId}?${params.toString()}`, { requireAuth: true });
   }
 
-  async getRoundsWithData(limit = 50, missingDeploymentsOnly = false): Promise<RoundsWithDataResponse> {
+  async getRoundsWithData(options?: {
+    limit?: number;
+    page?: number;
+    before?: number;
+    missingDeploymentsOnly?: boolean;
+    invalidOnly?: boolean;
+  }): Promise<RoundsWithDataResponse> {
     const params = new URLSearchParams();
-    params.set("limit", limit.toString());
-    if (missingDeploymentsOnly) params.set("missing_deployments_only", "true");
-    return this.request("GET", `/admin/rounds/data?${params.toString()}`, { requireAuth: true });
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.page) params.set("page", options.page.toString());
+    if (options?.before) params.set("before", options.before.toString());
+    if (options?.missingDeploymentsOnly) params.set("missing_deployments_only", "true");
+    if (options?.invalidOnly) params.set("invalid_only", "true");
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/admin/rounds/data${query}`, { requireAuth: true });
   }
 
   async bulkDeleteRounds(roundIds: number[], deleteRounds: boolean, deleteDeployments: boolean): Promise<BulkDeleteResponse> {

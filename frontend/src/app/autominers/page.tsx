@@ -6,6 +6,7 @@ import { useWallet } from "@solana/wallet-adapter-react";
 import { PublicKey } from "@solana/web3.js";
 import { AutoMinerCard } from "@/components/AutoMinerCard";
 import { BulkActionBar } from "@/components/BulkActionBar";
+import { Header } from "@/components/Header";
 import { useEvore } from "@/hooks/useEvore";
 import { formatSol, formatOre } from "@/lib/accounts";
 import { DEFAULT_DEPLOYER_PUBKEY, DEFAULT_DEPLOYER_BPS_FEE, DEFAULT_DEPLOYER_FLAT_FEE } from "@/lib/constants";
@@ -204,29 +205,7 @@ export default function AutoMinersPage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
-      {/* Header */}
-      <header className="border-b border-slate-800/50 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-2xl font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-              ORE Stats
-            </Link>
-            <span className="text-slate-500">/</span>
-            <h1 className="text-xl text-white font-semibold">AutoMiners</h1>
-          </div>
-          <nav className="flex gap-4">
-            <Link href="/" className="text-slate-400 hover:text-white transition-colors">
-              Rounds
-            </Link>
-            <Link href="/miners" className="text-slate-400 hover:text-white transition-colors">
-              Miners
-            </Link>
-            <Link href="/autominers" className="text-amber-400 font-medium">
-              AutoMiners
-            </Link>
-          </nav>
-        </div>
-      </header>
+      <Header />
 
       <main className="max-w-5xl mx-auto px-4 py-8">
         {!connected ? (

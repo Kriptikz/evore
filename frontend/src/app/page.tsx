@@ -1,7 +1,10 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, Suspense } from "react";
 import Link from "next/link";
+import { useSearchParams } from "next/navigation";
+import { useOreStats, formatSol, formatOre, truncateAddress, type PendingRound, type RoundSummary as ContextRoundSummary } from "@/context/OreStatsContext";
+import { Header } from "@/components/Header";
 
 // Types
 interface RoundSummary {
@@ -56,6 +59,36 @@ interface LiveRound {
   unique_miners: number;
 }
 
+// u64::MAX as a JavaScript number (will be a large number from JSON)
+const U64_MAX = 18446744073709551615;
+const INTERMISSION_SLOTS = 35;
+
+type RoundStatus = "active" | "intermission" | "awaiting_reset" | "waiting";
+
+// Derive round status from raw data
+function getRoundStatus(round: LiveRound, currentSlot?: number): { status: RoundStatus; slotsSinceEnd?: number } {
+  // If end_slot is u64::MAX (or very large), waiting for first deployment
+  if (round.end_slot > 9999999999999999) {
+    return { status: "waiting" };
+  }
+  
+  // Use current_slot if available, otherwise calculate from slots_remaining
+  const slot = currentSlot ?? (round.end_slot - round.slots_remaining);
+  
+  // If current slot is past end_slot, round has ended
+  if (slot > round.end_slot) {
+    const slotsSinceEnd = slot - round.end_slot;
+    
+    if (slotsSinceEnd <= INTERMISSION_SLOTS) {
+      return { status: "intermission", slotsSinceEnd };
+      } else {
+      return { status: "awaiting_reset", slotsSinceEnd };
+    }
+  }
+  
+  return { status: "active" };
+}
+
 // SSE Live Deployment (batched by miner per slot)
 interface LiveDeploymentEvent {
   round_id: number;
@@ -76,9 +109,8 @@ interface LiveDeploymentDisplay {
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 // Format functions
-const formatSol = (lamports: number) => (lamports / 1e9).toFixed(4);
-const formatOre = (atomicOre: number) => (atomicOre / 1e11).toFixed(2); // ORE has 11 decimals
-const truncate = (s: string) => s.length > 12 ? `${s.slice(0, 6)}...${s.slice(-4)}` : s;
+// Format helpers imported from context
+const truncate = truncateAddress;
 
 function SquareGrid({
   deployed,
@@ -150,17 +182,30 @@ function SquareGrid({
 
 function RoundsList({
   rounds,
+  pendingRounds,
   selectedRoundId,
   onSelectRound,
   liveRound,
+  currentSlot,
+  hasMore,
+  loadingMore,
+  onLoadMore,
 }: {
-  rounds: RoundSummary[];
+  rounds: RoundSummary[] | ContextRoundSummary[];
+  pendingRounds: PendingRound[];
   selectedRoundId: number | null;
   onSelectRound: (id: number) => void;
   liveRound: LiveRound | null;
+  currentSlot: number;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onLoadMore: () => void;
 }) {
+  // Use context's phase detection
+  const { phase, slotsRemaining, slotsSinceEnd } = useOreStats();
+  
   return (
-    <div className="space-y-1.5 overflow-y-auto max-h-[calc(100vh-220px)] pr-1">
+    <div className="space-y-1.5 overflow-y-auto max-h-[calc(100vh-280px)] pr-1">
       {/* Live round */}
       {liveRound && (
         <button
@@ -173,11 +218,36 @@ function RoundsList({
         >
           <div className="flex items-center justify-between">
             <span className="flex items-center gap-2">
-              <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-              <span className="text-emerald-400 font-bold">LIVE</span>
+              {phase === "active" && (
+                <>
+                  <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
+                  <span className="text-emerald-400 font-bold">LIVE</span>
+                </>
+              )}
+              {phase === "intermission" && (
+                <>
+                  <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse" />
+                  <span className="text-blue-400 font-bold">INTERMISSION</span>
+                </>
+              )}
+              {phase === "awaiting_reset" && (
+                <>
+                  <span className="w-2 h-2 bg-orange-500 rounded-full animate-pulse" />
+                  <span className="text-orange-400 font-bold">RESETTING</span>
+                </>
+              )}
+              {phase === "waiting" && (
+                <>
+                  <span className="w-2 h-2 bg-yellow-500 rounded-full animate-pulse" />
+                  <span className="text-yellow-400 font-bold">STARTING</span>
+                </>
+              )}
             </span>
             <span className="text-xs text-slate-400">
-              {liveRound.slots_remaining} slots
+              {phase === "active" && `${slotsRemaining} slots`}
+              {phase === "intermission" && `~${35 - slotsSinceEnd}s`}
+              {phase === "awaiting_reset" && "pending"}
+              {phase === "waiting" && "ready"}
             </span>
           </div>
           <div className="text-xs text-slate-500 mt-1">
@@ -185,6 +255,27 @@ function RoundsList({
           </div>
         </button>
       )}
+      
+      {/* Pending/Finalizing rounds */}
+      {pendingRounds.map((round) => (
+        <div
+          key={`pending-${round.round_id}`}
+          className="w-full text-left p-3 rounded-xl bg-purple-500/10 border border-purple-500/30"
+        >
+          <div className="flex items-center justify-between">
+            <span className="flex items-center gap-2">
+              <span className="w-2 h-2 bg-purple-500 rounded-full animate-pulse" />
+              <span className="text-purple-400 font-bold">FINALIZING</span>
+            </span>
+            <span className="text-xs text-purple-400/70">
+              {round.unique_miners} miners
+            </span>
+          </div>
+          <div className="text-xs text-slate-500 mt-1">
+            Round #{round.round_id} • {formatSol(round.total_deployed)} deployed
+          </div>
+        </div>
+      ))}
       
       {/* Historical rounds */}
       {rounds.map((round) => (
@@ -194,16 +285,23 @@ function RoundsList({
           className={`w-full text-left p-3 rounded-xl transition-all ${
             selectedRoundId === round.round_id
               ? "bg-amber-500/20 border border-amber-500/50"
-              : "bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50"
+              : round.motherlode > 0
+                ? "bg-purple-900/30 hover:bg-purple-800/40 border border-purple-500/30"
+                : "bg-slate-800/50 hover:bg-slate-700/50 border border-slate-700/50"
           }`}
         >
           <div className="flex items-center justify-between">
             <span className="font-mono font-bold text-white">
               #{round.round_id}
             </span>
-            {round.motherlode_hit && (
-              <span className="text-amber-400 text-xs">💎</span>
-            )}
+            <div className="flex items-center gap-1.5">
+              {round.motherlode > 0 && (
+                <span className="text-purple-400 text-xs">💎 {formatSol(round.motherlode)}</span>
+              )}
+              {round.motherlode_hit && !round.motherlode && (
+                <span className="text-amber-400 text-xs">💎</span>
+              )}
+            </div>
           </div>
           <div className="flex items-center gap-2 text-xs text-slate-400 mt-1">
             <span className="bg-slate-700/80 px-1.5 py-0.5 rounded">
@@ -211,13 +309,45 @@ function RoundsList({
             </span>
             <span>{formatSol(round.total_winnings)} SOL</span>
           </div>
-          <div className="text-xs text-slate-500 mt-1">
-            {round.unique_miners} miners
+          <div className="flex items-center justify-between text-xs text-slate-500 mt-1">
+            <span>{round.unique_miners} miners</span>
+            <span className="text-slate-600 font-mono text-[10px]">
+              {truncateAddress(round.top_miner)}
+            </span>
           </div>
         </button>
       ))}
+      
+      {/* Load More Button */}
+      {hasMore && (
+        <button
+          onClick={onLoadMore}
+          disabled={loadingMore}
+          className="w-full p-3 rounded-xl bg-slate-800/30 hover:bg-slate-700/50 border border-slate-700/50 transition-all text-center text-sm text-slate-400 hover:text-white disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          {loadingMore ? (
+            <span className="flex items-center justify-center gap-2">
+              <span className="w-4 h-4 border-2 border-amber-500 border-t-transparent rounded-full animate-spin" />
+              Loading...
+            </span>
+          ) : (
+            "Load More Rounds"
+          )}
+        </button>
+      )}
     </div>
   );
+}
+
+// Grouped deployment by miner at a slot
+interface MinerDeploymentGroup {
+  miner_pubkey: string;
+  slot: number;
+  amounts: number[];  // 25 squares
+  total_amount: number;
+  sol_earned: number;
+  ore_earned: number;
+  deployed_on_winning: boolean;
 }
 
 function DeploymentsGroupedBySlot({
@@ -229,16 +359,51 @@ function DeploymentsGroupedBySlot({
   winningSquare?: number;
   topMiner: string;
 }) {
-  const groupedBySlot = useMemo(() => {
-    const groups: Map<number, DeploymentSummary[]> = new Map();
+  // Group by slot, then by miner within each slot
+  const groupedBySlotAndMiner = useMemo(() => {
+    // First group by slot
+    const slotGroups: Map<number, Map<string, MinerDeploymentGroup>> = new Map();
+    
     for (const d of deployments) {
       const slot = d.deployed_slot;
-      if (!groups.has(slot)) {
-        groups.set(slot, []);
+      if (!slotGroups.has(slot)) {
+        slotGroups.set(slot, new Map());
       }
-      groups.get(slot)!.push(d);
+      
+      const minerGroups = slotGroups.get(slot)!;
+      if (!minerGroups.has(d.miner_pubkey)) {
+        minerGroups.set(d.miner_pubkey, {
+          miner_pubkey: d.miner_pubkey,
+          slot,
+          amounts: new Array(25).fill(0),
+          total_amount: 0,
+          sol_earned: 0,
+          ore_earned: 0,
+          deployed_on_winning: false,
+        });
+      }
+      
+      const group = minerGroups.get(d.miner_pubkey)!;
+      group.amounts[d.square_id] += d.amount;
+      group.total_amount += d.amount;
+      group.sol_earned += d.sol_earned;
+      group.ore_earned += d.ore_earned;
+      if (d.square_id === winningSquare) {
+        group.deployed_on_winning = true;
+      }
     }
-    return Array.from(groups.entries()).sort((a, b) => b[0] - a[0]);
+    
+    // Convert to sorted array: [(slot, [minerGroups])]
+    return Array.from(slotGroups.entries())
+      .sort((a, b) => b[0] - a[0])  // Sort slots descending
+      .map(([slot, minerMap]) => ({
+        slot,
+        miners: Array.from(minerMap.values()),
+      }));
+  }, [deployments, winningSquare]);
+
+  const uniqueMiners = useMemo(() => {
+    return new Set(deployments.map(d => d.miner_pubkey)).size;
   }, [deployments]);
 
   if (deployments.length === 0) {
@@ -253,59 +418,79 @@ function DeploymentsGroupedBySlot({
     <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
       <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
         <h3 className="text-lg font-semibold text-white">
-          Deployments ({deployments.length})
+          Deployments ({uniqueMiners} miners)
         </h3>
         <span className="text-sm text-slate-400">
-          {groupedBySlot.length} slot{groupedBySlot.length !== 1 ? 's' : ''}
+          {groupedBySlotAndMiner.length} slot{groupedBySlotAndMiner.length !== 1 ? 's' : ''}
         </span>
       </div>
       <div className="max-h-[400px] overflow-y-auto">
-        {groupedBySlot.slice(0, 50).map(([slot, slotDeployments]) => (
+        {groupedBySlotAndMiner.slice(0, 50).map(({ slot, miners }) => (
           <div key={slot} className="border-b border-slate-700/30 last:border-0">
             <div className="px-4 py-2 bg-slate-900/50 flex justify-between items-center sticky top-0">
               <span className="text-xs font-mono text-slate-400">
                 Slot {slot.toLocaleString()}
               </span>
               <span className="text-xs text-slate-500">
-                {slotDeployments.length} miner{slotDeployments.length !== 1 ? 's' : ''}
+                {miners.length} miner{miners.length !== 1 ? 's' : ''}
               </span>
             </div>
             <div className="divide-y divide-slate-700/20">
-              {slotDeployments.map((d, i) => {
-                const isWinner = d.square_id === winningSquare;
-                const isTopMiner = d.miner_pubkey === topMiner;
+              {miners.map((group) => {
+                const isTopMiner = group.miner_pubkey === topMiner;
+                const deployedSquares = group.amounts
+                  .map((amt, idx) => amt > 0 ? idx : -1)
+                  .filter(idx => idx >= 0);
                 
                 return (
                   <div 
-                    key={`${d.miner_pubkey}-${d.square_id}-${i}`}
-                    className="px-4 py-2 flex items-center justify-between hover:bg-slate-700/20"
+                    key={`${group.miner_pubkey}-${slot}`}
+                    className="px-4 py-3 hover:bg-slate-700/20"
                   >
-                    <div className="flex items-center gap-3">
-                      <Link 
-                        href={`/miners/${d.miner_pubkey}`}
-                        className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
-                      >
-                        {truncate(d.miner_pubkey)}
-                      </Link>
-                      {isTopMiner && <span className="text-amber-400" title="Top Miner">👑</span>}
-                      {isWinner && !isTopMiner && <span className="text-emerald-400" title="Winner">✓</span>}
-                    </div>
-                    <div className="flex items-center gap-4">
-                      <span className={`px-2 py-0.5 rounded text-xs ${
-                        isWinner ? "bg-amber-500/20 text-amber-400" : "bg-slate-700 text-slate-400"
-                      }`}>
-                        ◼ {d.square_id}
-                      </span>
-                      <span className="font-mono text-sm text-white w-24 text-right">
-                        {formatSol(d.amount)}
-                      </span>
-                      {isWinner ? (
-                        <span className="text-emerald-400 text-sm w-24 text-right">
-                          +{formatSol(d.sol_earned)}
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <Link 
+                          href={`/miners/${group.miner_pubkey}`}
+                          className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
+                        >
+                          {truncate(group.miner_pubkey)}
+                        </Link>
+                        {isTopMiner && <span className="text-amber-400" title="Top Miner">👑</span>}
+                        {group.deployed_on_winning && !isTopMiner && (
+                          <span className="text-emerald-400" title="Winner">✓</span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-4">
+                        <span className="font-mono text-sm text-white w-24 text-right">
+                          {formatSol(group.total_amount)}
                         </span>
-                      ) : (
-                        <span className="text-slate-600 text-sm w-24 text-right">—</span>
-                      )}
+                        {group.sol_earned > 0 ? (
+                          <span className="text-emerald-400 text-sm w-24 text-right">
+                            +{formatSol(group.sol_earned)}
+                          </span>
+                        ) : (
+                          <span className="text-slate-600 text-sm w-24 text-right">—</span>
+                        )}
+                      </div>
+                    </div>
+                    {/* Square breakdown */}
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {deployedSquares.map((squareId) => {
+                        const isWinning = squareId === winningSquare;
+                        return (
+                          <span 
+                            key={squareId}
+                            className={`px-2 py-0.5 rounded text-xs ${
+                              isWinning 
+                                ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/50" 
+                                : "bg-slate-700 text-slate-400"
+                            }`}
+                            title={`${formatSol(group.amounts[squareId])} SOL`}
+                          >
+                            ◼{squareId}: {formatSol(group.amounts[squareId])}
+                          </span>
+                        );
+                      })}
                     </div>
                   </div>
                 );
@@ -313,22 +498,55 @@ function DeploymentsGroupedBySlot({
             </div>
           </div>
         ))}
-              </div>
-              </div>
+      </div>
+    </div>
   );
 }
 
+// Grouped live deployment by miner at a slot
+interface LiveMinerGroup {
+  miner_pubkey: string;
+  slot: number;
+  amounts: number[];  // 25 squares
+  total_amount: number;
+}
+
 function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisplay[] }) {
-  const groupedBySlot = useMemo(() => {
-    const groups: Map<number, LiveDeploymentDisplay[]> = new Map();
+  // Group by slot, then by miner within each slot
+  const groupedBySlotAndMiner = useMemo(() => {
+    const slotGroups: Map<number, Map<string, LiveMinerGroup>> = new Map();
+    
     for (const d of deployments) {
-      if (!groups.has(d.slot)) {
-        groups.set(d.slot, []);
+      if (!slotGroups.has(d.slot)) {
+        slotGroups.set(d.slot, new Map());
       }
-      groups.get(d.slot)!.push(d);
+      
+      const minerGroups = slotGroups.get(d.slot)!;
+      if (!minerGroups.has(d.miner_pubkey)) {
+        minerGroups.set(d.miner_pubkey, {
+          miner_pubkey: d.miner_pubkey,
+          slot: d.slot,
+          amounts: new Array(25).fill(0),
+          total_amount: 0,
+        });
+      }
+      
+      const group = minerGroups.get(d.miner_pubkey)!;
+      group.amounts[d.square_id] += d.amount;
+      group.total_amount += d.amount;
     }
-    // Sort by slot descending (newest first)
-    return Array.from(groups.entries()).sort((a, b) => b[0] - a[0]);
+    
+    // Convert to sorted array
+    return Array.from(slotGroups.entries())
+      .sort((a, b) => b[0] - a[0])  // Sort slots descending
+      .map(([slot, minerMap]) => ({
+        slot,
+        miners: Array.from(minerMap.values()),
+      }));
+  }, [deployments]);
+
+  const uniqueMiners = useMemo(() => {
+    return new Set(deployments.map(d => d.miner_pubkey)).size;
   }, [deployments]);
 
   return (
@@ -336,47 +554,60 @@ function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisp
       <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
         <h3 className="text-lg font-semibold text-white flex items-center gap-2">
           <span className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" />
-          Live Deployments ({deployments.length})
+          Live Deployments ({uniqueMiners} miners)
         </h3>
         <span className="text-sm text-slate-400">
-          {groupedBySlot.length} slot{groupedBySlot.length !== 1 ? 's' : ''}
+          {groupedBySlotAndMiner.length} slot{groupedBySlotAndMiner.length !== 1 ? 's' : ''}
         </span>
       </div>
       <div className="max-h-[400px] overflow-y-auto">
-        {groupedBySlot.slice(0, 50).map(([slot, slotDeployments]) => (
+        {groupedBySlotAndMiner.slice(0, 50).map(({ slot, miners }) => (
           <div key={slot} className="border-b border-slate-700/30 last:border-0">
             <div className="px-4 py-2 bg-slate-900/50 flex justify-between items-center sticky top-0">
               <span className="text-xs font-mono text-slate-400">
                 Slot {slot.toLocaleString()}
               </span>
               <span className="text-xs text-emerald-400">
-                {slotDeployments.length} deployment{slotDeployments.length !== 1 ? 's' : ''}
+                {miners.length} miner{miners.length !== 1 ? 's' : ''}
               </span>
             </div>
             <div className="divide-y divide-slate-700/20">
-              {slotDeployments.map((d, i) => (
-                <div 
-                  key={`${d.miner_pubkey}-${d.square_id}-${i}`}
-                  className="px-4 py-2 flex items-center justify-between hover:bg-slate-700/20"
-                >
-                  <div className="flex items-center gap-3">
-                    <Link 
-                      href={`/miners/${d.miner_pubkey}`}
-                      className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
-                    >
-                      {truncate(d.miner_pubkey)}
-                    </Link>
+              {miners.map((group) => {
+                const deployedSquares = group.amounts
+                  .map((amt, idx) => amt > 0 ? idx : -1)
+                  .filter(idx => idx >= 0);
+                
+                return (
+                  <div 
+                    key={`${group.miner_pubkey}-${slot}`}
+                    className="px-4 py-3 hover:bg-slate-700/20"
+                  >
+                    <div className="flex items-center justify-between">
+                      <Link 
+                        href={`/miners/${group.miner_pubkey}`}
+                        className="font-mono text-sm text-white hover:text-amber-400 transition-colors"
+                      >
+                        {truncate(group.miner_pubkey)}
+                      </Link>
+                      <span className="font-mono text-sm text-white">
+                        {formatSol(group.total_amount)} SOL
+                      </span>
+                    </div>
+                    {/* Square breakdown */}
+                    <div className="flex flex-wrap gap-1.5 mt-2">
+                      {deployedSquares.map((squareId) => (
+                        <span 
+                          key={squareId}
+                          className="px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-400"
+                          title={`${formatSol(group.amounts[squareId])} SOL`}
+                        >
+                          ◼{squareId}: {formatSol(group.amounts[squareId])}
+                        </span>
+                      ))}
+                    </div>
                   </div>
-                  <div className="flex items-center gap-4">
-                    <span className="px-2 py-0.5 rounded text-xs bg-slate-700 text-slate-400">
-                      ◼ {d.square_id}
-                    </span>
-                    <span className="font-mono text-sm text-white w-24 text-right">
-                      {formatSol(d.amount)}
-                    </span>
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           </div>
         ))}
@@ -385,8 +616,8 @@ function LiveDeploymentsTable({ deployments }: { deployments: LiveDeploymentDisp
             Waiting for deployments...
           </div>
         )}
-      </div>
-    </div>
+              </div>
+              </div>
   );
 }
 
@@ -395,11 +626,13 @@ function RoundDetailView({
   liveRound,
   isLive,
   liveDeployments,
+  currentSlot,
 }: {
   round: RoundDetail | null;
   liveRound: LiveRound | null;
   isLive: boolean;
   liveDeployments: LiveDeploymentDisplay[];
+  currentSlot: number;
 }) {
   const [sliderValue, setSliderValue] = useState(100);
   
@@ -468,11 +701,42 @@ function RoundDetailView({
       <div className="flex items-center justify-between">
         <div>
           <h2 className="text-2xl font-bold text-white flex items-center gap-3">
-            {isLive ? (
-              <>
-                <span className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse" />
-                <span>Live Round #{(displayRound as LiveRound).round_id}</span>
-              </>
+            {isLive && liveRound ? (
+              (() => {
+                const { status } = getRoundStatus(liveRound, currentSlot);
+                return (
+                  <>
+                    {status === "active" && (
+                      <span className="w-3 h-3 bg-emerald-500 rounded-full animate-pulse" />
+                    )}
+                    {status === "intermission" && (
+                      <span className="w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
+                    )}
+                    {status === "awaiting_reset" && (
+                      <span className="w-3 h-3 bg-orange-500 rounded-full animate-pulse" />
+                    )}
+                    {status === "waiting" && (
+                      <span className="w-3 h-3 bg-yellow-500 rounded-full animate-pulse" />
+                    )}
+                    <span>Live Round #{liveRound.round_id}</span>
+                    {status === "intermission" && (
+                      <span className="text-sm font-normal text-blue-400 ml-2">
+                        (Intermission)
+                      </span>
+                    )}
+                    {status === "awaiting_reset" && (
+                      <span className="text-sm font-normal text-orange-400 ml-2">
+                        (Awaiting Reset)
+                      </span>
+                    )}
+                    {status === "waiting" && (
+                      <span className="text-sm font-normal text-yellow-400 ml-2">
+                        (Waiting for first deployment)
+                      </span>
+                    )}
+                  </>
+                );
+              })()
             ) : (
               <span>Round #{(round as RoundDetail).round_id}</span>
             )}
@@ -562,12 +826,45 @@ function RoundDetailView({
                 </>
               )}
               {isLive && liveRound && (
-                <div>
-                  <p className="text-2xl font-bold text-orange-400">
-                    {liveRound.slots_remaining}
-                  </p>
-                  <p className="text-xs text-slate-500">Slots Remaining</p>
-                </div>
+                (() => {
+                  const { status, slotsSinceEnd } = getRoundStatus(liveRound, currentSlot);
+                  return (
+                    <div>
+                      {status === "active" && (
+                        <>
+                          <p className="text-2xl font-bold text-orange-400">
+                            {liveRound.slots_remaining}
+                          </p>
+                          <p className="text-xs text-slate-500">Slots Remaining</p>
+                        </>
+                      )}
+                      {status === "intermission" && (
+                        <>
+                          <p className="text-xl font-bold text-blue-400">
+                            ~{INTERMISSION_SLOTS - (slotsSinceEnd || 0)}
+                          </p>
+                          <p className="text-xs text-slate-500">Intermission Slots</p>
+                        </>
+                      )}
+                      {status === "awaiting_reset" && (
+                        <>
+                          <p className="text-xl font-bold text-orange-400 animate-pulse">
+                            Pending...
+                          </p>
+                          <p className="text-xs text-slate-500">Awaiting Reset</p>
+                        </>
+                      )}
+                      {status === "waiting" && (
+                        <>
+                          <p className="text-xl font-bold text-yellow-400 animate-pulse">
+                            Waiting...
+                          </p>
+                          <p className="text-xs text-slate-500">For First Deploy</p>
+                        </>
+                      )}
+                    </div>
+                  );
+                })()
               )}
             </div>
           </div>
@@ -614,43 +911,44 @@ function RoundDetailView({
   );
 }
 
-export default function HomePage() {
-  const [rounds, setRounds] = useState<RoundSummary[]>([]);
-  const [selectedRoundId, setSelectedRoundId] = useState<number | null>(0);
+function HomePageContent() {
+  const searchParams = useSearchParams();
+  const initialRoundId = searchParams.get("round");
+  
+  // Use shared context for global data
+  const { 
+    round: liveRound, 
+    currentSlot, 
+    historicalRounds: rounds, 
+    pendingRounds,
+    hasMoreRounds,
+    loadingMoreRounds,
+    loadMoreRounds,
+    loading: contextLoading,
+    refreshRounds 
+  } = useOreStats();
+  
+  // Local state for page-specific data
+  const [selectedRoundId, setSelectedRoundId] = useState<number | null>(
+    initialRoundId ? parseInt(initialRoundId) : 0
+  );
   const [roundDetail, setRoundDetail] = useState<RoundDetail | null>(null);
-  const [liveRound, setLiveRound] = useState<LiveRound | null>(null);
   const [liveDeployments, setLiveDeployments] = useState<LiveDeploymentDisplay[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-
-  const fetchRounds = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/rounds?per_page=50`);
-      if (!res.ok) throw new Error("Failed to fetch rounds");
-      const data = await res.json();
-      setRounds(data.rounds);
-    } catch (err) {
-      console.error("Failed to fetch rounds:", err);
+  
+  // Track previous round for clearing deployments on transition
+  const [prevRoundId, setPrevRoundId] = useState<number | null>(null);
+  
+  // Clear live deployments when round changes
+  useEffect(() => {
+    if (liveRound && prevRoundId !== null && liveRound.round_id !== prevRoundId) {
+      setLiveDeployments([]);
     }
-  }, []);
-
-  const fetchLiveRound = useCallback(async () => {
-    try {
-      const res = await fetch(`${API_BASE}/round`);
-      if (!res.ok) throw new Error("Failed to fetch live round");
-      const data = await res.json();
-      
-      // If round changed, clear live deployments
-      setLiveRound((prev) => {
-        if (prev && prev.round_id !== data.round_id) {
-          setLiveDeployments([]);
-        }
-        return data;
-      });
-    } catch (err) {
-      console.error("Failed to fetch live round:", err);
+    if (liveRound) {
+      setPrevRoundId(liveRound.round_id);
     }
-  }, []);
+  }, [liveRound?.round_id, prevRoundId]);
 
   const fetchRoundDetail = useCallback(async (roundId: number) => {
     if (roundId === 0) {
@@ -717,46 +1015,23 @@ export default function HomePage() {
     };
   }, [selectedRoundId, liveRound?.round_id]);
 
-  useEffect(() => {
-    Promise.all([fetchRounds(), fetchLiveRound()]).finally(() => setLoading(false));
-  }, [fetchRounds, fetchLiveRound]);
-
-  useEffect(() => {
-    if (selectedRoundId === 0) {
-      const interval = setInterval(fetchLiveRound, 2000);
-      return () => clearInterval(interval);
-    }
-  }, [selectedRoundId, fetchLiveRound]);
-
+  // Fetch round detail when selecting a historical round
   useEffect(() => {
     if (selectedRoundId !== null && selectedRoundId !== 0) {
       fetchRoundDetail(selectedRoundId);
     }
   }, [selectedRoundId, fetchRoundDetail]);
+  
+  // Handle URL param for initial round selection
+  useEffect(() => {
+    if (initialRoundId && parseInt(initialRoundId) !== selectedRoundId) {
+      setSelectedRoundId(parseInt(initialRoundId));
+    }
+  }, [initialRoundId]);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
-      {/* Header */}
-      <header className="border-b border-slate-800/50 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 py-4 flex items-center justify-between">
-          <div className="flex items-center gap-4">
-            <Link href="/" className="text-2xl font-bold bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-              ORE Stats
-            </Link>
-          </div>
-          <nav className="flex gap-4">
-            <Link href="/" className="text-amber-400 font-medium">
-              Rounds
-            </Link>
-            <Link href="/miners" className="text-slate-400 hover:text-white transition-colors">
-              Miners
-            </Link>
-            <Link href="/autominers" className="text-slate-400 hover:text-white transition-colors">
-              AutoMiners
-            </Link>
-          </nav>
-        </div>
-      </header>
+      <Header />
 
       <main className="max-w-7xl mx-auto px-4 py-8">
         <div className="flex items-center justify-between mb-6">
@@ -765,26 +1040,31 @@ export default function HomePage() {
             <p className="text-slate-400 mt-1">
               View live and historical mining rounds with replay
             </p>
-              </div>
-            </div>
+          </div>
+        </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* Rounds List (Left Sidebar) */}
           <div className="lg:col-span-1 bg-slate-900/80 rounded-xl border border-slate-800/50 p-4">
             <h2 className="text-lg font-semibold text-white mb-4">Rounds</h2>
-            {loading && rounds.length === 0 ? (
+            {contextLoading && rounds.length === 0 ? (
               <div className="flex items-center justify-center h-48">
                 <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
-            </div>
+              </div>
             ) : (
               <RoundsList
                 rounds={rounds}
+                pendingRounds={pendingRounds}
                 selectedRoundId={selectedRoundId}
                 onSelectRound={setSelectedRoundId}
                 liveRound={liveRound}
+                currentSlot={currentSlot}
+                hasMore={hasMoreRounds}
+                loadingMore={loadingMoreRounds}
+                onLoadMore={loadMoreRounds}
               />
             )}
-          </div>
+            </div>
 
           {/* Round Detail (Main Area) */}
           <div className="lg:col-span-3 bg-slate-900/80 rounded-xl border border-slate-800/50 p-6">
@@ -798,10 +1078,24 @@ export default function HomePage() {
               liveRound={liveRound}
               isLive={selectedRoundId === 0}
               liveDeployments={liveDeployments}
+              currentSlot={currentSlot}
             />
           </div>
         </div>
       </main>
     </div>
+  );
+}
+
+// Wrap with Suspense for useSearchParams
+export default function HomePage() {
+  return (
+    <Suspense fallback={
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 flex items-center justify-center">
+        <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
+      </div>
+    }>
+      <HomePageContent />
+    </Suspense>
   );
 }

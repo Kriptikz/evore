@@ -130,6 +130,16 @@ pub struct PaginationParams {
     pub sort_by_balance: Option<bool>,
 }
 
+#[derive(Deserialize)]
+pub struct RoundsPaginationParams {
+    /// Number of rounds per page (default 50, max 100)
+    pub per_page: Option<usize>,
+    /// Page number (1-based, for offset pagination)
+    pub page: Option<usize>,
+    /// Cursor: get rounds before this round_id (for cursor-based pagination)
+    pub before: Option<u64>,
+}
+
 // ============================================================================
 // Route Handlers
 // ============================================================================
@@ -454,28 +464,62 @@ pub async fn health() -> &'static str {
 // Historical Data Endpoints
 // ============================================================================
 
-/// GET /rounds - Recent historical rounds
+/// GET /rounds - Historical rounds with pagination
+/// 
+/// Query params:
+/// - `per_page`: Number of rounds per page (default 50, max 100)
+/// - `page`: Page number (1-based) for offset pagination
+/// - `before`: Round ID cursor - get rounds before this ID (more efficient for deep pagination)
+/// 
+/// Use cursor-based (`before`) for infinite scroll or deep pagination.
+/// Use page-based (`page`) for traditional pagination with page numbers.
 pub async fn get_rounds(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<PaginationParams>,
+    Query(params): Query<RoundsPaginationParams>,
 ) -> Result<Json<RoundsListResponse>, (StatusCode, Json<ErrorResponse>)> {
-    let limit = params.per_page.unwrap_or(50).min(100) as u32;
+    let per_page = params.per_page.unwrap_or(50).min(100);
+    let limit = per_page as u32;
     
-    match state.clickhouse.get_recent_rounds(limit).await {
-        Ok(rounds) => Ok(Json(RoundsListResponse {
-            rounds: rounds.into_iter().map(|r| RoundSummary {
-                round_id: r.round_id,
-                start_slot: r.start_slot,
-                end_slot: r.end_slot,
-                winning_square: r.winning_square,
-                top_miner: r.top_miner,
-                total_deployed: r.total_deployed,
-                total_winnings: r.total_winnings,
-                unique_miners: r.unique_miners,
-                motherlode: r.motherlode,
-                motherlode_hit: r.motherlode_hit > 0,
-            }).collect(),
-        })),
+    // Determine pagination mode
+    let (before_round_id, offset) = if let Some(before) = params.before {
+        // Cursor-based pagination
+        (Some(before), None)
+    } else if let Some(page) = params.page {
+        // Offset-based pagination (page 1 = offset 0)
+        let page = page.max(1);
+        (None, Some(((page - 1) * per_page) as u32))
+    } else {
+        // No pagination, get latest
+        (None, None)
+    };
+    
+    match state.clickhouse.get_rounds_paginated(before_round_id, offset, limit).await {
+        Ok((rounds, has_more)) => {
+            // Get next cursor (last round_id in results)
+            let next_cursor = if has_more {
+                rounds.last().map(|r| r.round_id)
+            } else {
+                None
+            };
+            
+            Ok(Json(RoundsListResponse {
+                rounds: rounds.into_iter().map(|r| RoundSummary {
+                    round_id: r.round_id,
+                    start_slot: r.start_slot,
+                    end_slot: r.end_slot,
+                    winning_square: r.winning_square,
+                    top_miner: r.top_miner,
+                    total_deployed: r.total_deployed,
+                    total_winnings: r.total_winnings,
+                    unique_miners: r.unique_miners,
+                    motherlode: r.motherlode,
+                    motherlode_hit: r.motherlode_hit > 0,
+                }).collect(),
+                has_more,
+                next_cursor,
+                page: params.page,
+            }))
+        }
         Err(e) => Err((
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: format!("Database error: {}", e) }),
@@ -540,6 +584,14 @@ pub async fn get_round_by_id(
 #[derive(Serialize)]
 pub struct RoundsListResponse {
     pub rounds: Vec<RoundSummary>,
+    /// Whether there are more rounds available
+    pub has_more: bool,
+    /// Cursor for next page (use as `before` param)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    /// Current page number (if using page-based pagination)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<usize>,
 }
 
 #[derive(Serialize)]
