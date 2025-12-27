@@ -465,7 +465,7 @@ impl ClickHouseClient {
                     method,
                     status_code,
                     duration_ms,
-                    client_ip,
+                    ip_hash,
                     user_agent
                 FROM request_logs
                 WHERE timestamp > now() - INTERVAL ? HOUR
@@ -508,7 +508,7 @@ impl ClickHouseClient {
             .query(r#"
                 SELECT 
                     timestamp,
-                    client_ip,
+                    ip_hash,
                     endpoint,
                     requests_in_window,
                     window_seconds
@@ -529,14 +529,14 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    client_ip,
+                    ip_hash,
                     sum(request_count) AS total_requests,
                     sum(error_count) AS error_count,
                     sum(rate_limit_count) AS rate_limit_count,
                     avg(avg_duration_ms) AS avg_duration_ms
                 FROM ip_activity_hourly
                 WHERE hour > now() - INTERVAL ? HOUR
-                GROUP BY client_ip
+                GROUP BY ip_hash
                 ORDER BY total_requests DESC
                 LIMIT ?
             "#)
@@ -728,7 +728,7 @@ pub struct RequestLog {
     pub method: String,
     pub status_code: u16,
     pub duration_ms: u32,
-    pub client_ip: String,
+    pub ip_hash: String,
     #[serde(default)]
     pub user_agent: String,
 }
@@ -894,7 +894,7 @@ pub struct RpcRequestInsert {
 /// Rate limit event for admin monitoring.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RateLimitEvent {
-    pub client_ip: String,
+    pub ip_hash: String,
     pub endpoint: String,
     pub requests_in_window: u32,
     pub window_seconds: u16,
@@ -1098,7 +1098,7 @@ pub struct RequestLogRow {
     pub method: String,
     pub status_code: u16,
     pub duration_ms: u32,
-    pub client_ip: String,
+    pub ip_hash: String,
     pub user_agent: String,
 }
 
@@ -1118,7 +1118,7 @@ pub struct EndpointSummaryRow {
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RateLimitEventRow {
     pub timestamp: i64,  // DateTime64(3) → milliseconds since epoch
-    pub client_ip: String,
+    pub ip_hash: String,
     pub endpoint: String,
     pub requests_in_window: u32,
     pub window_seconds: u16,
@@ -1127,7 +1127,7 @@ pub struct RateLimitEventRow {
 /// Query result for IP activity summary
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct IpActivityRow {
-    pub client_ip: String,
+    pub ip_hash: String,
     pub total_requests: u64,
     pub error_count: u64,
     pub rate_limit_count: u64,
@@ -1199,7 +1199,7 @@ mod tests {
             method: "GET".to_string(),
             status_code: 200,
             duration_ms: 15,
-            client_ip: "abc123".to_string(),
+            ip_hash: "abc123".to_string(),
             user_agent: "test-agent".to_string(),
         };
         

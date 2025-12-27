@@ -60,7 +60,7 @@ pub async fn request_logging_middleware(
         method: method.clone(),
         status_code,
         duration_ms,
-        client_ip: client_ip.clone(),
+        ip_hash: client_ip.clone(),  // Named ip_hash in schema but stores real IP
         user_agent: truncate_string(&user_agent, 256),
     };
     
@@ -74,7 +74,7 @@ pub async fn request_logging_middleware(
     // Log rate limit events (429 responses)
     if status_code == 429 {
         let event = RateLimitEvent {
-            client_ip,
+            ip_hash: client_ip,  // Named ip_hash in schema but stores real IP
             endpoint: uri,
             requests_in_window: 0, // We don't have this info here
             window_seconds: 0,

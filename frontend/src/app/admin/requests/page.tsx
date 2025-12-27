@@ -231,7 +231,7 @@ function LogsTab({ logs }: { logs: RequestLogRow[] }) {
                 </span>
               </td>
               <td className="px-4 py-2 text-right text-gray-300">{log.duration_ms}ms</td>
-              <td className="px-4 py-2 text-gray-400 font-mono text-xs">{log.client_ip}</td>
+              <td className="px-4 py-2 text-gray-400 font-mono text-xs">{log.ip_hash}</td>
             </tr>
           ))}
           {logs.length === 0 && (
@@ -266,7 +266,7 @@ function RateLimitsTab({ events }: { events: RateLimitEventRow[] }) {
               <td className="px-4 py-2 text-gray-400 font-mono text-xs">
                 {new Date(e.timestamp).toLocaleString()}
               </td>
-              <td className="px-4 py-2 text-white font-mono">{e.client_ip}</td>
+              <td className="px-4 py-2 text-white font-mono">{e.ip_hash}</td>
               <td className="px-4 py-2 text-white font-mono">{e.endpoint}</td>
               <td className="px-4 py-2 text-right text-red-400">{e.requests_in_window}</td>
               <td className="px-4 py-2 text-right text-gray-300">{e.window_seconds}s</td>
@@ -301,7 +301,7 @@ function IpActivityTab({ activity }: { activity: IpActivityRow[] }) {
         <tbody>
           {activity.map((a, i) => (
             <tr key={i} className="border-t border-gray-700/50 hover:bg-gray-700/30">
-              <td className="px-4 py-2 text-white font-mono">{a.client_ip}</td>
+              <td className="px-4 py-2 text-white font-mono">{a.ip_hash}</td>
               <td className="px-4 py-2 text-right text-white">
                 {Number(a.total_requests).toLocaleString()}
               </td>

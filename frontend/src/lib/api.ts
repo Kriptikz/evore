@@ -152,7 +152,7 @@ export interface RequestLogRow {
   method: string;
   status_code: number;
   duration_ms: number;
-  client_ip: string;
+  ip_hash: string;
   user_agent: string;
 }
 
@@ -168,14 +168,14 @@ export interface EndpointSummaryRow {
 
 export interface RateLimitEventRow {
   timestamp: number; // milliseconds since epoch
-  client_ip: string;
+  ip_hash: string;
   endpoint: string;
   requests_in_window: number;
   window_seconds: number;
 }
 
 export interface IpActivityRow {
-  client_ip: string;
+  ip_hash: string;
   total_requests: number;
   error_count: number;
   rate_limit_count: number;
