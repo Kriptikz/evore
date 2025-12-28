@@ -1307,8 +1307,9 @@ function HomePageContent() {
     eventSource.addEventListener("deployment", (event) => {
       try {
         const wrapper = JSON.parse(event.data);
-        // The SSE sends { "Deployment": { round_id, miner_pubkey, amounts, slot } }
-        const deployment: LiveDeploymentEvent = wrapper.Deployment;
+        // The SSE uses serde tag format: { "type": "Deployment", "data": { round_id, miner_pubkey, amounts, slot } }
+        if (wrapper.type !== "Deployment" || !wrapper.data) return;
+        const deployment: LiveDeploymentEvent = wrapper.data;
         
         if (!deployment || !liveRound) return;
         

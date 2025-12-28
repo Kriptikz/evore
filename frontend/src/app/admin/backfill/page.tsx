@@ -174,6 +174,7 @@ export default function BackfillPage() {
   const [showInvalidOnly, setShowInvalidOnly] = useState(false);
   const [selectedRounds, setSelectedRounds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [addingToBackfill, setAddingToBackfill] = useState(false);
   
   // Round ID filter state
   const [startRound, setStartRound] = useState<string>("");
@@ -372,6 +373,28 @@ export default function BackfillPage() {
     }
   };
 
+  const handleAddToBackfill = async () => {
+    if (selectedRounds.size === 0) return;
+    
+    setAddingToBackfill(true);
+    setMessage(null);
+    setError(null);
+    
+    try {
+      const res = await api.addToBackfillWorkflow(Array.from(selectedRounds));
+      setMessage(res.message);
+      setSelectedRounds(new Set());
+      fetchPendingRounds();
+      fetchRoundsData();
+      // Switch to backfill tab to show the newly added rounds
+      setActiveTab("backfill");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add rounds to backfill");
+    } finally {
+      setAddingToBackfill(false);
+    }
+  };
+
   const missingCount = roundsData.filter(r => r.deployment_count === 0).length;
 
   return (
@@ -531,22 +554,36 @@ export default function BackfillPage() {
                       </span>
                       <div className="flex gap-2">
                         <button
+                          onClick={handleAddToBackfill}
+                          disabled={addingToBackfill || bulkDeleting}
+                          className="px-3 py-1.5 text-sm bg-emerald-500 hover:bg-emerald-600 text-white rounded-lg disabled:opacity-50 flex items-center gap-2"
+                        >
+                          {addingToBackfill ? (
+                            <>
+                              <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                              Adding...
+                            </>
+                          ) : (
+                            "Add to Backfill Workflow"
+                          )}
+                        </button>
+                        <button
                           onClick={() => handleBulkDelete(false, true)}
-                          disabled={bulkDeleting}
+                          disabled={bulkDeleting || addingToBackfill}
                           className="px-3 py-1.5 text-sm bg-orange-500 hover:bg-orange-600 text-white rounded-lg disabled:opacity-50"
                         >
                           {bulkDeleting ? "Deleting..." : "Delete Deployments Only"}
                         </button>
                         <button
                           onClick={() => handleBulkDelete(true, true)}
-                          disabled={bulkDeleting}
+                          disabled={bulkDeleting || addingToBackfill}
                           className="px-3 py-1.5 text-sm bg-red-500 hover:bg-red-600 text-white rounded-lg disabled:opacity-50"
                         >
                           {bulkDeleting ? "Deleting..." : "Delete All Data"}
                         </button>
                         <button
                           onClick={handleDeselectAll}
-                          disabled={bulkDeleting}
+                          disabled={bulkDeleting || addingToBackfill}
                           className="px-3 py-1.5 text-sm bg-slate-600 hover:bg-slate-500 text-white rounded-lg disabled:opacity-50"
                         >
                           Clear

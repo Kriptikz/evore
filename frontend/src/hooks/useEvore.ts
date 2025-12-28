@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, useRef } from "react";
+import { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import { useConnection, useWallet } from "@solana/wallet-adapter-react";
 import { Keypair, PublicKey, Transaction, TransactionInstruction } from "@solana/web3.js";
 import { getDeployerPda, getManagedMinerAuthPda, getOreMinerPda, getOreBoardPda } from "@/lib/pda";
@@ -112,6 +112,11 @@ export function useEvore() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  
+  // Manual SOL balance fetching for auth PDAs (not cached on backend)
+  const [authBalances, setAuthBalances] = useState<Map<string, bigint>>(new Map());
+  const balanceFetchQueueRef = useRef<string[]>([]);
+  const balanceFetchingRef = useRef<boolean>(false);
 
   // Fetch wallet SOL balance via ore-stats API (proxied RPC)
   const fetchWalletBalance = useCallback(async () => {
@@ -131,6 +136,49 @@ export function useEvore() {
       console.error("Error fetching wallet balance:", err);
     }
   }, [publicKey]);
+  
+  // Fetch a single auth PDA balance (rate limited - 1 per second)
+  const fetchAuthBalance = useCallback(async (authPda: string) => {
+    try {
+      const res = await fetch(`${API_BASE}/balance/${authPda}`);
+      if (!res.ok) return;
+      const data = await res.json();
+      setAuthBalances(prev => {
+        const next = new Map(prev);
+        next.set(authPda, BigInt(data.lamports || 0));
+        return next;
+      });
+    } catch (err) {
+      console.error(`Error fetching auth balance for ${authPda}:`, err);
+    }
+  }, []);
+  
+  // Process balance fetch queue with 1s rate limiting
+  const processBalanceQueue = useCallback(async () => {
+    if (balanceFetchingRef.current) return;
+    if (balanceFetchQueueRef.current.length === 0) return;
+    
+    balanceFetchingRef.current = true;
+    
+    while (balanceFetchQueueRef.current.length > 0) {
+      const authPda = balanceFetchQueueRef.current.shift();
+      if (authPda) {
+        await fetchAuthBalance(authPda);
+        // Wait 1 second between fetches (rate limit)
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    balanceFetchingRef.current = false;
+  }, [fetchAuthBalance]);
+  
+  // Queue auth PDAs for balance fetching
+  const queueAuthBalances = useCallback((authPdas: string[]) => {
+    // Only queue PDAs we haven't fetched yet
+    const newPdas = authPdas.filter(pda => !authBalances.has(pda));
+    balanceFetchQueueRef.current = [...new Set([...balanceFetchQueueRef.current, ...newPdas])];
+    processBalanceQueue();
+  }, [authBalances, processBalanceQueue]);
 
   // Fetch board data from API
   const fetchBoard = useCallback(async () => {
@@ -173,6 +221,7 @@ export function useEvore() {
       const newManagers: ManagerAccount[] = [];
       const newDeployers: DeployerAccount[] = [];
       const newMiners = new Map<string, MinerAccount>();
+      const authPdasToFetch: string[] = [];
       
       for (const autominer of data.autominers || []) {
         const managerAddr = new PublicKey(autominer.manager.address);
@@ -189,6 +238,8 @@ export function useEvore() {
         if (autominer.deployer) {
           const [deployerPda] = getDeployerPda(managerAddr);
           const [authPda] = getManagedMinerAuthPda(managerAddr, BigInt(0));
+          const authPdaStr = authPda.toBase58();
+          authPdasToFetch.push(authPdaStr);
           
           newDeployers.push({
             address: deployerPda,
@@ -199,6 +250,7 @@ export function useEvore() {
               flatFee: BigInt(autominer.deployer.flat_fee || 0),
               maxPerRound: BigInt(autominer.deployer.max_per_round || 1_000_000_000),
             },
+            // Use cached balance from API initially, will be updated by manual fetch
             autodeployBalance: BigInt(autominer.auth_balance?.balance || 0),
             authPdaAddress: authPda,
           });
@@ -223,14 +275,28 @@ export function useEvore() {
       setManagers(newManagers);
       setDeployers(newDeployers);
       setMiners(newMiners);
+      
+      // Queue auth PDAs for manual balance fetching
+      if (authPdasToFetch.length > 0) {
+        queueAuthBalances(authPdasToFetch);
+      }
     } catch (err) {
       console.error("Error fetching my miners:", err);
       setError("Failed to fetch data from API");
     } finally {
       setLoading(false);
     }
-  }, [publicKey]);
+  }, [publicKey, queueAuthBalances]);
 
+  // Deployers with updated auth balances from manual fetching
+  const deployersWithBalances = useMemo(() => {
+    return deployers.map(d => ({
+      ...d,
+      // Use manually fetched balance if available, otherwise use cached
+      autodeployBalance: authBalances.get(d.authPdaAddress.toBase58()) ?? d.autodeployBalance,
+    }));
+  }, [deployers, authBalances]);
+  
   // Legacy wrappers for compatibility
   const fetchManagers = fetchMyMiners;
   const fetchDeployers = fetchMyMiners;
@@ -745,7 +811,7 @@ export function useEvore() {
 
   return {
     managers,
-    deployers,
+    deployers: deployersWithBalances,
     miners,
     board,
     walletBalance,

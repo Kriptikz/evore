@@ -118,6 +118,30 @@ pub struct BulkDeleteResponse {
     pub message: String,
 }
 
+/// Request for adding rounds to the backfill workflow
+#[derive(Debug, Deserialize)]
+pub struct AddToBackfillRequest {
+    pub round_ids: Vec<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddToBackfillResponse {
+    pub added: u32,
+    pub already_pending: u32,
+    pub message: String,
+}
+
+/// Response for a single round backfill operation (used by reconstruct endpoint)
+#[derive(Debug, Serialize)]
+pub struct BackfillDeploymentsResponse {
+    pub round_id: u64,
+    pub transactions_fetched: u32,
+    pub deployments_found: u32,
+    pub deployments_stored: u32,
+    pub status: String,
+    pub error: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RoundDataStatus {
     pub round_id: u64,
@@ -365,16 +389,226 @@ pub async fn reconstruct_round(
 ) -> Result<Json<ReconstructResponse>, (StatusCode, Json<ErrorResponse>)> {
     tracing::info!("Reconstructing deployments for round {}", round_id);
     
-    // TODO: Implement reconstruction logic
-    // 1. Load raw_transactions from ClickHouse WHERE round_id = X
-    // 2. Parse and replay transactions
-    // 3. Build deployment records
+    // Call the actual backfill function
+    let result = backfill_round_deployments(&state, round_id).await;
     
-    // For now, return placeholder
-    Ok(Json(ReconstructResponse {
+    match result {
+        Ok(resp) => Ok(Json(ReconstructResponse {
+            round_id,
+            deployments_reconstructed: resp.deployments_stored,
+            status: resp.status,
+        })),
+        Err(e) => Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse { error: e }),
+        )),
+    }
+}
+
+/// Backfill deployments for a single round
+/// 
+/// Flow:
+/// 1. Fetch all transactions for the round (with pagination)
+/// 2. Parse deploy instructions from transactions
+/// 3. Build and store deployment records to ClickHouse
+pub async fn backfill_round_deployments(
+    state: &AppState,
+    round_id: u64,
+) -> Result<BackfillDeploymentsResponse, String> {
+    use crate::clickhouse::DeploymentInsert;
+    use std::collections::HashMap;
+    
+    tracing::info!("Starting deployment backfill for round {}", round_id);
+    
+    // Get round info for validation
+    let round_info = state.clickhouse.get_round_by_id(round_id).await
+        .map_err(|e| format!("Failed to get round info: {}", e))?
+        .ok_or_else(|| format!("Round {} not found in ClickHouse", round_id))?;
+    
+    let winning_square = round_info.winning_square;
+    let top_miner = round_info.top_miner.clone();
+    
+    // Derive the round PDA
+    let (round_pda, _) = evore::ore_api::round_pda(round_id);
+    
+    // Fetch all transactions for this round
+    let mut all_transactions = Vec::new();
+    let mut pagination_token: Option<String> = None;
+    let mut page_count = 0u32;
+    
+    loop {
+        let mut helius = state.helius.write().await;
+        let page = helius.get_transactions_for_round(round_id, pagination_token.clone()).await
+            .map_err(|e| format!("Failed to fetch transactions page {}: {}", page_count, e))?;
+        
+        let tx_count = page.transactions.len();
+        all_transactions.extend(page.transactions);
+        page_count += 1;
+        
+        tracing::info!(
+            "Round {} backfill: fetched page {} with {} transactions (total: {})",
+            round_id, page_count, tx_count, all_transactions.len()
+        );
+        
+        if page.pagination_token.is_none() {
+            break;
+        }
+        pagination_token = page.pagination_token;
+        
+        // Safety limit
+        if page_count > 100 {
+            tracing::warn!("Round {} backfill: hit page limit", round_id);
+            break;
+        }
+    }
+    
+    if all_transactions.is_empty() {
+        return Ok(BackfillDeploymentsResponse {
+            round_id,
+            transactions_fetched: 0,
+            deployments_found: 0,
+            deployments_stored: 0,
+            status: "no_transactions".to_string(),
+            error: None,
+        });
+    }
+    
+    // Parse deployments from transactions
+    let helius = state.helius.read().await;
+    let parsed_deployments = helius.parse_deployments_from_round_page(&round_pda, &all_transactions)
+        .map_err(|e| format!("Failed to parse deployments: {}", e))?;
+    
+    if parsed_deployments.is_empty() {
+        return Ok(BackfillDeploymentsResponse {
+            round_id,
+            transactions_fetched: all_transactions.len() as u32,
+            deployments_found: 0,
+            deployments_stored: 0,
+            status: "no_deployments_found".to_string(),
+            error: None,
+        });
+    }
+    
+    tracing::info!(
+        "Round {} backfill: parsed {} deployment instructions",
+        round_id, parsed_deployments.len()
+    );
+    
+    // Aggregate deployments per miner per square
+    // We track (total_amount, earliest_slot) per (miner, square)
+    let mut miner_squares: HashMap<(String, u8), (u64, u64)> = HashMap::new();
+    
+    for pd in &parsed_deployments {
+        let miner_pubkey = pd.authority.to_string();
+        
+        for (square_idx, is_deployed) in pd.squares.iter().enumerate() {
+            if *is_deployed {
+                let square_id = square_idx as u8;
+                let key = (miner_pubkey.clone(), square_id);
+                
+                miner_squares.entry(key)
+                    .and_modify(|(amt, slot)| {
+                        *amt += pd.amount_per_square;
+                        // Keep earliest slot
+                        if pd.slot < *slot {
+                            *slot = pd.slot;
+                        }
+                    })
+                    .or_insert((pd.amount_per_square, pd.slot));
+            }
+        }
+    }
+    
+    // Build deployment inserts
+    let mut deployments: Vec<DeploymentInsert> = Vec::new();
+    
+    for ((miner_pubkey, square_id), (amount, slot)) in miner_squares {
+        let is_winner = square_id == winning_square;
+        let is_top = miner_pubkey == top_miner;
+        
+        // For historical backfill, we don't have exact reward data
+        // Set ore/sol earned to 0 - they can be recalculated if needed
+        deployments.push(DeploymentInsert {
+            round_id,
+            miner_pubkey,
+            square_id,
+            amount,
+            deployed_slot: slot,
+            ore_earned: 0,
+            sol_earned: 0,
+            is_winner: if is_winner { 1 } else { 0 },
+            is_top_miner: if is_top { 1 } else { 0 },
+        });
+    }
+    
+    let deployments_count = deployments.len() as u32;
+    
+    // Store to ClickHouse
+    state.clickhouse.insert_deployments(deployments).await
+        .map_err(|e| format!("Failed to insert deployments: {}", e))?;
+    
+    // Update PostgreSQL status
+    update_round_status_reconstructed(&state.postgres, round_id, deployments_count as i32).await;
+    update_round_status_finalized(&state.postgres, round_id).await;
+    
+    tracing::info!(
+        "Round {} backfill complete: {} transactions -> {} deployments stored",
+        round_id, all_transactions.len(), deployments_count
+    );
+    
+    Ok(BackfillDeploymentsResponse {
         round_id,
-        deployments_reconstructed: 0,
-        status: "not_implemented".to_string(),
+        transactions_fetched: all_transactions.len() as u32,
+        deployments_found: parsed_deployments.len() as u32,
+        deployments_stored: deployments_count,
+        status: "success".to_string(),
+        error: None,
+    })
+}
+
+/// POST /admin/backfill/deployments
+/// Add rounds to the backfill workflow for step-by-step processing
+/// (For rounds that already have metadata but are missing deployments)
+pub async fn add_to_backfill_workflow(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddToBackfillRequest>,
+) -> Result<Json<AddToBackfillResponse>, (StatusCode, Json<ErrorResponse>)> {
+    tracing::info!("Adding {} rounds to backfill workflow", req.round_ids.len());
+    
+    let mut added = 0u32;
+    let mut already_pending = 0u32;
+    
+    for round_id in &req.round_ids {
+        // Check if already in pending list
+        let existing = get_round_status(&state.postgres, *round_id as i64).await;
+        
+        match existing {
+            Ok(Some(_)) => {
+                // Already exists in pending list
+                already_pending += 1;
+            }
+            Ok(None) => {
+                // Add to pending list with meta_fetched=true (since round already exists in ClickHouse)
+                add_round_to_backfill_workflow(&state.postgres, *round_id).await;
+                added += 1;
+            }
+            Err(e) => {
+                tracing::error!("Error checking round {} status: {}", round_id, e);
+            }
+        }
+    }
+    
+    let message = format!(
+        "Added {} rounds to backfill workflow, {} were already pending",
+        added, already_pending
+    );
+    
+    tracing::info!("{}", message);
+    
+    Ok(Json(AddToBackfillResponse {
+        added,
+        already_pending,
+        message,
     }))
 }
 
@@ -793,6 +1027,39 @@ async fn update_round_status_verified(pool: &PgPool, round_id: u64, notes: &str)
     )
     .bind(round_id as i64)
     .bind(notes)
+    .execute(pool)
+    .await;
+}
+
+async fn update_round_status_reconstructed(pool: &PgPool, round_id: u64, deployment_count: i32) {
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO round_reconstruction_status (round_id, meta_fetched, transactions_fetched, reconstructed, deployment_count, reconstructed_at)
+        VALUES ($1, true, true, true, $2, NOW())
+        ON CONFLICT (round_id) DO UPDATE SET 
+            transactions_fetched = true,
+            reconstructed = true,
+            deployment_count = $2,
+            reconstructed_at = NOW()
+        "#
+    )
+    .bind(round_id as i64)
+    .bind(deployment_count)
+    .execute(pool)
+    .await;
+}
+
+/// Add a round to the backfill workflow with meta_fetched=true
+/// (Used for rounds that already have metadata from live capture)
+async fn add_round_to_backfill_workflow(pool: &PgPool, round_id: u64) {
+    let _ = sqlx::query(
+        r#"
+        INSERT INTO round_reconstruction_status (round_id, meta_fetched, meta_fetched_at)
+        VALUES ($1, true, NOW())
+        ON CONFLICT (round_id) DO NOTHING
+        "#
+    )
+    .bind(round_id as i64)
     .execute(pool)
     .await;
 }

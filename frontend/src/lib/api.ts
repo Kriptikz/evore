@@ -254,6 +254,13 @@ export interface BulkDeleteResponse {
   message: string;
 }
 
+// Add to backfill workflow types
+export interface AddToBackfillResponse {
+  added: number;
+  already_pending: number;
+  message: string;
+}
+
 export interface RoundDataStatus {
   round_id: number;
   round_exists: boolean;
@@ -816,6 +823,15 @@ class ApiClient {
         round_ids: roundIds,
         delete_rounds: deleteRounds,
         delete_deployments: deleteDeployments,
+      },
+    });
+  }
+
+  async addToBackfillWorkflow(roundIds: number[]): Promise<AddToBackfillResponse> {
+    return this.request("POST", "/admin/backfill/deployments", {
+      requireAuth: true,
+      body: {
+        round_ids: roundIds,
       },
     });
   }
