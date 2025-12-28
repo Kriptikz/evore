@@ -1879,14 +1879,15 @@ impl ClickHouseClient {
         let total_count: u64 = self.client.query(&count_query).fetch_one().await?;
         
         // Get leaderboard page with all metrics
+        // Use prefixed aliases to avoid conflict with column names in value_expr
         let query = format!(
             r#"SELECT 
                    miner_pubkey,
                    {} as value,
                    count(DISTINCT round_id) as rounds_played,
-                   sum(amount) as sol_deployed,
-                   sum(sol_earned) as sol_earned,
-                   sum(ore_earned) as ore_earned,
+                   sum(amount) as total_deployed,
+                   sum(sol_earned) as total_earned,
+                   sum(ore_earned) as total_ore,
                    sum(sol_earned) - sum(amount) as net_sol
                FROM deployments
                WHERE {}
@@ -1905,11 +1906,11 @@ impl ClickHouseClient {
             .map(|(i, r)| {
                 // Calculate sol_cost_per_ore: cost in lamports per ORE (with 11 decimals)
                 // Only if net_sol < 0 and ore_earned > 0
-                let sol_cost_per_ore = if r.net_sol < 0 && r.ore_earned > 0 {
+                let sol_cost_per_ore = if r.net_sol < 0 && r.total_ore > 0 {
                     // cost = -net_sol (the loss) / ore_earned
                     // This gives lamports per atomic ORE unit
                     // To get lamports per 1 whole ORE, multiply by 10^11
-                    Some((-r.net_sol as i128 * 100_000_000_000i128 / r.ore_earned as i128) as i64)
+                    Some((-r.net_sol as i128 * 100_000_000_000i128 / r.total_ore as i128) as i64)
                 } else {
                     None
                 };
@@ -1919,9 +1920,9 @@ impl ClickHouseClient {
                     miner_pubkey: r.miner_pubkey,
                     value: r.value,
                     rounds_played: r.rounds_played,
-                    sol_deployed: r.sol_deployed,
-                    sol_earned: r.sol_earned,
-                    ore_earned: r.ore_earned,
+                    sol_deployed: r.total_deployed,
+                    sol_earned: r.total_earned,
+                    ore_earned: r.total_ore,
                     net_sol: r.net_sol,
                     sol_cost_per_ore,
                 }
@@ -2008,9 +2009,9 @@ impl ClickHouseClient {
                    miner_pubkey,
                    value,
                    rounds_played,
-                   sol_deployed,
-                   sol_earned,
-                   ore_earned,
+                   total_deployed,
+                   total_earned,
+                   total_ore,
                    net_sol,
                    rank
                FROM (
@@ -2018,9 +2019,9 @@ impl ClickHouseClient {
                        miner_pubkey,
                        {} as value,
                        count(DISTINCT round_id) as rounds_played,
-                       sum(amount) as sol_deployed,
-                       sum(sol_earned) as sol_earned,
-                       sum(ore_earned) as ore_earned,
+                       sum(amount) as total_deployed,
+                       sum(sol_earned) as total_earned,
+                       sum(ore_earned) as total_ore,
                        sum(sol_earned) - sum(amount) as net_sol,
                        row_number() OVER (ORDER BY {} {}) as rank
                    FROM deployments
@@ -2041,9 +2042,9 @@ impl ClickHouseClient {
             miner_pubkey: String,
             value: i64,
             rounds_played: u64,
-            sol_deployed: u64,
-            sol_earned: u64,
-            ore_earned: u64,
+            total_deployed: u64,
+            total_earned: u64,
+            total_ore: u64,
             net_sol: i64,
             rank: u64,
         }
@@ -2053,8 +2054,8 @@ impl ClickHouseClient {
         let entries: Vec<crate::historical_routes::LeaderboardEntry> = rows
             .into_iter()
             .map(|r| {
-                let sol_cost_per_ore = if r.net_sol < 0 && r.ore_earned > 0 {
-                    Some((-r.net_sol as i128 * 100_000_000_000i128 / r.ore_earned as i128) as i64)
+                let sol_cost_per_ore = if r.net_sol < 0 && r.total_ore > 0 {
+                    Some((-r.net_sol as i128 * 100_000_000_000i128 / r.total_ore as i128) as i64)
                 } else {
                     None
                 };
@@ -2064,9 +2065,9 @@ impl ClickHouseClient {
                     miner_pubkey: r.miner_pubkey,
                     value: r.value,
                     rounds_played: r.rounds_played,
-                    sol_deployed: r.sol_deployed,
-                    sol_earned: r.sol_earned,
-                    ore_earned: r.ore_earned,
+                    sol_deployed: r.total_deployed,
+                    sol_earned: r.total_earned,
+                    ore_earned: r.total_ore,
                     net_sol: r.net_sol,
                     sol_cost_per_ore,
                 }
@@ -2901,9 +2902,9 @@ pub struct LeaderboardRow {
     pub miner_pubkey: String,
     pub value: i64,
     pub rounds_played: u64,
-    pub sol_deployed: u64,
-    pub sol_earned: u64,
-    pub ore_earned: u64,
+    pub total_deployed: u64,
+    pub total_earned: u64,
+    pub total_ore: u64,
     pub net_sol: i64,
 }
 
