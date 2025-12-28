@@ -828,6 +828,10 @@ class ApiClient {
     return this.request("POST", `/admin/fetch-txns/${roundId}`, { requireAuth: true });
   }
 
+  async resetTxnsStatus(roundId: number): Promise<{ round_id: number; message: string }> {
+    return this.request("POST", `/admin/reset-txns/${roundId}`, { requireAuth: true });
+  }
+
   async reconstructRound(roundId: number): Promise<ReconstructResponse> {
     return this.request("POST", `/admin/reconstruct/${roundId}`, { requireAuth: true });
   }

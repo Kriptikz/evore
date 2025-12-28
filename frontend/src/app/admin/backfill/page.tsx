@@ -24,13 +24,15 @@ function StepBadge({ done, active, label }: { done: boolean; active?: boolean; l
   );
 }
 
+type RoundAction = WorkflowStep | "reset_txns";
+
 function RoundStatusRow({
   round,
   onAction,
   loading,
 }: {
   round: RoundStatus;
-  onAction: (roundId: number, action: WorkflowStep) => void;
+  onAction: (roundId: number, action: RoundAction) => void;
   loading: number | null;
 }) {
   const nextStep = !round.meta_fetched
@@ -47,6 +49,9 @@ function RoundStatusRow({
 
   const isLoading = loading === round.round_id;
 
+  // Show reset button if txns fetched but not reconstructed (could mean txns weren't actually stored)
+  const showResetTxns = round.transactions_fetched && !round.reconstructed;
+
   return (
     <tr className="border-b border-slate-700/50 last:border-0 hover:bg-slate-700/30">
       <td className="px-4 py-3 text-white font-mono">{round.round_id}</td>
@@ -62,35 +67,46 @@ function RoundStatusRow({
       <td className="px-4 py-3 text-slate-400 text-sm">{round.transaction_count}</td>
       <td className="px-4 py-3 text-slate-400 text-sm">{round.deployment_count}</td>
       <td className="px-4 py-3">
-        {nextStep && (
-          <button
-            onClick={() => onAction(round.round_id, nextStep)}
-            disabled={isLoading}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-              isLoading
-                ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                : "bg-blue-500 hover:bg-blue-600 text-white"
-            }`}
-          >
-            {isLoading ? (
-              <span className="flex items-center gap-2">
-                <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                Running...
-              </span>
-            ) : (
-              {
-                meta: "Fetch Meta",
-                txns: "Fetch Txns",
-                reconstruct: "Reconstruct",
-                verify: "Verify",
-                finalize: "Finalize",
-              }[nextStep]
-            )}
-          </button>
-        )}
-        {!nextStep && (
-          <span className="text-green-400 text-sm">✓ Complete</span>
-        )}
+        <div className="flex gap-2 items-center">
+          {nextStep && (
+            <button
+              onClick={() => onAction(round.round_id, nextStep)}
+              disabled={isLoading}
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                isLoading
+                  ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                  : "bg-blue-500 hover:bg-blue-600 text-white"
+              }`}
+            >
+              {isLoading ? (
+                <span className="flex items-center gap-2">
+                  <span className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                  Running...
+                </span>
+              ) : (
+                {
+                  meta: "Fetch Meta",
+                  txns: "Fetch Txns",
+                  reconstruct: "Reconstruct",
+                  verify: "Verify",
+                  finalize: "Finalize",
+                }[nextStep]
+              )}
+            </button>
+          )}
+          {showResetTxns && !isLoading && (
+            <button
+              onClick={() => onAction(round.round_id, "reset_txns")}
+              className="px-3 py-1.5 text-sm rounded-lg bg-amber-500/20 hover:bg-amber-500/30 text-amber-400 transition-colors"
+              title="Reset txns status to re-fetch"
+            >
+              Reset Txns
+            </button>
+          )}
+          {!nextStep && (
+            <span className="text-green-400 text-sm">✓ Complete</span>
+          )}
+        </div>
       </td>
     </tr>
   );
@@ -348,7 +364,7 @@ export default function BackfillPage() {
     }
   };
 
-  const handleAction = async (roundId: number, action: WorkflowStep) => {
+  const handleAction = async (roundId: number, action: RoundAction) => {
     setActionLoading(roundId);
     setMessage(null);
     setError(null);
@@ -357,6 +373,10 @@ export default function BackfillPage() {
         case "txns":
           const txRes = await api.fetchRoundTransactions(roundId);
           setMessage(`Round ${roundId}: fetched ${txRes.transactions_fetched} transactions`);
+          break;
+        case "reset_txns":
+          const resetRes = await api.resetTxnsStatus(roundId);
+          setMessage(`Round ${roundId}: ${resetRes.message}`);
           break;
         case "reconstruct":
           const recRes = await api.reconstructRound(roundId);

@@ -1036,6 +1036,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/rounds/{round_id}/status", get(crate::backfill::get_round_data_status))
         .route("/rounds/{round_id}", delete(crate::backfill::delete_round_data))
         .route("/fetch-txns/{round_id}", post(crate::backfill::fetch_round_transactions))
+        .route("/reset-txns/{round_id}", post(crate::backfill::reset_txns_status))
         .route("/reconstruct/{round_id}", post(crate::backfill::reconstruct_round))
         .route("/verify/{round_id}", get(crate::backfill::get_round_for_verification))
         .route("/verify/{round_id}", post(crate::backfill::verify_round))

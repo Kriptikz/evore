@@ -152,6 +152,17 @@ impl ClickHouseClient {
         Ok(1)
     }
     
+    /// Delete all raw transactions for a round (for re-fetch).
+    pub async fn delete_raw_transactions_for_round(&self, round_id: u64) -> Result<(), ClickHouseError> {
+        self.client
+            .query("ALTER TABLE raw_transactions DELETE WHERE round_id = ?")
+            .bind(round_id)
+            .execute()
+            .await?;
+        
+        Ok(())
+    }
+    
     /// Count deployments for a round (to check if data exists).
     pub async fn count_deployments_for_round(&self, round_id: u64) -> Result<u64, ClickHouseError> {
         let count: u64 = self.client

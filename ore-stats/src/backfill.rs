@@ -765,6 +765,53 @@ pub async fn finalize_backfill_round(
     }))
 }
 
+#[derive(Debug, Serialize)]
+pub struct ResetTxnsResponse {
+    pub round_id: u64,
+    pub message: String,
+}
+
+/// POST /admin/reset-txns/{round_id}
+/// Reset transaction fetch status so txns can be re-fetched
+pub async fn reset_txns_status(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+) -> Result<Json<ResetTxnsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    tracing::info!("Resetting transaction status for round {}", round_id);
+    
+    // Also delete any existing raw transactions from ClickHouse
+    if let Err(e) = state.clickhouse.delete_raw_transactions_for_round(round_id).await {
+        tracing::warn!("Failed to delete raw transactions for round {}: {}", round_id, e);
+    }
+    
+    // Reset PostgreSQL status - keeps meta but resets txns, reconstruct, etc.
+    let _ = sqlx::query(
+        r#"
+        UPDATE round_reconstruction_status
+        SET transactions_fetched = false,
+            transactions_fetched_at = NULL,
+            transaction_count = 0,
+            reconstructed = false,
+            reconstructed_at = NULL,
+            deployment_count = 0,
+            verified = false,
+            verified_at = NULL,
+            finalized = false,
+            finalized_at = NULL,
+            verification_notes = ''
+        WHERE round_id = $1
+        "#
+    )
+    .bind(round_id as i64)
+    .execute(&state.postgres)
+    .await;
+    
+    Ok(Json(ResetTxnsResponse {
+        round_id,
+        message: "Transaction status reset. You can now fetch transactions again.".to_string(),
+    }))
+}
+
 /// DELETE /admin/rounds/{round_id}?delete_round=true&delete_deployments=true
 /// Delete round and/or deployments for re-backfill
 pub async fn delete_round_data(
