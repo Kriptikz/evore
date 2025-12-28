@@ -1,6 +1,7 @@
 //! EVORE Account API Routes (Phase 1b)
 //!
-//! Endpoints for reading EVORE program accounts (Managers, Deployers, Auth balances)
+//! Endpoints for reading EVORE program accounts (Managers, Deployers)
+//! Note: Auth balances are NOT cached - frontend fetches them manually via /balance/{pubkey}
 
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
 use crate::evore_cache::{
-    AutoMinerInfo, CachedAuthBalance, CachedDeployer, CachedManager, EvoreCacheStats, MinerInfo,
+    AutoMinerInfo, CachedDeployer, CachedManager, EvoreCacheStats, MinerInfo,
 };
 
 // ============================================================================
@@ -69,10 +70,6 @@ pub fn evore_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/deployers/{pubkey}", get(get_deployer))
         .route("/deployers/by-manager/{pubkey}", get(get_deployer_by_manager))
         .route("/deployers/by-authority/{pubkey}", get(get_deployers_by_authority))
-        
-        // Auth balance endpoints
-        .route("/auth-balance/{manager}/{auth_id}", get(get_auth_balance))
-        .route("/auth-balances/{pubkey}", get(get_auth_balances_by_authority))
         
         // Combined endpoint for frontend optimization
         .route("/my-miners/{authority}", get(get_my_miners))
@@ -215,85 +212,96 @@ async fn get_deployers_by_authority(
 }
 
 // ============================================================================
-// Auth Balance Handlers
-// ============================================================================
-
-/// GET /evore/auth-balance/{manager}/{auth_id} - Balance of ManagedMinerAuth PDA
-async fn get_auth_balance(
-    State(state): State<Arc<AppState>>,
-    Path((manager, auth_id)): Path<(String, u64)>,
-) -> Result<Json<CachedAuthBalance>, Json<ErrorResponse>> {
-    let cache = state.evore_cache.read().await;
-    
-    // For now, we only support auth_id = 0
-    if auth_id != 0 {
-        return Err(Json(ErrorResponse { error: "Only auth_id 0 is supported".to_string() }));
-    }
-    
-    cache.get_auth_balance_for_manager(&manager)
-        .cloned()
-        .map(Json)
-        .ok_or_else(|| Json(ErrorResponse { error: "Auth balance not found".to_string() }))
-}
-
-/// GET /evore/auth-balances/{pubkey} - All auth balances for authority's managers
-async fn get_auth_balances_by_authority(
-    State(state): State<Arc<AppState>>,
-    Path(pubkey): Path<String>,
-) -> Json<Vec<CachedAuthBalance>> {
-    let cache = state.evore_cache.read().await;
-    
-    let balances: Vec<CachedAuthBalance> = cache.get_managers_by_authority(&pubkey)
-        .iter()
-        .filter_map(|manager| cache.get_auth_balance_for_manager(&manager.address))
-        .cloned()
-        .collect();
-    
-    Json(balances)
-}
-
-// ============================================================================
 // Combined Endpoint
 // ============================================================================
 
 /// GET /evore/my-miners/{authority} - Full data for all user's AutoMiners
+/// Note: Auth balances are NOT included - frontend fetches them manually via /balance/{pubkey}
+/// 
+/// We check auth_id 0, 1, 2, 3 at minimum for each manager, then continue checking
+/// higher auth_ids if we find a miner at auth_id 3 (some users start at 0, others at 1).
 async fn get_my_miners(
     State(state): State<Arc<AppState>>,
     Path(authority): Path<String>,
 ) -> Json<MyMinersResponse> {
+    use crate::evore_cache::managed_miner_auth_pda;
+    use steel::Pubkey;
+    
     let evore_cache = state.evore_cache.read().await;
     let miners_cache = state.miners_cache.read().await;
     
     let managers = evore_cache.get_managers_by_authority(&authority);
     
-    let autominers: Vec<AutoMinerInfo> = managers
-        .iter()
-        .map(|manager| {
-            let deployer = evore_cache.get_deployer_for_manager(&manager.address).cloned();
-            let auth_balance = evore_cache.get_auth_balance_for_manager(&manager.address).cloned();
-            
-            // Try to find the linked ORE miner
-            // The miner authority is the ManagedMinerAuth PDA
-            let miner = auth_balance.as_ref().and_then(|auth| {
-                miners_cache.get(&auth.address).map(|m| MinerInfo {
-                    address: auth.address.clone(),
-                    round_id: m.round_id,
-                    checkpoint_id: m.checkpoint_id,
-                    deployed: m.deployed,
-                    rewards_sol: m.rewards_sol,
-                    rewards_ore: m.rewards_ore,
-                    refined_ore: m.refined_ore,
-                })
-            });
-            
-            AutoMinerInfo {
-                manager: (*manager).clone(),
-                deployer,
-                auth_balance,
-                miner,
+    let mut autominers: Vec<AutoMinerInfo> = Vec::new();
+    
+    for manager in managers {
+        let deployer = evore_cache.get_deployer_for_manager(&manager.address).cloned();
+        
+        // Parse manager pubkey
+        let manager_pubkey = match Pubkey::try_from(manager.address.as_str()) {
+            Ok(pk) => pk,
+            Err(_) => {
+                // Can't parse manager pubkey, add without miners
+                autominers.push(AutoMinerInfo {
+                    manager: (*manager).clone(),
+                    deployer,
+                    miners: Vec::new(),
+                });
+                continue;
             }
-        })
-        .collect();
+        };
+        
+        // Check auth_ids 0, 1, 2, 3 at minimum, then keep going if we find one at 3
+        let mut found_miners: Vec<(u64, MinerInfo)> = Vec::new();
+        let mut auth_id: u64 = 0;
+        let min_check = 4; // Always check 0, 1, 2, 3
+        
+        loop {
+            let (auth_pda, _) = managed_miner_auth_pda(&manager_pubkey, auth_id);
+            let auth_pda_str = auth_pda.to_string();
+            
+            // Check if this auth PDA has a miner in the cache
+            // The miners_cache is keyed by the miner's authority, which IS the auth PDA
+            if let Some(miner) = miners_cache.get(&auth_pda_str) {
+                found_miners.push((auth_id, MinerInfo {
+                    address: auth_pda_str,
+                    auth_id,
+                    round_id: miner.round_id,
+                    checkpoint_id: miner.checkpoint_id,
+                    deployed: miner.deployed,
+                    rewards_sol: miner.rewards_sol,
+                    rewards_ore: miner.rewards_ore,
+                    refined_ore: miner.refined_ore,
+                }));
+            }
+            
+            auth_id += 1;
+            
+            // If we've checked up to min_check and haven't found any beyond 3, stop
+            // If we found one at auth_id 3 (index 3), keep checking
+            if auth_id >= min_check {
+                // Check if we found a miner at the previous auth_id
+                let found_at_prev = found_miners.iter().any(|(id, _)| *id == auth_id - 1);
+                if !found_at_prev {
+                    break;
+                }
+            }
+            
+            // Safety limit - don't check more than 100 auth_ids
+            if auth_id > 100 {
+                break;
+            }
+        }
+        
+        // Create AutoMinerInfo with all found miners
+        let miners: Vec<MinerInfo> = found_miners.into_iter().map(|(_, m)| m).collect();
+        
+        autominers.push(AutoMinerInfo {
+            manager: (*manager).clone(),
+            deployer,
+            miners,
+        });
+    }
     
     Json(MyMinersResponse {
         authority,

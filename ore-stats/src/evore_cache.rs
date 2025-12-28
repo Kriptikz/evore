@@ -65,19 +65,6 @@ pub struct CachedDeployer {
     pub max_per_round: u64,
 }
 
-/// ManagedMinerAuth PDA balance
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedAuthBalance {
-    /// The ManagedMinerAuth PDA address
-    pub address: String,
-    /// The manager this auth belongs to
-    pub manager: String,
-    /// Auth ID (usually 0)
-    pub auth_id: u64,
-    /// Balance in lamports
-    pub balance: u64,
-}
-
 // ============================================================================
 // EVORE Cache
 // ============================================================================
@@ -96,12 +83,6 @@ pub struct EvoreCache {
     
     /// Manager address → deployer address
     pub deployer_by_manager: HashMap<String, String>,
-    
-    /// ManagedMinerAuth PDA address → balance info
-    pub auth_balances: HashMap<String, CachedAuthBalance>,
-    
-    /// Manager address → ManagedMinerAuth PDA address
-    pub auth_pda_by_manager: HashMap<String, String>,
     
     /// Last slot when cache was updated
     pub last_updated_slot: u64,
@@ -131,13 +112,6 @@ impl EvoreCache {
             .and_then(|addr| self.deployers.get(addr))
     }
     
-    /// Get auth balance for a manager
-    pub fn get_auth_balance_for_manager(&self, manager: &str) -> Option<&CachedAuthBalance> {
-        self.auth_pda_by_manager
-            .get(manager)
-            .and_then(|addr| self.auth_balances.get(addr))
-    }
-    
     /// Update manager in cache
     pub fn upsert_manager(&mut self, manager: CachedManager) {
         // Update authority lookup
@@ -161,18 +135,11 @@ impl EvoreCache {
         self.deployers.insert(deployer.address.clone(), deployer);
     }
     
-    /// Update auth balance in cache
-    pub fn upsert_auth_balance(&mut self, auth: CachedAuthBalance) {
-        self.auth_pda_by_manager.insert(auth.manager.clone(), auth.address.clone());
-        self.auth_balances.insert(auth.address.clone(), auth);
-    }
-    
     /// Get statistics about the cache
     pub fn stats(&self) -> EvoreCacheStats {
         EvoreCacheStats {
             managers_count: self.managers.len(),
             deployers_count: self.deployers.len(),
-            auth_balances_count: self.auth_balances.len(),
             last_updated_slot: self.last_updated_slot,
         }
     }
@@ -182,7 +149,6 @@ impl EvoreCache {
 pub struct EvoreCacheStats {
     pub managers_count: usize,
     pub deployers_count: usize,
-    pub auth_balances_count: usize,
     pub last_updated_slot: u64,
 }
 
@@ -269,15 +235,18 @@ pub fn parse_deployer(address: &str, data: &[u8]) -> Option<CachedDeployer> {
 pub struct AutoMinerInfo {
     pub manager: CachedManager,
     pub deployer: Option<CachedDeployer>,
-    pub auth_balance: Option<CachedAuthBalance>,
-    /// ORE Miner account (if linked)
-    pub miner: Option<MinerInfo>,
+    /// ORE Miner accounts linked to this manager (one per auth_id)
+    /// Frontend should fetch SOL balance for each miner.address (the auth PDA)
+    pub miners: Vec<MinerInfo>,
 }
 
 /// Subset of miner info needed for AutoMiner display
 #[derive(Debug, Clone, Serialize)]
 pub struct MinerInfo {
+    /// The ManagedMinerAuth PDA address (which is the miner's authority)
     pub address: String,
+    /// The auth_id used to derive this ManagedMinerAuth PDA
+    pub auth_id: u64,
     pub round_id: u64,
     pub checkpoint_id: u64,
     pub deployed: [u64; 25],

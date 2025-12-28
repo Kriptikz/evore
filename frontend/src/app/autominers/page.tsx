@@ -46,9 +46,28 @@ export default function AutoMinersPage() {
     );
   };
 
-  // Find miner for a manager
+  // Find the first miner for a manager (miners are keyed by "manager-authId")
   const getMinerForManager = (managerAddress: PublicKey) => {
-    return miners.get(managerAddress.toBase58());
+    const prefix = managerAddress.toBase58();
+    // Find any miner key that starts with this manager address
+    for (const [key, miner] of miners.entries()) {
+      if (key.startsWith(prefix + "-")) {
+        return miner;
+      }
+    }
+    return undefined;
+  };
+
+  // Get all miners for a manager
+  const getAllMinersForManager = (managerAddress: PublicKey) => {
+    const prefix = managerAddress.toBase58();
+    const result: typeof miners extends Map<string, infer V> ? V[] : never[] = [];
+    for (const [key, miner] of miners.entries()) {
+      if (key.startsWith(prefix + "-")) {
+        result.push(miner);
+      }
+    }
+    return result;
   };
 
   // Calculate totals
@@ -62,8 +81,8 @@ export default function AutoMinersPage() {
   const managersWithDeployers = managers
     .filter(m => deployers.some(d => d.data.managerKey.toBase58() === m.address.toBase58()))
     .sort((a, b) => {
-      const minerA = miners.get(a.address.toBase58());
-      const minerB = miners.get(b.address.toBase58());
+      const minerA = getMinerForManager(a.address);
+      const minerB = getMinerForManager(b.address);
       const oreA = (minerA?.rewardsOre || BigInt(0)) + (minerA?.refinedOre || BigInt(0));
       const oreB = (minerB?.rewardsOre || BigInt(0)) + (minerB?.refinedOre || BigInt(0));
       if (oreB > oreA) return 1;

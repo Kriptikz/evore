@@ -140,9 +140,14 @@ export function useEvore() {
   // Fetch a single auth PDA balance (rate limited - 1 per second)
   const fetchAuthBalance = useCallback(async (authPda: string) => {
     try {
+      console.log(`[useEvore] Fetching balance for auth PDA: ${authPda}`);
       const res = await fetch(`${API_BASE}/balance/${authPda}`);
-      if (!res.ok) return;
+      if (!res.ok) {
+        console.error(`[useEvore] Failed to fetch balance for ${authPda}: ${res.status}`);
+        return;
+      }
       const data = await res.json();
+      console.log(`[useEvore] Got balance for ${authPda}: ${data.lamports} lamports`);
       setAuthBalances(prev => {
         const next = new Map(prev);
         next.set(authPda, BigInt(data.lamports || 0));
@@ -217,6 +222,9 @@ export function useEvore() {
       
       const data = await res.json();
       
+      // Debug: log raw API response to see what we're getting
+      console.log("[useEvore] API response:", JSON.stringify(data, null, 2));
+      
       // Transform API response to hook state format
       const newManagers: ManagerAccount[] = [];
       const newDeployers: DeployerAccount[] = [];
@@ -234,10 +242,18 @@ export function useEvore() {
           },
         });
         
+        // Process all miners for this manager
+        // API now returns `miners` array instead of single `miner`
+        const miners = autominer.miners || [];
+        
+        // Find the first miner to use for deployer's auth PDA (usually auth_id 0)
+        const firstMiner = miners.length > 0 ? miners[0] : null;
+        const firstAuthId = firstMiner ? BigInt(firstMiner.auth_id || 0) : BigInt(0);
+        
         // Deployer (if exists)
         if (autominer.deployer) {
           const [deployerPda] = getDeployerPda(managerAddr);
-          const [authPda] = getManagedMinerAuthPda(managerAddr, BigInt(0));
+          const [authPda] = getManagedMinerAuthPda(managerAddr, firstAuthId);
           const authPdaStr = authPda.toBase58();
           authPdasToFetch.push(authPdaStr);
           
@@ -250,24 +266,38 @@ export function useEvore() {
               flatFee: BigInt(autominer.deployer.flat_fee || 0),
               maxPerRound: BigInt(autominer.deployer.max_per_round || 1_000_000_000),
             },
-            // Use cached balance from API initially, will be updated by manual fetch
-            autodeployBalance: BigInt(autominer.auth_balance?.balance || 0),
+            // Auth balance not cached on backend - will be fetched manually
+            autodeployBalance: BigInt(0),
             authPdaAddress: authPda,
           });
+          
+          // Queue balance fetching for ALL miners' auth PDAs
+          for (const miner of miners) {
+            const minerAuthId = BigInt(miner.auth_id || 0);
+            const [minerAuthPda] = getManagedMinerAuthPda(managerAddr, minerAuthId);
+            const minerAuthPdaStr = minerAuthPda.toBase58();
+            if (!authPdasToFetch.includes(minerAuthPdaStr)) {
+              authPdasToFetch.push(minerAuthPdaStr);
+            }
+          }
         }
         
-        // Miner (if exists)
-        if (autominer.miner) {
-          const minerKey = managerAddr.toBase58();
+        // Process all miners
+        for (const miner of miners) {
+          const authId = BigInt(miner.auth_id || 0);
+          const [authPda] = getManagedMinerAuthPda(managerAddr, authId);
+          // Use manager address + auth_id as the key to support multiple miners per manager
+          const minerKey = `${managerAddr.toBase58()}-${authId}`;
+          
           newMiners.set(minerKey, {
-            address: new PublicKey(autominer.miner.address),
-            authority: new PublicKey(autominer.auth_balance?.address || autominer.miner.address),
-            roundId: BigInt(autominer.miner.round_id || 0),
-            checkpointId: BigInt(autominer.miner.checkpoint_id || 0),
-            deployed: (autominer.miner.deployed || new Array(25).fill(0)).map((v: number) => BigInt(v)),
-            rewardsSol: BigInt(autominer.miner.rewards_sol || 0),
-            rewardsOre: BigInt(autominer.miner.rewards_ore || 0),
-            refinedOre: BigInt(autominer.miner.refined_ore || 0),
+            address: new PublicKey(miner.address),
+            authority: authPda, // The miner's authority is the ManagedMinerAuth PDA
+            roundId: BigInt(miner.round_id || 0),
+            checkpointId: BigInt(miner.checkpoint_id || 0),
+            deployed: (miner.deployed || new Array(25).fill(0)).map((v: number) => BigInt(v)),
+            rewardsSol: BigInt(miner.rewards_sol || 0),
+            rewardsOre: BigInt(miner.rewards_ore || 0),
+            refinedOre: BigInt(miner.refined_ore || 0),
           });
         }
       }
@@ -278,6 +308,7 @@ export function useEvore() {
       
       // Queue auth PDAs for manual balance fetching
       if (authPdasToFetch.length > 0) {
+        console.log(`[useEvore] Queuing ${authPdasToFetch.length} auth PDAs for balance fetching:`, authPdasToFetch);
         queueAuthBalances(authPdasToFetch);
       }
     } catch (err) {

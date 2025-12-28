@@ -522,12 +522,14 @@ pub fn spawn_cleanup_task(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
 // ============================================================================
 
 /// Spawn the EVORE accounts polling task
-/// Fetches Managers, Deployers, and Auth balances
+/// Fetches Managers and Deployers
 /// - Initial: Full fetch of all accounts
 /// - Subsequent: Incremental updates using changedSinceSlot (every 5s)
+/// Note: Auth balances are NOT cached here since we don't know which auth_id the user uses.
+/// The frontend fetches auth balances manually via /balance/{pubkey}
 pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     use crate::evore_cache::{
-        parse_manager, parse_deployer, managed_miner_auth_pda, CachedAuthBalance,
+        parse_manager, parse_deployer,
     };
     
     tokio::spawn(async move {
@@ -633,87 +635,18 @@ pub fn spawn_evore_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> 
                 last_sync_slot = current_slot;
             }
             
-            if !initial_load_done {
-                initial_load_done = true;
-                tracing::info!(
-                    "EVORE: Initial load complete (will use changedSinceSlot for future updates)"
-                );
-            }
-            
-            // Fetch Auth balances for all managers
+            // Update last slot in cache
             {
-                let cache = state.evore_cache.read().await;
-                let managers: Vec<(String, Pubkey)> = cache.managers
-                    .iter()
-                    .filter_map(|(addr, _)| {
-                        Pubkey::try_from(addr.as_str()).ok().map(|p| (addr.clone(), p))
-                    })
-                    .collect();
-                drop(cache);
-                
-                if !managers.is_empty() {
-                    // Derive PDAs and fetch balances in batches
-                    let mut pdas: Vec<(String, Pubkey)> = Vec::new();
-                    for (manager_addr, manager_pubkey) in &managers {
-                        let (pda, _) = managed_miner_auth_pda(manager_pubkey, 0);
-                        pdas.push((manager_addr.clone(), pda));
-                    }
-                    
-                    // Fetch balances in batches of 100
-                    let mut all_balances: Vec<(String, Pubkey, Option<u64>)> = Vec::new();
-                    
-                    for chunk in pdas.chunks(100) {
-                        let addresses: Vec<Pubkey> = chunk.iter().map(|(_, p)| *p).collect();
-                        
-                        let balances_result = {
-                            let mut api = helius.write().await;
-                            api.get_multiple_account_balances(&addresses).await
-                        };
-                        
-                        match balances_result {
-                            Ok(balances) => {
-                                for (i, (pubkey, balance)) in balances.into_iter().enumerate() {
-                                    let manager_addr = chunk[i].0.clone();
-                                    all_balances.push((manager_addr, pubkey, balance));
-                                }
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to fetch auth balances: {}", e);
-                            }
-                        }
-                    }
-                    
-                    // Update cache
-                    let mut cache = state.evore_cache.write().await;
-                    let mut count = 0;
-                    
-                    for (manager_addr, pda, balance) in all_balances {
-                        if let Some(lamports) = balance {
-                            cache.upsert_auth_balance(CachedAuthBalance {
-                                address: pda.to_string(),
-                                manager: manager_addr,
-                                auth_id: 0,
-                                balance: lamports,
-                            });
-                            count += 1;
-                        }
-                    }
-                    
-                    // Update last slot
-                    cache.last_updated_slot = *state.slot_cache.read().await;
-                    
-                    if !initial_load_done {
-                        tracing::info!("EVORE: Loaded {} auth balances", count);
-                    }
-                }
+                let mut cache = state.evore_cache.write().await;
+                cache.last_updated_slot = *state.slot_cache.read().await;
             }
             
             if !initial_load_done {
                 let cache = state.evore_cache.read().await;
                 let stats = cache.stats();
                 tracing::info!(
-                    "EVORE cache initialized: {} managers, {} deployers, {} auth balances",
-                    stats.managers_count, stats.deployers_count, stats.auth_balances_count
+                    "EVORE cache initialized: {} managers, {} deployers",
+                    stats.managers_count, stats.deployers_count
                 );
                 initial_load_done = true;
             }
