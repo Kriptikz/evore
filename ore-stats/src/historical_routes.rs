@@ -117,6 +117,8 @@ pub struct LeaderboardQuery {
     pub limit: Option<u32>,
     // Search filter (partial pubkey match, preserves ranking)
     pub search: Option<String>,
+    // Minimum rounds played filter (e.g., 100, 1000)
+    pub min_rounds: Option<u32>,
 }
 
 /// Treasury history filters
@@ -128,6 +130,22 @@ pub struct TreasuryHistoryQuery {
     // Range filters
     pub round_id_gte: Option<u64>,
     pub round_id_lte: Option<u64>,
+}
+
+/// Miner snapshots query
+#[derive(Debug, Deserialize)]
+pub struct MinerSnapshotsQuery {
+    // Which round to get (if not provided, uses latest)
+    pub round_id: Option<u64>,
+    // Sort field: "refined_ore" (default), "unclaimed_ore", "lifetime_sol", "lifetime_ore"
+    pub sort_by: Option<String>,
+    // Sort order: "desc" (default), "asc"
+    pub order: Option<String>,
+    // Pagination
+    pub page: Option<u32>,
+    pub limit: Option<u32>,
+    // Search by miner pubkey
+    pub search: Option<String>,
 }
 
 // ============================================================================
@@ -186,6 +204,25 @@ pub struct LeaderboardEntry {
 }
 
 #[derive(Debug, Serialize)]
+pub struct MinerSnapshotEntry {
+    pub miner_pubkey: String,
+    pub refined_ore: u64,
+    pub unclaimed_ore: u64,
+    pub lifetime_sol: u64,
+    pub lifetime_ore: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MinerSnapshotsResponse {
+    pub round_id: u64,
+    pub data: Vec<MinerSnapshotEntry>,
+    pub page: u32,
+    pub per_page: u32,
+    pub total_count: u64,
+    pub total_pages: u32,
+}
+
+#[derive(Debug, Serialize)]
 pub struct TreasurySnapshot {
     pub round_id: u64,
     pub balance: u64,
@@ -218,6 +255,9 @@ pub fn historical_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Miner history
         .route("/miner/{pubkey}/deployments", get(get_miner_deployments))
         .route("/miner/{pubkey}/stats", get(get_miner_stats))
+        
+        // Miner snapshots (all miners from latest round snapshot)
+        .route("/miners", get(get_miner_snapshots))
         
         // Leaderboards
         .route("/leaderboard", get(get_leaderboard))
@@ -482,6 +522,68 @@ async fn get_miner_stats(
 }
 
 // ============================================================================
+// Miner Snapshots Handlers
+// ============================================================================
+
+/// GET /history/miners - Get all miners from the latest snapshot
+async fn get_miner_snapshots(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<MinerSnapshotsQuery>,
+) -> Result<Json<MinerSnapshotsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    // Get round_id (use latest if not specified)
+    let round_id = if let Some(id) = params.round_id {
+        id
+    } else {
+        state.clickhouse
+            .get_latest_snapshot_round()
+            .await
+            .map_err(|e| {
+                tracing::error!("Failed to get latest snapshot round: {}", e);
+                (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string() }))
+            })?
+            .ok_or_else(|| {
+                (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "No miner snapshots found".to_string() }))
+            })?
+    };
+    
+    let sort_by = params.sort_by.as_deref().unwrap_or("refined_ore");
+    let order = params.order.as_deref().unwrap_or("desc");
+    let page = params.page.unwrap_or(1).max(1);
+    let limit = params.limit.unwrap_or(50).min(100);
+    let offset = (page - 1) * limit;
+    
+    let (rows, total_count) = state.clickhouse
+        .get_miner_snapshots(round_id, sort_by, order, offset, limit, params.search.as_deref())
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get miner snapshots: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string() }))
+        })?;
+    
+    let data: Vec<MinerSnapshotEntry> = rows
+        .into_iter()
+        .map(|r| MinerSnapshotEntry {
+            miner_pubkey: r.miner_pubkey,
+            refined_ore: r.refined_ore,
+            unclaimed_ore: r.unclaimed_ore,
+            lifetime_sol: r.lifetime_sol,
+            lifetime_ore: r.lifetime_ore,
+        })
+        .collect();
+    
+    let total_pages = ((total_count as f64) / (limit as f64)).ceil() as u32;
+    
+    Ok(Json(MinerSnapshotsResponse {
+        round_id,
+        data,
+        page,
+        per_page: limit,
+        total_count,
+        total_pages,
+    }))
+}
+
+// ============================================================================
 // Leaderboard Handlers
 // ============================================================================
 
@@ -527,23 +629,24 @@ async fn get_leaderboard_internal(
     let page = params.page.unwrap_or(1).max(1);
     let limit = params.limit.unwrap_or(50).min(100);
     let offset = (page - 1) * limit;
+    let min_rounds = params.min_rounds;
     
     // Check if there's a search filter
     let (entries, total_count) = if let Some(search) = &params.search {
         if search.trim().is_empty() {
             // Empty search, use normal pagination
             state.clickhouse
-                .get_leaderboard(metric, round_range, offset, limit)
+                .get_leaderboard(metric, round_range, offset, limit, min_rounds)
                 .await
         } else {
             // Search filter - keeps rankings intact, no pagination offset
             state.clickhouse
-                .get_leaderboard_filtered(metric, round_range, search.trim(), limit)
+                .get_leaderboard_filtered(metric, round_range, search.trim(), limit, min_rounds)
                 .await
         }
     } else {
         state.clickhouse
-            .get_leaderboard(metric, round_range, offset, limit)
+            .get_leaderboard(metric, round_range, offset, limit, min_rounds)
             .await
     }.map_err(|e| {
         tracing::error!("Failed to get leaderboard: {}", e);

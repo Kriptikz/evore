@@ -45,9 +45,13 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // === STEP 1: IMMEDIATELY take GPA miners snapshot (source of truth) ===
     tracing::info!("Round {} ending - taking GPA miners snapshot IMMEDIATELY...", round_id);
     
+    // Get treasury for refined_ore calculation
+    let treasury_cache = state.treasury_cache.read().await;
+    let treasury_for_gpa = treasury_cache.as_ref();
+    
     // Store ALL miners from GPA (for full historical tracking ~1/min)
     // and also filter for round deployers for deployment processing
-    let (all_gpa_miners, gpa_miners) = match state.rpc.get_all_miners_gpa().await {
+    let (all_gpa_miners, gpa_miners) = match state.rpc.get_all_miners_gpa(treasury_for_gpa).await {
         Ok(miners) => {
             let total_count = miners.len();
             let all_miners = miners.clone();
@@ -68,6 +72,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
             (HashMap::new(), HashMap::new())
         }
     };
+    drop(treasury_cache);
     
     // === STEP 2: Log WebSocket pending_deployments count ===
     let ws_deployments = state.pending_deployments.read().await.clone();

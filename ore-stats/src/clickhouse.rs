@@ -542,6 +542,74 @@ impl ClickHouseClient {
         Ok(())
     }
     
+    /// Get the latest round_id that has miner snapshots.
+    pub async fn get_latest_snapshot_round(&self) -> Result<Option<u64>, ClickHouseError> {
+        let query = "SELECT max(round_id) as max_round FROM miner_snapshots";
+        let result: Option<u64> = self.client.query(query).fetch_optional().await?;
+        Ok(result.filter(|&r| r > 0))
+    }
+    
+    /// Get miners from a specific snapshot round with filtering and pagination.
+    /// sort_by: "refined_ore", "unclaimed_ore", "lifetime_sol", "lifetime_ore"
+    /// sort_order: "desc" or "asc"
+    pub async fn get_miner_snapshots(
+        &self,
+        round_id: u64,
+        sort_by: &str,
+        sort_order: &str,
+        offset: u32,
+        limit: u32,
+        search: Option<&str>,
+    ) -> Result<(Vec<MinerSnapshotRow>, u64), ClickHouseError> {
+        // Validate sort column
+        let sort_column = match sort_by {
+            "unclaimed_ore" => "unclaimed_ore",
+            "lifetime_sol" => "lifetime_sol",
+            "lifetime_ore" => "lifetime_ore",
+            _ => "refined_ore", // Default
+        };
+        
+        let order = if sort_order == "asc" { "ASC" } else { "DESC" };
+        
+        // Build search filter
+        let search_filter = if let Some(s) = search {
+            if !s.is_empty() {
+                format!("AND miner_pubkey LIKE '%{}%'", s.replace("'", "''"))
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
+        
+        // Count query
+        let count_query = format!(
+            "SELECT count(*) FROM miner_snapshots WHERE round_id = {} {}",
+            round_id, search_filter
+        );
+        let total_count: u64 = self.client.query(&count_query).fetch_one().await?;
+        
+        // Data query
+        let query = format!(
+            r#"SELECT 
+                round_id,
+                miner_pubkey,
+                unclaimed_ore,
+                refined_ore,
+                lifetime_sol,
+                lifetime_ore
+            FROM miner_snapshots
+            WHERE round_id = {} {}
+            ORDER BY {} {}
+            LIMIT {} OFFSET {}"#,
+            round_id, search_filter, sort_column, order, limit, offset
+        );
+        
+        let rows: Vec<MinerSnapshotRow> = self.client.query(&query).fetch_all().await?;
+        
+        Ok((rows, total_count))
+    }
+    
     // ========== RPC Metrics ==========
     
     /// Create an inserter for RPC request metrics.
@@ -1386,6 +1454,7 @@ impl ClickHouseClient {
         round_range: &str,
         offset: u32,
         limit: u32,
+        min_rounds: Option<u32>,
     ) -> Result<(Vec<crate::historical_routes::LeaderboardEntry>, u64), ClickHouseError> {
         // Build round filter
         let round_filter = match round_range {
@@ -1393,6 +1462,13 @@ impl ClickHouseClient {
             "last_100" => "round_id >= (SELECT max(round_id) - 100 FROM rounds)".to_string(),
             "today" => "deployed_at >= today()".to_string(),
             _ => "1=1".to_string(), // "all"
+        };
+        
+        // Build min_rounds HAVING filter
+        let having_clause = if let Some(min) = min_rounds {
+            format!("HAVING count(DISTINCT round_id) >= {}", min)
+        } else {
+            String::new()
         };
         
         // Build ordering based on metric
@@ -1403,11 +1479,24 @@ impl ClickHouseClient {
             _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
         };
         
-        // Get total count
-        let count_query = format!(
-            "SELECT count(DISTINCT miner_pubkey) FROM deployments WHERE {}",
-            round_filter
-        );
+        // Get total count (with min_rounds filter)
+        let count_query = if min_rounds.is_some() {
+            format!(
+                r#"SELECT count(*) FROM (
+                    SELECT miner_pubkey 
+                    FROM deployments 
+                    WHERE {} 
+                    GROUP BY miner_pubkey 
+                    {}
+                )"#,
+                round_filter, having_clause
+            )
+        } else {
+            format!(
+                "SELECT count(DISTINCT miner_pubkey) FROM deployments WHERE {}",
+                round_filter
+            )
+        };
         let total_count: u64 = self.client.query(&count_query).fetch_one().await?;
         
         // Get leaderboard page
@@ -1419,9 +1508,10 @@ impl ClickHouseClient {
                FROM deployments
                WHERE {}
                GROUP BY miner_pubkey
+               {}
                ORDER BY value {}
                LIMIT {} OFFSET {}"#,
-            value_expr, round_filter, order, limit, offset
+            value_expr, round_filter, having_clause, order, limit, offset
         );
         
         let rows: Vec<LeaderboardRow> = self.client.query(&query).fetch_all().await?;
@@ -1447,6 +1537,7 @@ impl ClickHouseClient {
         round_range: &str,
         search: &str,
         limit: u32,
+        min_rounds: Option<u32>,
     ) -> Result<(Vec<crate::historical_routes::LeaderboardEntry>, u64), ClickHouseError> {
         // Build round filter
         let round_filter = match round_range {
@@ -1454,6 +1545,13 @@ impl ClickHouseClient {
             "last_100" => "round_id >= (SELECT max(round_id) - 100 FROM rounds)".to_string(),
             "today" => "deployed_at >= today()".to_string(),
             _ => "1=1".to_string(), // "all"
+        };
+        
+        // Build min_rounds HAVING filter
+        let having_clause = if let Some(min) = min_rounds {
+            format!("HAVING count(DISTINCT round_id) >= {}", min)
+        } else {
+            String::new()
         };
         
         // Build ordering based on metric
@@ -1464,12 +1562,27 @@ impl ClickHouseClient {
             _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
         };
         
-        // Get total count with search filter
-        let count_query = format!(
-            "SELECT count(DISTINCT miner_pubkey) FROM deployments WHERE {} AND miner_pubkey LIKE '%{}%'",
-            round_filter,
-            search.replace("'", "''") // Simple SQL escape
-        );
+        // Get total count with search filter and min_rounds
+        let count_query = if min_rounds.is_some() {
+            format!(
+                r#"SELECT count(*) FROM (
+                    SELECT miner_pubkey 
+                    FROM deployments 
+                    WHERE {} AND miner_pubkey LIKE '%{}%'
+                    GROUP BY miner_pubkey 
+                    {}
+                )"#,
+                round_filter,
+                search.replace("'", "''"),
+                having_clause
+            )
+        } else {
+            format!(
+                "SELECT count(DISTINCT miner_pubkey) FROM deployments WHERE {} AND miner_pubkey LIKE '%{}%'",
+                round_filter,
+                search.replace("'", "''")
+            )
+        };
         let total_count: u64 = self.client.query(&count_query).fetch_one().await?;
         
         // Use a subquery with row_number to get rankings, then filter
@@ -1488,11 +1601,12 @@ impl ClickHouseClient {
                    FROM deployments
                    WHERE {}
                    GROUP BY miner_pubkey
+                   {}
                )
                WHERE miner_pubkey LIKE '%{}%'
                ORDER BY rank
                LIMIT {}"#,
-            value_expr, value_expr, order, round_filter, 
+            value_expr, value_expr, order, round_filter, having_clause,
             search.replace("'", "''"),
             limit
         );
@@ -1752,6 +1866,17 @@ pub struct TreasurySnapshot {
 /// Miner snapshot at round end.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct MinerSnapshot {
+    pub round_id: u64,
+    pub miner_pubkey: String,
+    pub unclaimed_ore: u64,
+    pub refined_ore: u64,
+    pub lifetime_sol: u64,
+    pub lifetime_ore: u64,
+}
+
+/// Miner snapshot row for queries (same structure, used for deserialization).
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct MinerSnapshotRow {
     pub round_id: u64,
     pub miner_pubkey: String,
     pub unclaimed_ore: u64,

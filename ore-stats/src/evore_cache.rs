@@ -19,8 +19,8 @@ use crate::helius_api::{HeliusApi, ProgramAccountV2, ProgramAccountFilter, GetPr
 /// EVORE program ID
 pub const EVORE_PROGRAM_ID: Pubkey = evore::ID;
 
-/// Seeds for PDA derivation
-pub const MANAGED_MINER_AUTH: &[u8] = b"managed_miner_auth";
+/// Seeds for PDA derivation (must match program/src/consts.rs)
+pub const MANAGED_MINER_AUTH: &[u8] = b"managed-miner-auth";
 pub const DEPLOYER_SEED: &[u8] = b"deployer";
 
 /// Account discriminators (first byte after 8-byte discriminator)

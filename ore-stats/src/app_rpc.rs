@@ -23,6 +23,7 @@ use evore::ore_api::{
     TREASURY_ADDRESS, board_pda, miner_pda, round_pda,
 };
 
+use crate::app_state::apply_refined_ore_fix;
 use crate::clickhouse::{ClickHouseClient, RpcRequestInsert};
 
 /// Minimum time between RPC requests (rate limiting)
@@ -477,7 +478,8 @@ impl AppRpc {
     /// Get all ORE Miner accounts using standard getProgramAccounts RPC
     /// This is the source of truth for miner data - more reliable than v2 endpoint
     /// Returns a HashMap keyed by authority pubkey string
-    pub async fn get_all_miners_gpa(&self) -> Result<std::collections::HashMap<String, Miner>> {
+    /// If treasury is provided, applies refined_ore calculation immediately
+    pub async fn get_all_miners_gpa(&self, treasury: Option<&Treasury>) -> Result<std::collections::HashMap<String, Miner>> {
         use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
         use solana_client::rpc_filter::RpcFilterType;
         use solana_account_decoder_client_types::UiAccountEncoding;
@@ -523,7 +525,13 @@ impl AppRpc {
                     total_size += account.data.len() as u32;
                     
                     if let Ok(miner) = Miner::try_from_bytes(&account.data) {
-                        miners.insert(miner.authority.to_string(), *miner);
+                        // Apply refined_ore fix if treasury is available
+                        let fixed_miner = if let Some(t) = treasury {
+                            apply_refined_ore_fix(miner, t)
+                        } else {
+                            *miner
+                        };
+                        miners.insert(fixed_miner.authority.to_string(), fixed_miner);
                     }
                 }
                 

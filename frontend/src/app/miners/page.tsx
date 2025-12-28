@@ -3,11 +3,11 @@
 import { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, LeaderboardEntry, OffsetResponse } from "@/lib/api";
+import { api, MinerSnapshotsResponse } from "@/lib/api";
 import { Header } from "@/components/Header";
 
-type MetricType = "net_sol" | "sol_earned" | "ore_earned" | "rounds_won";
-type RangeType = "all" | "last_60" | "last_100" | "today";
+type SortByType = "refined_ore" | "unclaimed_ore" | "lifetime_sol" | "lifetime_ore";
+type OrderType = "desc" | "asc";
 
 const LAMPORTS_PER_SOL = 1_000_000_000;
 const ORE_DECIMALS = 11;
@@ -22,6 +22,9 @@ function formatSol(lamports: number): string {
 
 function formatOre(atomic: number): string {
   const ore = atomic / Math.pow(10, ORE_DECIMALS);
+  if (ore >= 1000) {
+    return ore.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " ORE";
+  }
   return ore.toFixed(4) + " ORE";
 }
 
@@ -32,12 +35,12 @@ function truncateAddress(addr: string): string {
 
 export default function MinersPage() {
   const router = useRouter();
-  const [leaderboard, setLeaderboard] = useState<OffsetResponse<LeaderboardEntry> | null>(null);
+  const [data, setData] = useState<MinerSnapshotsResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
-  const [metric, setMetric] = useState<MetricType>("net_sol");
-  const [range, setRange] = useState<RangeType>("all");
+  const [sortBy, setSortBy] = useState<SortByType>("refined_ore");
+  const [order, setOrder] = useState<OrderType>("desc");
   const [page, setPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
@@ -46,7 +49,6 @@ export default function MinersPage() {
   useEffect(() => {
     const timer = setTimeout(() => {
       setDebouncedSearch(searchQuery);
-      // Reset to page 1 when search changes
       if (searchQuery !== debouncedSearch) {
         setPage(1);
       }
@@ -54,61 +56,52 @@ export default function MinersPage() {
     return () => clearTimeout(timer);
   }, [searchQuery]);
 
-  const fetchLeaderboard = useCallback(async () => {
+  const fetchMiners = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.getLeaderboard({
-        metric,
-        roundRange: range,
-        page: debouncedSearch ? 1 : page, // No pagination when searching
+      const result = await api.getMinerSnapshots({
+        sortBy,
+        order,
+        page,
         limit: 50,
         search: debouncedSearch || undefined,
       });
-      setLeaderboard(data);
+      setData(result);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load leaderboard");
+      setError(err instanceof Error ? err.message : "Failed to load miners");
     } finally {
       setLoading(false);
     }
-  }, [metric, range, page, debouncedSearch]);
+  }, [sortBy, order, page, debouncedSearch]);
 
   useEffect(() => {
-    fetchLeaderboard();
-  }, [fetchLeaderboard]);
+    fetchMiners();
+  }, [fetchMiners]);
 
-  const handleMetricChange = (newMetric: MetricType) => {
-    setMetric(newMetric);
-    setPage(1);
-  };
-
-  const handleRangeChange = (newRange: RangeType) => {
-    setRange(newRange);
-    setPage(1);
-  };
-
-  const getMetricLabel = (m: MetricType): string => {
-    switch (m) {
-      case "net_sol": return "Net SOL";
-      case "sol_earned": return "SOL Earned";
-      case "ore_earned": return "ORE Earned";
-      case "rounds_won": return "Rounds Won";
+  const handleSortChange = (newSort: SortByType) => {
+    if (newSort === sortBy) {
+      // Toggle order if same field
+      setOrder(order === "desc" ? "asc" : "desc");
+    } else {
+      setSortBy(newSort);
+      setOrder("desc");
     }
+    setPage(1);
   };
 
-  const getRangeLabel = (r: RangeType): string => {
-    switch (r) {
-      case "all": return "All Time";
-      case "last_60": return "Last 60 Rounds";
-      case "last_100": return "Last 100 Rounds";
-      case "today": return "Today";
+  const getSortLabel = (s: SortByType): string => {
+    switch (s) {
+      case "refined_ore": return "Refined ORE";
+      case "unclaimed_ore": return "Unclaimed ORE";
+      case "lifetime_sol": return "Lifetime SOL";
+      case "lifetime_ore": return "Lifetime ORE";
     }
   };
 
   const handleGoToMiner = () => {
     const address = searchQuery.trim();
     if (!address) return;
-    // If it looks like a full address, go directly to the profile
     if (address.length >= 32 && address.length <= 44) {
       router.push(`/miners/${address}`);
     }
@@ -120,80 +113,49 @@ export default function MinersPage() {
     }
   };
 
-  const formatValue = (entry: LeaderboardEntry): string => {
-    switch (metric) {
-      case "net_sol":
-      case "sol_earned":
-        return formatSol(entry.value);
-      case "ore_earned":
-        return formatOre(entry.value);
-      case "rounds_won":
-        return entry.value.toLocaleString();
-    }
-  };
-
-  const getValueClass = (entry: LeaderboardEntry): string => {
-    if (metric === "net_sol") {
-      return entry.value >= 0 ? "text-green-400" : "text-red-400";
-    }
-    return "text-white";
-  };
-
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       <Header />
 
       <main className="max-w-7xl mx-auto px-4 py-8">
-        <h1 className="text-2xl font-bold text-white mb-6">Miners Leaderboard</h1>
+        <div className="flex items-center justify-between mb-6">
+          <h1 className="text-2xl font-bold text-white">All Miners</h1>
+          {data && (
+            <div className="text-sm text-slate-400">
+              Snapshot from Round #{data.round_id.toLocaleString()}
+            </div>
+          )}
+        </div>
+
         {/* Filters */}
         <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6 mb-8">
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-            {/* Metric Selector */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+            {/* Sort By */}
             <div>
-              <label className="block text-sm text-slate-400 mb-2">Rank By</label>
+              <label className="block text-sm text-slate-400 mb-2">Sort By</label>
               <div className="flex flex-wrap gap-2">
-                {(["net_sol", "sol_earned", "ore_earned", "rounds_won"] as MetricType[]).map((m) => (
+                {(["refined_ore", "unclaimed_ore", "lifetime_sol", "lifetime_ore"] as SortByType[]).map((s) => (
                   <button
-                    key={m}
-                    onClick={() => handleMetricChange(m)}
-                    className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-                      metric === m
+                    key={s}
+                    onClick={() => handleSortChange(s)}
+                    className={`px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1 ${
+                      sortBy === s
                         ? "bg-amber-500 text-black font-medium"
                         : "bg-slate-700 text-slate-300 hover:bg-slate-600"
                     }`}
                   >
-                    {getMetricLabel(m)}
+                    {getSortLabel(s)}
+                    {sortBy === s && (
+                      <span className="text-xs">{order === "desc" ? "↓" : "↑"}</span>
+                    )}
                   </button>
                 ))}
               </div>
             </div>
 
-            {/* Time Range */}
+            {/* Search */}
             <div>
-              <label className="block text-sm text-slate-400 mb-2">Time Range</label>
-              <div className="flex flex-wrap gap-2">
-                {(["all", "last_100", "last_60", "today"] as RangeType[]).map((r) => (
-                  <button
-                    key={r}
-                    onClick={() => handleRangeChange(r)}
-                    className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
-                      range === r
-                        ? "bg-amber-500 text-black font-medium"
-                        : "bg-slate-700 text-slate-300 hover:bg-slate-600"
-                    }`}
-                  >
-                    {getRangeLabel(r)}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Search/Filter */}
-            <div>
-              <label className="block text-sm text-slate-400 mb-2">
-                Filter Leaderboard
-                {debouncedSearch && <span className="text-amber-400 ml-2">(ranking preserved)</span>}
-              </label>
+              <label className="block text-sm text-slate-400 mb-2">Search Miner</label>
               <div className="flex gap-2">
                 <input
                   type="text"
@@ -211,161 +173,178 @@ export default function MinersPage() {
                     View Profile ↗
                   </button>
                 )}
-                {searchQuery && (
-                  <button
-                    onClick={() => setSearchQuery("")}
-                    className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
-                    title="Clear search"
-                  >
-                    ✕
-                  </button>
-                )}
               </div>
-              <p className="text-slate-500 text-xs mt-1">
-                {debouncedSearch 
-                  ? `Showing miners matching "${debouncedSearch}" with their original ranking` 
-                  : "Type to filter leaderboard by address (keeps ranking position intact)"
-                }
-              </p>
             </div>
           </div>
         </div>
 
-        {/* Stats Summary */}
-        {leaderboard && (
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
-            <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
-              <div className="text-slate-400 text-sm">Total Miners</div>
-              <div className="text-2xl font-bold text-white">{leaderboard.total_count.toLocaleString()}</div>
-            </div>
-            <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
-              <div className="text-slate-400 text-sm">Current Page</div>
-              <div className="text-2xl font-bold text-white">{leaderboard.page} / {leaderboard.total_pages}</div>
-            </div>
-            <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
-              <div className="text-slate-400 text-sm">Ranking Metric</div>
-              <div className="text-2xl font-bold text-amber-400">{getMetricLabel(metric)}</div>
-            </div>
-            <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
-              <div className="text-slate-400 text-sm">Time Period</div>
-              <div className="text-2xl font-bold text-white">{getRangeLabel(range)}</div>
-            </div>
+        {/* Results */}
+        {loading && !data ? (
+          <div className="flex items-center justify-center py-20">
+            <div className="w-8 h-8 border-4 border-amber-500/30 border-t-amber-500 rounded-full animate-spin"></div>
           </div>
-        )}
-
-        {/* Loading State */}
-        {loading && (
-          <div className="flex items-center justify-center h-64">
-            <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
-          </div>
-        )}
-
-        {/* Error State */}
-        {error && (
-          <div className="bg-red-500/10 border border-red-500/30 rounded-xl p-6 text-center">
-            <div className="text-red-400 mb-2">Error loading leaderboard</div>
-            <div className="text-slate-400">{error}</div>
+        ) : error ? (
+          <div className="bg-red-500/10 border border-red-500/50 rounded-xl p-6 text-center">
+            <p className="text-red-400">{error}</p>
             <button
-              onClick={fetchLeaderboard}
-              className="mt-4 px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors"
+              onClick={fetchMiners}
+              className="mt-4 px-4 py-2 bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded-lg transition-colors"
             >
               Retry
             </button>
           </div>
-        )}
-
-        {/* Leaderboard Table */}
-        {!loading && !error && leaderboard && (
+        ) : data && data.data.length === 0 ? (
+          <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-12 text-center">
+            <p className="text-slate-400">No miners found</p>
+          </div>
+        ) : data ? (
           <>
+            {/* Stats */}
+            <div className="mb-4 flex items-center justify-between text-sm text-slate-400">
+              <span>
+                Showing {((data.page - 1) * data.per_page) + 1} - {Math.min(data.page * data.per_page, Number(data.total_count))} of {Number(data.total_count).toLocaleString()} miners
+              </span>
+            </div>
+
+            {/* Table */}
             <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-              <table className="w-full">
-                <thead>
-                  <tr className="border-b border-slate-700/50 bg-slate-800/80">
-                    <th className="text-left px-6 py-4 text-sm font-medium text-slate-400 w-16">Rank</th>
-                    <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">Miner</th>
-                    <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">{getMetricLabel(metric)}</th>
-                    <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">Rounds</th>
-                    <th className="text-center px-6 py-4 text-sm font-medium text-slate-400">Actions</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {leaderboard.data.map((entry, idx) => (
-                    <tr
-                      key={entry.miner_pubkey}
-                      className="border-b border-slate-700/30 hover:bg-slate-700/30 transition-colors"
-                    >
-                      <td className="px-6 py-4">
-                        <div className={`text-lg font-bold ${
-                          entry.rank === 1 ? "text-yellow-400" :
-                          entry.rank === 2 ? "text-slate-300" :
-                          entry.rank === 3 ? "text-amber-600" :
-                          "text-slate-500"
-                        }`}>
-                          #{entry.rank}
-                        </div>
-                      </td>
-                      <td className="px-6 py-4">
-                        <Link
-                          href={`/miners/${entry.miner_pubkey}`}
-                          className="font-mono text-white hover:text-amber-400 transition-colors"
-                        >
-                          {truncateAddress(entry.miner_pubkey)}
-                        </Link>
-                      </td>
-                      <td className={`px-6 py-4 text-right font-mono ${getValueClass(entry)}`}>
-                        {formatValue(entry)}
-                      </td>
-                      <td className="px-6 py-4 text-right text-slate-400">
-                        {entry.rounds_played.toLocaleString()}
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <Link
-                          href={`/miners/${entry.miner_pubkey}`}
-                          className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
-                        >
-                          View Profile
-                        </Link>
-                      </td>
+              <div className="overflow-x-auto">
+                <table className="w-full">
+                  <thead className="bg-slate-900/50">
+                    <tr>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        #
+                      </th>
+                      <th className="px-6 py-4 text-left text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Miner
+                      </th>
+                      <th className="px-6 py-4 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Refined ORE
+                      </th>
+                      <th className="px-6 py-4 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Unclaimed ORE
+                      </th>
+                      <th className="px-6 py-4 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Lifetime SOL
+                      </th>
+                      <th className="px-6 py-4 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Lifetime ORE
+                      </th>
+                      <th className="px-6 py-4 text-center text-xs font-medium text-slate-400 uppercase tracking-wider">
+                        Actions
+                      </th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody className="divide-y divide-slate-700/50">
+                    {data.data.map((entry, index) => (
+                      <tr 
+                        key={entry.miner_pubkey}
+                        className="hover:bg-slate-800/50 transition-colors"
+                      >
+                        <td className="px-6 py-4 text-slate-400 font-mono text-sm">
+                          {((data.page - 1) * data.per_page) + index + 1}
+                        </td>
+                        <td className="px-6 py-4">
+                          <Link
+                            href={`/miners/${entry.miner_pubkey}`}
+                            className="font-mono text-white hover:text-amber-400 transition-colors"
+                          >
+                            {truncateAddress(entry.miner_pubkey)}
+                          </Link>
+                        </td>
+                        <td className={`px-6 py-4 text-right font-mono ${sortBy === "refined_ore" ? "text-amber-400 font-medium" : "text-white"}`}>
+                          {formatOre(entry.refined_ore)}
+                        </td>
+                        <td className={`px-6 py-4 text-right font-mono ${sortBy === "unclaimed_ore" ? "text-amber-400 font-medium" : "text-white"}`}>
+                          {formatOre(entry.unclaimed_ore)}
+                        </td>
+                        <td className={`px-6 py-4 text-right font-mono ${sortBy === "lifetime_sol" ? "text-amber-400 font-medium" : "text-white"}`}>
+                          {formatSol(entry.lifetime_sol)}
+                        </td>
+                        <td className={`px-6 py-4 text-right font-mono ${sortBy === "lifetime_ore" ? "text-amber-400 font-medium" : "text-white"}`}>
+                          {formatOre(entry.lifetime_ore)}
+                        </td>
+                        <td className="px-6 py-4 text-center">
+                          <Link
+                            href={`/miners/${entry.miner_pubkey}`}
+                            className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
+                          >
+                            View
+                          </Link>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
 
             {/* Pagination */}
-            <div className="flex items-center justify-between mt-6">
-              <div className="text-slate-400">
-                Showing {(page - 1) * leaderboard.per_page + 1} - {Math.min(page * leaderboard.per_page, leaderboard.total_count)} of {leaderboard.total_count.toLocaleString()} miners
-              </div>
-              <div className="flex gap-2">
+            {data.total_pages > 1 && (
+              <div className="mt-6 flex items-center justify-center gap-2">
                 <button
-                  onClick={() => setPage(p => Math.max(1, p - 1))}
-                  disabled={page === 1}
-                  className={`px-4 py-2 rounded-lg transition-colors ${
-                    page === 1
-                      ? "bg-slate-800 text-slate-600 cursor-not-allowed"
-                      : "bg-slate-700 text-white hover:bg-slate-600"
-                  }`}
+                  onClick={() => setPage((p) => Math.max(1, p - 1))}
+                  disabled={data.page <= 1}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Previous
                 </button>
+                <div className="flex items-center gap-1">
+                  {/* Show first page */}
+                  {data.page > 3 && (
+                    <>
+                      <button
+                        onClick={() => setPage(1)}
+                        className="w-10 h-10 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors"
+                      >
+                        1
+                      </button>
+                      {data.page > 4 && <span className="text-slate-500 px-2">...</span>}
+                    </>
+                  )}
+                  
+                  {/* Show nearby pages */}
+                  {Array.from({ length: 5 }, (_, i) => data.page - 2 + i)
+                    .filter((p) => p >= 1 && p <= data.total_pages)
+                    .map((p) => (
+                      <button
+                        key={p}
+                        onClick={() => setPage(p)}
+                        className={`w-10 h-10 rounded-lg transition-colors ${
+                          p === data.page
+                            ? "bg-amber-500 text-black font-medium"
+                            : "bg-slate-800 hover:bg-slate-700 text-white"
+                        }`}
+                      >
+                        {p}
+                      </button>
+                    ))}
+                  
+                  {/* Show last page */}
+                  {data.page < data.total_pages - 2 && (
+                    <>
+                      {data.page < data.total_pages - 3 && <span className="text-slate-500 px-2">...</span>}
+                      <button
+                        onClick={() => setPage(data.total_pages)}
+                        className="w-10 h-10 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors"
+                      >
+                        {data.total_pages}
+                      </button>
+                    </>
+                  )}
+                </div>
                 <button
-                  onClick={() => setPage(p => Math.min(leaderboard.total_pages, p + 1))}
-                  disabled={page >= leaderboard.total_pages}
-                  className={`px-4 py-2 rounded-lg transition-colors ${
-                    page >= leaderboard.total_pages
-                      ? "bg-slate-800 text-slate-600 cursor-not-allowed"
-                      : "bg-slate-700 text-white hover:bg-slate-600"
-                  }`}
+                  onClick={() => setPage((p) => Math.min(data.total_pages, p + 1))}
+                  disabled={data.page >= data.total_pages}
+                  className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-white rounded-lg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   Next
                 </button>
               </div>
-            </div>
+            )}
           </>
-        )}
+        ) : null}
       </main>
     </div>
   );
 }
-

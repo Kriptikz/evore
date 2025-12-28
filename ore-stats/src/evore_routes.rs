@@ -2,6 +2,8 @@
 //!
 //! Endpoints for reading EVORE program accounts (Managers, Deployers)
 //! Note: Auth balances are NOT cached - frontend fetches them manually via /balance/{pubkey}
+//! Note: refined_ore is already calculated when miners are cached,
+//! so no additional calculation is needed when serving data.
 
 use std::sync::Arc;
 
@@ -262,6 +264,7 @@ async fn get_my_miners(
             
             // Check if this auth PDA has a miner in the cache
             // The miners_cache is keyed by the miner's authority, which IS the auth PDA
+            // Note: refined_ore is already accurate - calculated when miner was cached
             if let Some(miner) = miners_cache.get(&auth_pda_str) {
                 found_miners.push((auth_id, MinerInfo {
                     address: auth_pda_str,

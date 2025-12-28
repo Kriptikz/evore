@@ -484,6 +484,23 @@ export interface TreasurySnapshot {
   created_at: string;
 }
 
+export interface MinerSnapshotEntry {
+  miner_pubkey: string;
+  refined_ore: number;
+  unclaimed_ore: number;
+  lifetime_sol: number;
+  lifetime_ore: number;
+}
+
+export interface MinerSnapshotsResponse {
+  round_id: number;
+  data: MinerSnapshotEntry[];
+  page: number;
+  per_page: number;
+  total_count: number;
+  total_pages: number;
+}
+
 export interface CursorResponse<T> {
   data: T[];
   cursor: string | null;
@@ -922,6 +939,7 @@ class ApiClient {
     page?: number;
     limit?: number;
     search?: string;
+    minRounds?: number;
   }): Promise<OffsetResponse<LeaderboardEntry>> {
     const params = new URLSearchParams();
     if (options?.metric) params.set("metric", options.metric);
@@ -929,6 +947,7 @@ class ApiClient {
     if (options?.page) params.set("page", options.page.toString());
     if (options?.limit) params.set("limit", options.limit.toString());
     if (options?.search) params.set("search", options.search);
+    if (options?.minRounds) params.set("min_rounds", options.minRounds.toString());
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/history/leaderboard${query}`);
   }
@@ -946,6 +965,25 @@ class ApiClient {
     if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/history/treasury/history${query}`);
+  }
+
+  async getMinerSnapshots(options?: {
+    roundId?: number;
+    sortBy?: "refined_ore" | "unclaimed_ore" | "lifetime_sol" | "lifetime_ore";
+    order?: "desc" | "asc";
+    page?: number;
+    limit?: number;
+    search?: string;
+  }): Promise<MinerSnapshotsResponse> {
+    const params = new URLSearchParams();
+    if (options?.roundId) params.set("round_id", options.roundId.toString());
+    if (options?.sortBy) params.set("sort_by", options.sortBy);
+    if (options?.order) params.set("order", options.order);
+    if (options?.page) params.set("page", options.page.toString());
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.search) params.set("search", options.search);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/miners${query}`);
   }
 }
 

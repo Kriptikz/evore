@@ -1,6 +1,8 @@
 //! HTTP route handlers for ore-stats API
 //!
 //! All routes read from in-memory caches for fast responses.
+//! Note: refined_ore is already calculated when miners are cached,
+//! so no additional calculation is needed when serving data.
 
 use std::sync::Arc;
 
@@ -237,6 +239,7 @@ pub async fn get_miner(
     let cache = state.miners_cache.read().await;
     
     // Look up by String key (BTreeMap is keyed by authority string)
+    // Note: refined_ore is already accurate - calculated when miner was cached
     match cache.get(&pubkey) {
         Some(miner) => {
             let total_deployed: u64 = miner.deployed.iter().sum();
@@ -271,6 +274,7 @@ pub async fn get_miners(
     let cache = state.miners_cache.read().await;
     
     // BTreeMap is already sorted by key (authority string), just paginate
+    // Note: refined_ore is already accurate - calculated when miners were cached
     let miners: Vec<MinerResponse> = cache
         .values()
         .skip(offset)

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, useCallback, useMemo, Suspense } from "react";
+import { useEffect, useState, useCallback, useMemo, Suspense, useRef } from "react";
 import Link from "next/link";
 import { useSearchParams } from "next/navigation";
 import { useOreStats, formatSol, formatOre, truncateAddress, type PendingRound, type RoundSummary as ContextRoundSummary } from "@/context/OreStatsContext";
@@ -1298,10 +1298,17 @@ function HomePageContent() {
     }
   }, []);
 
-  // SSE subscription for live deployments
+  // Use a ref to track current round_id without causing effect re-runs
+  const liveRoundIdRef = useRef<number | null>(null);
+  useEffect(() => {
+    liveRoundIdRef.current = liveRound?.round_id ?? null;
+  }, [liveRound?.round_id]);
+  
+  // SSE subscription for live deployments - only depends on selectedRoundId
   useEffect(() => {
     if (selectedRoundId !== 0) return;
     
+    console.log("[SSE] Opening deployments connection");
     const eventSource = new EventSource(`${API_BASE}/sse/deployments`);
     
     eventSource.addEventListener("deployment", (event) => {
@@ -1311,10 +1318,11 @@ function HomePageContent() {
         if (wrapper.type !== "Deployment" || !wrapper.data) return;
         const deployment: LiveDeploymentEvent = wrapper.data;
         
-        if (!deployment || !liveRound) return;
+        if (!deployment) return;
         
-        // Only process deployments for the current round
-        if (deployment.round_id !== liveRound.round_id) return;
+        // Only process deployments for the current round (use ref to avoid stale closure)
+        const currentRoundId = liveRoundIdRef.current;
+        if (currentRoundId !== null && deployment.round_id !== currentRoundId) return;
         
         // Convert batched amounts array to individual deployment entries
         const newDeployments: LiveDeploymentDisplay[] = [];
@@ -1330,6 +1338,7 @@ function HomePageContent() {
         });
         
         if (newDeployments.length > 0) {
+          console.log("[SSE] Received deployment:", deployment.miner_pubkey, newDeployments.length, "squares");
           setLiveDeployments((prev) => [...prev, ...newDeployments]);
         }
       } catch (err) {
@@ -1337,14 +1346,19 @@ function HomePageContent() {
       }
     });
     
-    eventSource.onerror = () => {
-      console.error("SSE connection error");
+    eventSource.onerror = (e) => {
+      console.error("SSE connection error:", e);
+    };
+    
+    eventSource.onopen = () => {
+      console.log("[SSE] Deployments connection opened");
     };
     
     return () => {
+      console.log("[SSE] Closing deployments connection");
       eventSource.close();
     };
-  }, [selectedRoundId, liveRound?.round_id]);
+  }, [selectedRoundId]); // Only re-run when selectedRoundId changes
 
   // Fetch round detail when selecting a historical round
   useEffect(() => {

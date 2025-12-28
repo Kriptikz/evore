@@ -10,11 +10,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
-use evore::ore_api::Miner;
+use evore::ore_api::{Miner, Treasury};
 use steel::Pubkey;
 use tokio::time::interval;
 
-use crate::app_state::{AppState, LiveRound};
+use crate::app_state::{apply_refined_ore_fix, AppState, LiveRound};
 use crate::finalization::{capture_round_snapshot, finalize_round};
 use crate::helius_api::ProgramAccountV2;
 
@@ -253,16 +253,21 @@ pub async fn fetch_all_miners(state: &AppState) -> anyhow::Result<usize> {
         helius.get_all_ore_miners(Some(5000)).await?
     };
     
+    // Get treasury for refined_ore calculation
+    let treasury_cache = state.treasury_cache.read().await;
+    let treasury_opt = treasury_cache.as_ref();
+    
     // Use BTreeMap with String keys for sorted pagination
     let mut miners_map = BTreeMap::new();
     
     for acc in &accounts {
-        if let Some((authority, miner)) = parse_miner_account(acc) {
+        if let Some((authority, miner)) = parse_miner_account(acc, treasury_opt) {
             miners_map.insert(authority.to_string(), miner);
         }
     }
     
     let count = miners_map.len();
+    drop(treasury_cache); // Release read lock before write
     
     // Update cache
     let mut cache = state.miners_cache.write().await;
@@ -291,6 +296,10 @@ async fn fetch_miners_changed_since_with_deployments(
         return Ok(0);
     }
     
+    // Get treasury for refined_ore calculation
+    let treasury_cache = state.treasury_cache.read().await;
+    let treasury_opt = treasury_cache.as_ref();
+    
     let pending_round_id = *state.pending_round_id.read().await;
     let cached_round_id = *state.deployments_cache_round_id.read().await;
     
@@ -299,7 +308,7 @@ async fn fetch_miners_changed_since_with_deployments(
     let mut count = 0;
     
     for acc in &accounts {
-        if let Some((authority, new_miner)) = parse_miner_account(acc) {
+        if let Some((authority, new_miner)) = parse_miner_account(acc, treasury_opt) {
             let authority_str = authority.to_string();
             
             // Check if this miner deployed in the current round
@@ -406,7 +415,8 @@ async fn initialize_deployments_cache(state: &AppState, round_id: u64, current_s
 }
 
 /// Parse a Miner account from program account data
-fn parse_miner_account(acc: &ProgramAccountV2) -> Option<(Pubkey, Miner)> {
+/// If treasury is provided, applies the refined_ore calculation immediately
+fn parse_miner_account(acc: &ProgramAccountV2, treasury: Option<&Treasury>) -> Option<(Pubkey, Miner)> {
     use base64::Engine as _;
     use steel::AccountDeserialize;
     
@@ -423,8 +433,15 @@ fn parse_miner_account(acc: &ProgramAccountV2) -> Option<(Pubkey, Miner)> {
     
     let miner = Miner::try_from_bytes(&data).ok()?;
     
+    // Apply refined_ore fix if treasury is available
+    let fixed_miner = if let Some(treasury) = treasury {
+        apply_refined_ore_fix(miner, treasury)
+    } else {
+        *miner
+    };
+    
     // The authority is stored in the Miner account
-    Some((miner.authority, *miner))
+    Some((fixed_miner.authority, fixed_miner))
 }
 
 /// Spawn the metrics snapshot task

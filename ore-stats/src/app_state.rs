@@ -5,13 +5,39 @@ use std::time::Instant;
 use chrono::Utc;
 use evore::ore_api::{AutomationStrategy, Board, Miner, Round, Treasury};
 use serde::{Deserialize, Serialize};
-use steel::Pubkey;
+use steel::{Numeric, Pubkey};
 use tokio::sync::{broadcast, RwLock};
 
 use crate::app_rpc::AppRpc;
 use crate::clickhouse::ClickHouseClient;
 use crate::evore_cache::EvoreCache;
 use crate::helius_api::HeliusApi;
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
+/// Infer the actual refined ore balance based on treasury rewards factor.
+/// The miner's `refined_ore` field is stale unless they've recently interacted.
+/// This calculates the up-to-date value using the treasury's current rewards factor.
+/// 
+/// IMPORTANT: Call this immediately after fetching miner data, before caching.
+pub fn infer_refined_ore(miner: &Miner, treasury: &Treasury) -> u64 {
+    let delta = treasury.miner_rewards_factor - miner.rewards_factor;
+    if delta < Numeric::ZERO {
+        // Defensive: shouldn't happen, but keep behavior sane.
+        return miner.refined_ore;
+    }
+    let accrued = (delta * Numeric::from_u64(miner.rewards_ore)).to_u64();
+    miner.refined_ore.saturating_add(accrued)
+}
+
+/// Apply refined_ore calculation to a miner and return a new miner with updated value
+pub fn apply_refined_ore_fix(miner: &Miner, treasury: &Treasury) -> Miner {
+    let mut fixed = *miner;
+    fixed.refined_ore = infer_refined_ore(miner, treasury);
+    fixed
+}
 
 // ============================================================================
 // Application State

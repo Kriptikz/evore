@@ -43,7 +43,7 @@ export function Header() {
             <Link 
               href="/" 
               className={`text-sm transition-colors ${
-                isActive('/') && !isActive('/miners') && !isActive('/autominers')
+                isActive('/') && !isActive('/miners') && !isActive('/autominers') && !isActive('/leaderboard')
                   ? 'text-amber-400 font-medium' 
                   : 'text-slate-400 hover:text-white'
               }`}
@@ -51,9 +51,19 @@ export function Header() {
               Rounds
             </Link>
             <Link 
+              href="/leaderboard" 
+              className={`text-sm transition-colors ${
+                isActive('/leaderboard') 
+                  ? 'text-amber-400 font-medium' 
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Leaderboard
+            </Link>
+            <Link 
               href="/miners" 
               className={`text-sm transition-colors ${
-                isActive('/miners') 
+                isActive('/miners') && !isActive('/autominers')
                   ? 'text-amber-400 font-medium' 
                   : 'text-slate-400 hover:text-white'
               }`}
