@@ -585,6 +585,46 @@ pub async fn get_server_metrics(
     Ok(Json(ServerMetricsResponse { hours, metrics }))
 }
 
+#[derive(Debug, Serialize)]
+pub struct RequestsTimeseriesResponse {
+    pub hours: u32,
+    pub rps: f64,
+    pub timeseries: Vec<crate::clickhouse::RequestsPerMinuteRow>,
+}
+
+/// GET /admin/server/requests-timeseries?hours=24
+/// Get requests per minute time series for graphing, plus current RPS
+pub async fn get_requests_timeseries(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RpcMetricsQuery>,
+) -> Result<Json<RequestsTimeseriesResponse>, (StatusCode, Json<AuthError>)> {
+    let hours = params.hours;
+    
+    // Fetch both RPS and time series in parallel
+    let (rps_result, timeseries_result) = tokio::join!(
+        state.clickhouse.get_requests_per_second(),
+        state.clickhouse.get_requests_per_minute(hours)
+    );
+    
+    let rps = rps_result.map_err(|e| {
+        tracing::error!("Failed to get RPS: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError { error: "Failed to get RPS".to_string() }),
+        )
+    })?;
+    
+    let timeseries = timeseries_result.map_err(|e| {
+        tracing::error!("Failed to get requests timeseries: {}", e);
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AuthError { error: "Failed to get requests timeseries".to_string() }),
+        )
+    })?;
+    
+    Ok(Json(RequestsTimeseriesResponse { hours, rps, timeseries }))
+}
+
 // ============================================================================
 // Request Logs Handlers
 // ============================================================================
@@ -977,6 +1017,7 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/ws/throughput", get(get_ws_throughput))
         // Server metrics
         .route("/server/metrics", get(get_server_metrics))
+        .route("/server/requests-timeseries", get(get_requests_timeseries))
         // Request logs
         .route("/requests/logs", get(get_request_logs))
         .route("/requests/endpoints", get(get_endpoint_summary))

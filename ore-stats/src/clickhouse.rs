@@ -1405,10 +1405,10 @@ impl ClickHouseClient {
                     count() AS total,
                     countIf(status_code >= 200 AND status_code < 400) AS success,
                     countIf(status_code >= 400) AS errors,
-                    avg(duration_ms) AS avg_duration,
-                    quantile(0.5)(duration_ms) AS p50,
-                    quantile(0.95)(duration_ms) AS p95,
-                    quantile(0.99)(duration_ms) AS p99
+                    if(count() > 0, avg(duration_ms), 0) AS avg_duration,
+                    if(count() > 0, quantile(0.5)(duration_ms), 0) AS p50,
+                    if(count() > 0, quantile(0.95)(duration_ms), 0) AS p95,
+                    if(count() > 0, quantile(0.99)(duration_ms), 0) AS p99
                 FROM ore_stats.request_logs
                 WHERE timestamp > now64(3) - INTERVAL 1 MINUTE
             "#)
@@ -1417,6 +1417,44 @@ impl ClickHouseClient {
             .ok();
         
         Ok(result.unwrap_or_default())
+    }
+    
+    /// Get requests per minute time series for the last N hours.
+    /// Returns data points grouped by minute for graphing.
+    pub async fn get_requests_per_minute(&self, hours: u32) -> Result<Vec<RequestsPerMinuteRow>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT
+                    toUnixTimestamp(toStartOfMinute(timestamp)) AS minute_ts,
+                    count() AS request_count,
+                    countIf(status_code >= 200 AND status_code < 400) AS success_count,
+                    countIf(status_code >= 400) AS error_count,
+                    if(count() > 0, avg(duration_ms), 0) AS avg_latency_ms
+                FROM ore_stats.request_logs
+                WHERE timestamp > now64(3) - INTERVAL ? HOUR
+                GROUP BY minute_ts
+                ORDER BY minute_ts ASC
+            "#)
+            .bind(hours)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get current requests per second (average over last minute).
+    pub async fn get_requests_per_second(&self) -> Result<f64, ClickHouseError> {
+        let result: Option<RequestCountRow> = self.client
+            .query(r#"
+                SELECT count() AS cnt
+                FROM ore_stats.request_logs
+                WHERE timestamp > now64(3) - INTERVAL 1 MINUTE
+            "#)
+            .fetch_one()
+            .await
+            .ok();
+        
+        let count = result.map(|r| r.cnt).unwrap_or(0);
+        Ok(count as f64 / 60.0)
     }
     
     // ========== Raw Transactions (Historical Backfill Only) ==========
@@ -2707,6 +2745,22 @@ pub struct RecentRequestStats {
     pub p50: f32,
     pub p95: f32,
     pub p99: f32,
+}
+
+/// Requests per minute time series data point.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RequestsPerMinuteRow {
+    pub minute_ts: u32,  // Unix timestamp (start of minute)
+    pub request_count: u64,
+    pub success_count: u64,
+    pub error_count: u64,
+    pub avg_latency_ms: f64,
+}
+
+/// Simple count result row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RequestCountRow {
+    pub cnt: u64,
 }
 
 // ============================================================================

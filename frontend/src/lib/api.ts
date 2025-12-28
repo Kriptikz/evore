@@ -304,6 +304,20 @@ export interface ServerMetricsRow {
   cache_misses: number;
 }
 
+export interface RequestsPerMinuteRow {
+  minute_ts: number; // Unix timestamp (start of minute)
+  request_count: number;
+  success_count: number;
+  error_count: number;
+  avg_latency_ms: number;
+}
+
+export interface RequestsTimeseriesResponse {
+  hours: number;
+  rps: number;
+  timeseries: RequestsPerMinuteRow[];
+}
+
 // Request logs types
 export interface RequestLogRow {
   timestamp: number; // milliseconds since epoch
@@ -764,6 +778,10 @@ class ApiClient {
 
   async getServerMetrics(hours = 24, limit = 100): Promise<{ hours: number; metrics: ServerMetricsRow[] }> {
     return this.request("GET", `/admin/server/metrics?hours=${hours}&limit=${limit}`, { requireAuth: true });
+  }
+
+  async getRequestsTimeseries(hours = 24): Promise<RequestsTimeseriesResponse> {
+    return this.request("GET", `/admin/server/requests-timeseries?hours=${hours}`, { requireAuth: true });
   }
 
   // ========== Request Logs ==========

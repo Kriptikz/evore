@@ -1,13 +1,15 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useMemo } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
-import { api, ServerMetricsRow } from "@/lib/api";
+import { api, ServerMetricsRow, RequestsPerMinuteRow } from "@/lib/api";
 import { useAdmin } from "@/context/AdminContext";
 
 export default function ServerMetricsPage() {
   const { isAuthenticated } = useAdmin();
   const [metrics, setMetrics] = useState<ServerMetricsRow[]>([]);
+  const [timeseries, setTimeseries] = useState<RequestsPerMinuteRow[]>([]);
+  const [rps, setRps] = useState<number>(0);
   const [hours, setHours] = useState(24);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -17,8 +19,13 @@ export default function ServerMetricsPage() {
     
     try {
       setLoading(true);
-      const res = await api.getServerMetrics(hours, 200);
-      setMetrics(res.metrics);
+      const [metricsRes, timeseriesRes] = await Promise.all([
+        api.getServerMetrics(hours, 200),
+        api.getRequestsTimeseries(hours),
+      ]);
+      setMetrics(metricsRes.metrics);
+      setTimeseries(timeseriesRes.timeseries);
+      setRps(timeseriesRes.rps);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to fetch data");
@@ -33,14 +40,24 @@ export default function ServerMetricsPage() {
     return () => clearInterval(interval);
   }, [fetchData]);
 
-  // Calculate aggregates
+  // Calculate aggregates - filter out negative/invalid latency values
+  const validMetrics = useMemo(() => 
+    metrics.filter(m => m.latency_avg >= 0), 
+    [metrics]
+  );
+  
   const latest = metrics[0];
   const totalRequests = metrics.reduce((sum, m) => sum + Number(m.requests_total), 0);
   const totalSuccess = metrics.reduce((sum, m) => sum + Number(m.requests_success), 0);
   const totalErrors = metrics.reduce((sum, m) => sum + Number(m.requests_error), 0);
-  const avgLatency = metrics.length > 0 
-    ? metrics.reduce((sum, m) => sum + m.latency_avg, 0) / metrics.length 
+  const avgLatency = validMetrics.length > 0 
+    ? validMetrics.reduce((sum, m) => sum + m.latency_avg, 0) / validMetrics.length 
     : 0;
+
+  // Calculate chart dimensions
+  const chartHeight = 150;
+  const maxRequests = Math.max(...timeseries.map(t => t.request_count), 1);
+  const maxLatency = Math.max(...timeseries.map(t => t.avg_latency_ms), 1);
 
   return (
     <AdminShell title="Server Metrics" subtitle="Performance and resource monitoring">
@@ -74,7 +91,12 @@ export default function ServerMetricsPage() {
         )}
 
         {/* Summary Cards */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+        <div className="grid grid-cols-1 md:grid-cols-5 gap-4">
+          <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
+            <div className="text-slate-400 text-sm mb-1">Current RPS</div>
+            <div className="text-2xl font-bold text-cyan-400">{rps.toFixed(2)}</div>
+            <div className="text-xs text-slate-500">requests/second</div>
+          </div>
           <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
             <div className="text-slate-400 text-sm mb-1">Total Requests</div>
             <div className="text-2xl font-bold text-white">{totalRequests.toLocaleString()}</div>
@@ -91,9 +113,101 @@ export default function ServerMetricsPage() {
           </div>
           <div className="bg-slate-800/50 border border-slate-700 p-4 rounded-lg">
             <div className="text-slate-400 text-sm mb-1">Avg Latency</div>
-            <div className="text-2xl font-bold text-yellow-400">{avgLatency.toFixed(1)}ms</div>
+            <div className="text-2xl font-bold text-yellow-400">
+              {avgLatency >= 0 ? avgLatency.toFixed(1) : 0}ms
+            </div>
           </div>
         </div>
+
+        {/* Requests Per Minute Chart */}
+        {timeseries.length > 0 && (
+          <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
+            <h2 className="text-lg font-semibold text-white mb-4">Requests Per Minute</h2>
+            <div className="relative" style={{ height: chartHeight + 40 }}>
+              {/* Y-axis labels */}
+              <div className="absolute left-0 top-0 h-full w-12 flex flex-col justify-between text-xs text-slate-500">
+                <span>{formatNumber(maxRequests)}</span>
+                <span>{formatNumber(Math.round(maxRequests / 2))}</span>
+                <span>0</span>
+              </div>
+              
+              {/* Chart area */}
+              <div className="ml-14 relative" style={{ height: chartHeight }}>
+                {/* Grid lines */}
+                <div className="absolute inset-0 flex flex-col justify-between pointer-events-none">
+                  <div className="border-b border-slate-700/50" />
+                  <div className="border-b border-slate-700/50" />
+                  <div className="border-b border-slate-700/50" />
+                </div>
+                
+                {/* Bars */}
+                <div className="flex items-end h-full gap-px">
+                  {timeseries.map((point, i) => {
+                    const height = (point.request_count / maxRequests) * 100;
+                    const successHeight = (point.success_count / maxRequests) * 100;
+                    const errorHeight = (point.error_count / maxRequests) * 100;
+                    
+                    return (
+                      <div 
+                        key={i} 
+                        className="flex-1 flex flex-col justify-end group relative"
+                        style={{ minWidth: 2, maxWidth: 8 }}
+                      >
+                        {/* Tooltip */}
+                        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 hidden group-hover:block z-10">
+                          <div className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs whitespace-nowrap">
+                            <div className="text-slate-400">
+                              {new Date(point.minute_ts * 1000).toLocaleTimeString()}
+                            </div>
+                            <div className="text-white font-semibold">{point.request_count} req</div>
+                            <div className="text-green-400">{point.success_count} success</div>
+                            <div className="text-red-400">{point.error_count} errors</div>
+                            <div className="text-yellow-400">{point.avg_latency_ms.toFixed(1)}ms</div>
+                          </div>
+                        </div>
+                        
+                        {/* Bar with error portion on top */}
+                        <div 
+                          className="w-full bg-green-500/60 rounded-t-sm"
+                          style={{ height: `${successHeight}%` }}
+                        />
+                        {errorHeight > 0 && (
+                          <div 
+                            className="w-full bg-red-500"
+                            style={{ height: `${errorHeight}%` }}
+                          />
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+              
+              {/* X-axis labels */}
+              <div className="ml-14 flex justify-between text-xs text-slate-500 mt-2">
+                {timeseries.length > 0 && (
+                  <>
+                    <span>{new Date(timeseries[0].minute_ts * 1000).toLocaleTimeString()}</span>
+                    <span>{new Date(timeseries[Math.floor(timeseries.length / 2)]?.minute_ts * 1000).toLocaleTimeString()}</span>
+                    <span>{new Date(timeseries[timeseries.length - 1].minute_ts * 1000).toLocaleTimeString()}</span>
+                  </>
+                )}
+              </div>
+            </div>
+            
+            {/* Legend */}
+            <div className="flex gap-4 mt-3 text-xs text-slate-400">
+              <div className="flex items-center gap-1">
+                <div className="w-3 h-3 bg-green-500/60 rounded-sm" />
+                <span>Success</span>
+              </div>
+              <div className="flex items-center gap-1">
+                <div className="w-3 h-3 bg-red-500 rounded-sm" />
+                <span>Errors</span>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Latest Snapshot */}
         {latest && (
@@ -110,15 +224,21 @@ export default function ServerMetricsPage() {
               </div>
               <div>
                 <div className="text-slate-400 text-sm">P50 Latency</div>
-                <div className="text-xl font-bold text-white">{latest.latency_p50.toFixed(1)}ms</div>
+                <div className="text-xl font-bold text-white">
+                  {latest.latency_p50 >= 0 ? latest.latency_p50.toFixed(1) : 0}ms
+                </div>
               </div>
               <div>
                 <div className="text-slate-400 text-sm">P95 Latency</div>
-                <div className="text-xl font-bold text-yellow-400">{latest.latency_p95.toFixed(1)}ms</div>
+                <div className="text-xl font-bold text-yellow-400">
+                  {latest.latency_p95 >= 0 ? latest.latency_p95.toFixed(1) : 0}ms
+                </div>
               </div>
               <div>
                 <div className="text-slate-400 text-sm">P99 Latency</div>
-                <div className="text-xl font-bold text-orange-400">{latest.latency_p99.toFixed(1)}ms</div>
+                <div className="text-xl font-bold text-orange-400">
+                  {latest.latency_p99 >= 0 ? latest.latency_p99.toFixed(1) : 0}ms
+                </div>
               </div>
               <div>
                 <div className="text-slate-400 text-sm">Cache Hit Rate</div>
@@ -166,11 +286,11 @@ export default function ServerMetricsPage() {
                     <td className="px-4 py-2 text-right text-red-400">
                       {Number(m.requests_error).toLocaleString()}
                     </td>
-                    <td className="px-4 py-2 text-right text-slate-300">
-                      {m.latency_avg.toFixed(1)}ms
+                    <td className={`px-4 py-2 text-right ${m.latency_avg < 0 ? 'text-slate-500' : 'text-slate-300'}`}>
+                      {m.latency_avg >= 0 ? `${m.latency_avg.toFixed(1)}ms` : 'N/A'}
                     </td>
-                    <td className="px-4 py-2 text-right text-yellow-400">
-                      {m.latency_p95.toFixed(1)}ms
+                    <td className={`px-4 py-2 text-right ${m.latency_p95 < 0 ? 'text-slate-500' : 'text-yellow-400'}`}>
+                      {m.latency_p95 >= 0 ? `${m.latency_p95.toFixed(1)}ms` : 'N/A'}
                     </td>
                     <td className="px-4 py-2 text-right text-slate-300">
                       {m.active_connections}
@@ -201,4 +321,10 @@ function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function formatNumber(num: number): string {
+  if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M";
+  if (num >= 1_000) return (num / 1_000).toFixed(1) + "K";
+  return num.toString();
 }

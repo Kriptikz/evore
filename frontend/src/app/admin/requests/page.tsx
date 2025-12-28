@@ -22,13 +22,16 @@ export default function RequestLogsPage() {
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
   const [ipLogsLoading, setIpLogsLoading] = useState(false);
 
-  const fetchData = useCallback(async () => {
+  const fetchData = useCallback(async (ipFilter?: string | null) => {
     if (!isAuthenticated) return;
+    
+    // Use the provided ipFilter, or fall back to current selectedIp state
+    const ipToFilter = ipFilter !== undefined ? ipFilter : selectedIp;
     
     try {
       setLoading(true);
       const [logsRes, endpointsRes, rateLimitsRes, ipRes] = await Promise.all([
-        api.getRequestLogs(hours, 200),
+        api.getRequestLogs(hours, 200, ipToFilter || undefined),
         api.getEndpointSummary(hours),
         api.getRateLimitEvents(hours, 100),
         api.getIpActivity(hours, 50),
@@ -43,15 +46,15 @@ export default function RequestLogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [isAuthenticated, hours]);
+  }, [isAuthenticated, hours, selectedIp]);
 
   // Fetch logs for a specific IP
   const fetchLogsForIp = useCallback(async (ipHash: string) => {
     if (!isAuthenticated) return;
     
-    setIpLogsLoading(true);
     setSelectedIp(ipHash);
     setActiveTab("logs");
+    setIpLogsLoading(true);
     
     try {
       const res = await api.getRequestLogs(hours, 200, ipHash);
@@ -129,7 +132,7 @@ export default function RequestLogsPage() {
             )}
           </div>
           <button
-            onClick={fetchData}
+            onClick={() => fetchData()}
             disabled={loading}
             className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors disabled:opacity-50"
           >
