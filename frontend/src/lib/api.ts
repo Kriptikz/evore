@@ -1061,6 +1061,281 @@ class ApiClient {
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/history/miners${query}`);
   }
+
+  // Transaction Viewer
+  async getTransactionAnalysis(roundId: number, options?: {
+    limit?: number;
+    offset?: number;
+  }): Promise<TransactionViewerResponse> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.offset) params.set("offset", options.offset.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/admin/transactions/${roundId}${query}`, { requireAuth: true });
+  }
+
+  async getRawTransactions(roundId: number): Promise<RawTransaction[]> {
+    return this.request("GET", `/admin/transactions/${roundId}/raw`, { requireAuth: true });
+  }
+
+  // Comprehensive Transaction Analyzer
+  async getFullTransactionAnalysis(roundId: number, options?: {
+    limit?: number;
+    offset?: number;
+  }): Promise<FullAnalysisResponse> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.offset) params.set("offset", options.offset.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/admin/transactions/${roundId}/full${query}`, { requireAuth: true });
+  }
+
+  async getSingleTransaction(signature: string): Promise<FullTransactionAnalysis> {
+    return this.request("GET", `/admin/transactions/single/${signature}`, { requireAuth: true });
+  }
+}
+
+// Transaction Viewer Types
+export interface TransactionViewerResponse {
+  round_id: number;
+  total_transactions: number;
+  transactions: TransactionAnalysis[];
+  summary: TransactionSummary;
+}
+
+export interface TransactionSummary {
+  total_txns: number;
+  with_deploy_ix: number;
+  without_deploy_ix: number;
+  parse_errors: number;
+  wrong_round: number;
+  matched_round: number;
+  total_deployments: number;
+}
+
+export interface TransactionAnalysis {
+  signature: string;
+  slot: number;
+  block_time: number;
+  signer: string | null;
+  has_ore_program: boolean;
+  instructions_count: number;
+  inner_instructions_count: number;
+  deploy_instructions: DeployInstructionAnalysis[];
+  other_ore_instructions: OtherOreInstruction[];
+  parse_errors: string[];
+  status: string;
+}
+
+export interface DeployInstructionAnalysis {
+  location: string;
+  instruction_index: number;
+  signer: string;
+  authority: string;
+  miner: string;
+  round_pda: string;
+  amount_per_square: number;
+  squares_mask: number;
+  squares: number[];
+  matches_expected_round: boolean;
+}
+
+export interface OtherOreInstruction {
+  location: string;
+  instruction_index: number;
+  instruction_tag: number;
+  instruction_name: string;
+}
+
+export interface RawTransaction {
+  signature: string;
+  slot: number;
+  block_time: number;
+  round_id: number;
+  tx_type: string;
+  raw_json: string;
+  signer: string;
+  authority: string;
+}
+
+// ============================================================================
+// Comprehensive Transaction Analyzer Types
+// ============================================================================
+
+export interface FullAnalysisResponse {
+  round_id: number;
+  total_transactions: number;
+  analyzed_count: number;
+  transactions: FullTransactionAnalysis[];
+  round_summary: RoundAnalysisSummary;
+}
+
+export interface FullTransactionAnalysis {
+  signature: string;
+  slot: number;
+  block_time: number;
+  block_time_formatted: string;
+  success: boolean;
+  error: string | null;
+  fee: number;
+  compute_units_consumed: number | null;
+  signers: string[];
+  writable_accounts: string[];
+  readonly_accounts: string[];
+  all_accounts: AccountInfo[];
+  balance_changes: BalanceChange[];
+  programs_invoked: ProgramInfo[];
+  instructions: InstructionAnalysis[];
+  inner_instructions: InnerInstructionGroup[];
+  logs: string[];
+  ore_analysis: OreTransactionAnalysis | null;
+  summary: TransactionSummaryInfo;
+}
+
+export interface AccountInfo {
+  index: number;
+  pubkey: string;
+  is_signer: boolean;
+  is_writable: boolean;
+  is_program: boolean;
+  program_name: string | null;
+  pre_balance: number;
+  post_balance: number;
+  balance_change: number;
+}
+
+export interface BalanceChange {
+  account: string;
+  pre_balance: number;
+  post_balance: number;
+  change: number;
+  change_sol: number;
+}
+
+export interface ProgramInfo {
+  pubkey: string;
+  name: string;
+  invocation_count: number;
+}
+
+export interface InstructionAnalysis {
+  index: number;
+  program_id: string;
+  program_name: string;
+  instruction_type: string;
+  accounts: InstructionAccount[];
+  data_base58: string;
+  data_hex: string;
+  data_length: number;
+  parsed: ParsedInstruction | null;
+  parse_error: string | null;
+}
+
+export interface InstructionAccount {
+  index: number;
+  pubkey: string;
+  is_signer: boolean;
+  is_writable: boolean;
+  role: string | null;
+}
+
+export interface InnerInstructionGroup {
+  parent_index: number;
+  instructions: InstructionAnalysis[];
+}
+
+// Parsed instruction types (tagged union)
+export type ParsedInstruction =
+  | { type: "SystemTransfer"; from: string; to: string; lamports: number; sol: number }
+  | { type: "SystemCreateAccount"; from: string; new_account: string; lamports: number; space: number; owner: string }
+  | { type: "SystemAssign"; account: string; owner: string }
+  | { type: "SystemAllocate"; account: string; space: number }
+  | { type: "SystemAdvanceNonceAccount"; nonce_account: string; nonce_authority: string }
+  | { type: "ComputeSetLimit"; units: number }
+  | { type: "ComputeSetPrice"; micro_lamports: number }
+  | { type: "ComputeRequestHeapFrame"; bytes: number }
+  | { type: "OreDeploy"; signer: string; authority: string; automation_pda: string; board: string; miner: string; round: string; amount_per_square: number; amount_sol: number; squares_mask: number; squares: number[]; total_lamports: number; total_sol: number }
+  | { type: "OreReset"; signer: string }
+  | { type: "OreLog"; event_type: string; data_hex: string }
+  | { type: "OreOther"; instruction_tag: number; instruction_name: string }
+  | { type: "TokenTransfer"; source: string; destination: string; authority: string; amount: number }
+  | { type: "TokenTransferChecked"; source: string; destination: string; mint: string; authority: string; amount: number; decimals: number }
+  | { type: "TokenInitializeAccount"; account: string; mint: string; owner: string }
+  | { type: "TokenApprove"; source: string; delegate: string; owner: string; amount: number }
+  | { type: "TokenMintTo"; mint: string; destination: string; authority: string; amount: number }
+  | { type: "TokenBurn"; account: string; mint: string; authority: string; amount: number }
+  | { type: "TokenCloseAccount"; account: string; destination: string; authority: string }
+  | { type: "AtaCreate"; payer: string; associated_token: string; wallet: string; mint: string }
+  | { type: "Memo"; message: string }
+  | { type: "Unknown"; program: string; data_preview: string };
+
+export interface OreTransactionAnalysis {
+  has_ore_instructions: boolean;
+  deploy_count: number;
+  reset_count: number;
+  log_count: number;
+  other_count: number;
+  deployments: OreDeploymentInfo[];
+  total_deployed_lamports: number;
+  total_deployed_sol: number;
+}
+
+export interface OreDeploymentInfo {
+  instruction_index: number;
+  is_inner: boolean;
+  signer: string;
+  authority: string;
+  miner: string;
+  round: string;
+  round_matches: boolean;
+  amount_per_square: number;
+  squares: number[];
+  total_lamports: number;
+  total_sol: number;
+}
+
+export interface TransactionSummaryInfo {
+  total_instructions: number;
+  total_inner_instructions: number;
+  programs_count: number;
+  has_failed: boolean;
+  is_ore_transaction: boolean;
+  is_deploy_transaction: boolean;
+  primary_action: string;
+}
+
+export interface RoundAnalysisSummary {
+  total_transactions: number;
+  successful_transactions: number;
+  failed_transactions: number;
+  total_fee_paid: number;
+  total_fee_sol: number;
+  total_compute_units: number;
+  unique_signers: number;
+  programs_used: ProgramUsageSummary[];
+  ore_summary: OreRoundSummary | null;
+}
+
+export interface ProgramUsageSummary {
+  program: string;
+  name: string;
+  invocation_count: number;
+}
+
+export interface OreRoundSummary {
+  total_deployments: number;
+  deployments_matching_round: number;
+  deployments_wrong_round: number;
+  unique_miners: number;
+  total_deployed_lamports: number;
+  total_deployed_sol: number;
+  squares_deployed: SquareDeploymentInfo[];
+}
+
+export interface SquareDeploymentInfo {
+  square: number;
+  deployment_count: number;
+  total_lamports: number;
 }
 
 // Singleton instance

@@ -1519,6 +1519,21 @@ impl ClickHouseClient {
         Ok(count as u32)
     }
     
+    /// Get a single raw transaction by signature.
+    pub async fn get_raw_transaction_by_signature(&self, signature: &str) -> Result<Option<RawTransaction>, ClickHouseError> {
+        let result = self.client
+            .query(r#"
+                SELECT signature, slot, block_time, round_id, tx_type, raw_json, signer, authority
+                FROM raw_transactions FINAL 
+                WHERE signature = ?
+                LIMIT 1
+            "#)
+            .bind(signature)
+            .fetch_optional::<RawTransaction>()
+            .await?;
+        Ok(result)
+    }
+    
     // ========== Automation States ==========
     
     /// Insert an automation state snapshot.

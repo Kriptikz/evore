@@ -1041,6 +1041,11 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/verify/{round_id}", get(crate::backfill::get_round_for_verification))
         .route("/verify/{round_id}", post(crate::backfill::verify_round))
         .route("/finalize/{round_id}", post(crate::backfill::finalize_backfill_round))
+        // Transaction viewer
+        .route("/transactions/{round_id}", get(crate::backfill::get_round_transactions))
+        .route("/transactions/{round_id}/raw", get(crate::backfill::get_round_transactions_raw))
+        .route("/transactions/{round_id}/full", get(crate::backfill::get_round_transactions_full))
+        .route("/transactions/single/{signature}", get(crate::backfill::get_single_transaction))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth::require_admin_auth,

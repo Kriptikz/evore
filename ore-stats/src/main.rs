@@ -43,6 +43,7 @@ mod backfill;
 mod evore_cache;
 mod evore_routes;
 mod historical_routes;
+mod tx_analyzer;
 
 // Keep these for reference but don't compile:
 // - main_old.rs

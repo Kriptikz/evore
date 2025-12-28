@@ -13,9 +13,12 @@ use axum::{
     http::StatusCode,
     Json,
 };
+use evore::ore_api::{self, Deploy, OreInstruction, round_pda};
 use serde::{Deserialize, Serialize};
+use solana_sdk::{bs58, pubkey::Pubkey};
 use sqlx::PgPool;
 
+use crate::admin_auth::AuthError;
 use crate::app_state::AppState;
 use crate::clickhouse::RoundInsert;
 use crate::external_api::get_ore_supply_rounds;
@@ -1433,6 +1436,700 @@ async fn reset_round_reconstruction_status(pool: &PgPool, round_id: u64, reset_m
         .bind(round_id as i64)
         .execute(pool)
         .await;
+    }
+}
+
+// ============================================================================
+// Transaction Viewer Endpoints
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct TransactionViewerResponse {
+    pub round_id: u64,
+    pub total_transactions: usize,
+    pub transactions: Vec<TransactionAnalysis>,
+    pub summary: TransactionSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransactionSummary {
+    pub total_txns: usize,
+    pub with_deploy_ix: usize,
+    pub without_deploy_ix: usize,
+    pub parse_errors: usize,
+    pub wrong_round: usize,
+    pub matched_round: usize,
+    pub total_deployments: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct TransactionAnalysis {
+    pub signature: String,
+    pub slot: u64,
+    pub block_time: i64,
+    pub signer: Option<String>,
+    pub has_ore_program: bool,
+    pub instructions_count: usize,
+    pub inner_instructions_count: usize,
+    pub deploy_instructions: Vec<DeployInstructionAnalysis>,
+    pub other_ore_instructions: Vec<OtherOreInstruction>,
+    pub parse_errors: Vec<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct DeployInstructionAnalysis {
+    pub location: String, // "outer" or "inner"
+    pub instruction_index: usize,
+    pub signer: String,
+    pub authority: String,
+    pub miner: String,
+    pub round_pda: String,
+    pub amount_per_square: u64,
+    pub squares_mask: u32,
+    pub squares: Vec<u8>, // Which squares are deployed to
+    pub matches_expected_round: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OtherOreInstruction {
+    pub location: String,
+    pub instruction_index: usize,
+    pub instruction_tag: u8,
+    pub instruction_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct TransactionViewerQuery {
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+}
+
+/// GET /admin/transactions/{round_id}
+/// Analyze transactions for a round with detailed parsing info
+pub async fn get_round_transactions(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+    Query(query): Query<TransactionViewerQuery>,
+) -> Result<Json<TransactionViewerResponse>, (StatusCode, Json<AuthError>)> {
+    let limit = query.limit.unwrap_or(100);
+    let offset = query.offset.unwrap_or(0);
+    
+    // Get raw transactions from ClickHouse
+    let raw_txns = state.clickhouse
+        .get_raw_transactions_for_round(round_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get raw transactions: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { 
+                    error: format!("ClickHouse error: {}", e) 
+                }),
+            )
+        })?;
+    
+    let total_transactions = raw_txns.len();
+    
+    // Get expected round PDA
+    let (expected_round_pda, _) = round_pda(round_id);
+    
+    // Analyze each transaction
+    let mut transactions = Vec::new();
+    let mut summary = TransactionSummary {
+        total_txns: total_transactions,
+        with_deploy_ix: 0,
+        without_deploy_ix: 0,
+        parse_errors: 0,
+        wrong_round: 0,
+        matched_round: 0,
+        total_deployments: 0,
+    };
+    
+    for (idx, raw_tx) in raw_txns.iter().enumerate() {
+        if idx < offset {
+            continue;
+        }
+        if transactions.len() >= limit {
+            break;
+        }
+        
+        let analysis = analyze_transaction(raw_tx, &expected_round_pda);
+        
+        // Update summary
+        if analysis.deploy_instructions.is_empty() && analysis.other_ore_instructions.is_empty() {
+            summary.without_deploy_ix += 1;
+        } else if !analysis.deploy_instructions.is_empty() {
+            summary.with_deploy_ix += 1;
+        }
+        if !analysis.parse_errors.is_empty() {
+            summary.parse_errors += 1;
+        }
+        for deploy in &analysis.deploy_instructions {
+            if deploy.matches_expected_round {
+                summary.matched_round += 1;
+                summary.total_deployments += 1;
+            } else {
+                summary.wrong_round += 1;
+            }
+        }
+        
+        transactions.push(analysis);
+    }
+    
+    Ok(Json(TransactionViewerResponse {
+        round_id,
+        total_transactions,
+        transactions,
+        summary,
+    }))
+}
+
+fn analyze_transaction(
+    raw_tx: &crate::clickhouse::RawTransaction,
+    expected_round_pda: &solana_sdk::pubkey::Pubkey,
+) -> TransactionAnalysis {
+    let mut analysis = TransactionAnalysis {
+        signature: raw_tx.signature.clone(),
+        slot: raw_tx.slot,
+        block_time: raw_tx.block_time,
+        signer: None,
+        has_ore_program: false,
+        instructions_count: 0,
+        inner_instructions_count: 0,
+        deploy_instructions: Vec::new(),
+        other_ore_instructions: Vec::new(),
+        parse_errors: Vec::new(),
+        status: "unknown".to_string(),
+    };
+    
+    // Parse JSON
+    let tx: serde_json::Value = match serde_json::from_str(&raw_tx.raw_json) {
+        Ok(v) => v,
+        Err(e) => {
+            analysis.parse_errors.push(format!("JSON parse error: {}", e));
+            analysis.status = "json_error".to_string();
+            return analysis;
+        }
+    };
+    
+    // Check for error
+    let err = tx.get("meta").and_then(|m| m.get("err"));
+    if !err.map_or(true, |e| e.is_null()) {
+        analysis.status = "failed".to_string();
+        analysis.parse_errors.push(format!("Transaction failed: {:?}", err));
+        return analysis;
+    }
+    
+    // Get account keys
+    let message = match tx.get("transaction").and_then(|t| t.get("message")) {
+        Some(m) => m,
+        None => {
+            analysis.parse_errors.push("Missing transaction.message".to_string());
+            analysis.status = "malformed".to_string();
+            return analysis;
+        }
+    };
+    
+    let account_keys_json = match message.get("accountKeys").and_then(|k| k.as_array()) {
+        Some(k) => k,
+        None => {
+            analysis.parse_errors.push("Missing accountKeys".to_string());
+            analysis.status = "malformed".to_string();
+            return analysis;
+        }
+    };
+    
+    let mut account_keys = Vec::new();
+    for key_val in account_keys_json {
+        let key_str = match key_val.as_str() {
+            Some(s) => s,
+            None => {
+                analysis.parse_errors.push("Account key not a string".to_string());
+                continue;
+            }
+        };
+        match key_str.parse::<solana_sdk::pubkey::Pubkey>() {
+            Ok(pk) => account_keys.push(pk),
+            Err(_) => {
+                analysis.parse_errors.push(format!("Invalid pubkey: {}", key_str));
+            }
+        }
+    }
+    
+    // Get signer (first key)
+    if !account_keys.is_empty() {
+        analysis.signer = Some(account_keys[0].to_string());
+    }
+    
+    // Check if ORE program is in account keys
+    analysis.has_ore_program = account_keys.iter().any(|k| *k == evore::ore_api::PROGRAM_ID);
+    
+    // Analyze outer instructions
+    if let Some(ixs) = message.get("instructions").and_then(|i| i.as_array()) {
+        analysis.instructions_count = ixs.len();
+        
+        for (ix_idx, ix) in ixs.iter().enumerate() {
+            analyze_instruction(
+                ix,
+                &account_keys,
+                expected_round_pda,
+                "outer",
+                ix_idx,
+                &mut analysis,
+            );
+        }
+    }
+    
+    // Analyze inner instructions
+    if let Some(meta) = tx.get("meta") {
+        if let Some(inner_arr) = meta.get("innerInstructions").and_then(|i| i.as_array()) {
+            for inner in inner_arr {
+                if let Some(inner_ixs) = inner.get("instructions").and_then(|i| i.as_array()) {
+                    analysis.inner_instructions_count += inner_ixs.len();
+                    
+                    for (ix_idx, ix) in inner_ixs.iter().enumerate() {
+                        analyze_instruction(
+                            ix,
+                            &account_keys,
+                            expected_round_pda,
+                            "inner",
+                            ix_idx,
+                            &mut analysis,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    
+    // Set final status
+    if !analysis.deploy_instructions.is_empty() {
+        let matched = analysis.deploy_instructions.iter().any(|d| d.matches_expected_round);
+        if matched {
+            analysis.status = "deploy_matched".to_string();
+        } else {
+            analysis.status = "deploy_wrong_round".to_string();
+        }
+    } else if !analysis.other_ore_instructions.is_empty() {
+        analysis.status = "ore_non_deploy".to_string();
+    } else if analysis.has_ore_program {
+        analysis.status = "ore_no_ix_found".to_string();
+    } else {
+        analysis.status = "no_ore".to_string();
+    }
+    
+    analysis
+}
+
+fn analyze_instruction(
+    ix: &serde_json::Value,
+    account_keys: &[solana_sdk::pubkey::Pubkey],
+    expected_round_pda: &solana_sdk::pubkey::Pubkey,
+    location: &str,
+    ix_idx: usize,
+    analysis: &mut TransactionAnalysis,
+) {
+    // Get program ID
+    let program_id_index = match ix.get("programIdIndex").and_then(|p| p.as_u64()) {
+        Some(idx) => idx as usize,
+        None => return,
+    };
+    
+    let program_id = match account_keys.get(program_id_index) {
+        Some(pk) => pk,
+        None => return,
+    };
+    
+    // Only care about ORE program
+    if *program_id != evore::ore_api::PROGRAM_ID {
+        return;
+    }
+    
+    // Decode data
+    let data_str = match ix.get("data").and_then(|d| d.as_str()) {
+        Some(s) => s,
+        None => {
+            analysis.parse_errors.push(format!("{} ix {}: missing data", location, ix_idx));
+            return;
+        }
+    };
+    
+    let data = match bs58::decode(data_str).into_vec() {
+        Ok(d) => d,
+        Err(e) => {
+            analysis.parse_errors.push(format!("{} ix {}: base58 decode error: {}", location, ix_idx, e));
+            return;
+        }
+    };
+    
+    if data.is_empty() {
+        analysis.parse_errors.push(format!("{} ix {}: empty data", location, ix_idx));
+        return;
+    }
+    
+    let tag = data[0];
+    
+    // Try to identify instruction type
+    let ore_tag = OreInstruction::try_from(tag);
+    
+    match ore_tag {
+        Ok(OreInstruction::Deploy) => {
+            // Decode Deploy instruction
+            const DEPLOY_SIZE: usize = std::mem::size_of::<Deploy>();
+            if data.len() < 1 + DEPLOY_SIZE {
+                analysis.parse_errors.push(format!(
+                    "{} ix {}: Deploy data too short ({} < {})",
+                    location, ix_idx, data.len(), 1 + DEPLOY_SIZE
+                ));
+                return;
+            }
+            
+            let body = &data[1..1 + DEPLOY_SIZE];
+            let deploy: &Deploy = bytemuck::from_bytes(body);
+            
+            // Get accounts
+            let accounts = match ix.get("accounts").and_then(|a| a.as_array()) {
+                Some(a) => a,
+                None => {
+                    analysis.parse_errors.push(format!("{} ix {}: missing accounts", location, ix_idx));
+                    return;
+                }
+            };
+            
+            let get_key = |ix_index: usize| -> Option<solana_sdk::pubkey::Pubkey> {
+                let acc_idx = accounts.get(ix_index)?.as_u64()? as usize;
+                account_keys.get(acc_idx).copied()
+            };
+            
+            let signer = get_key(0).map(|k| k.to_string()).unwrap_or_else(|| "?".to_string());
+            let authority = get_key(1).map(|k| k.to_string()).unwrap_or_else(|| "?".to_string());
+            let miner = get_key(4).map(|k| k.to_string()).unwrap_or_else(|| "?".to_string());
+            let round_pda = get_key(5);
+            let round_pda_str = round_pda.map(|k| k.to_string()).unwrap_or_else(|| "?".to_string());
+            
+            let amount = u64::from_le_bytes(deploy.amount);
+            let mask = u32::from_le_bytes(deploy.squares);
+            
+            let mut squares = Vec::new();
+            for i in 0..25u8 {
+                if (mask & (1 << i)) != 0 {
+                    squares.push(i);
+                }
+            }
+            
+            let matches = round_pda.map(|r| r == *expected_round_pda).unwrap_or(false);
+            
+            analysis.deploy_instructions.push(DeployInstructionAnalysis {
+                location: location.to_string(),
+                instruction_index: ix_idx,
+                signer,
+                authority,
+                miner,
+                round_pda: round_pda_str,
+                amount_per_square: amount,
+                squares_mask: mask,
+                squares,
+                matches_expected_round: matches,
+            });
+        }
+        Ok(other) => {
+            // Other ORE instruction
+            let name = format!("{:?}", other);
+            analysis.other_ore_instructions.push(OtherOreInstruction {
+                location: location.to_string(),
+                instruction_index: ix_idx,
+                instruction_tag: tag,
+                instruction_name: name,
+            });
+        }
+        Err(_) => {
+            // Unknown ORE instruction tag
+            analysis.other_ore_instructions.push(OtherOreInstruction {
+                location: location.to_string(),
+                instruction_index: ix_idx,
+                instruction_tag: tag,
+                instruction_name: format!("Unknown({})", tag),
+            });
+        }
+    }
+}
+
+/// GET /admin/transactions/{round_id}/raw
+/// Get raw transaction JSON for download/testing
+pub async fn get_round_transactions_raw(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+) -> Result<Json<Vec<crate::clickhouse::RawTransaction>>, (StatusCode, Json<AuthError>)> {
+    let raw_txns = state.clickhouse
+        .get_raw_transactions_for_round(round_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get raw transactions: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { 
+                    error: format!("ClickHouse error: {}", e) 
+                }),
+            )
+        })?;
+    
+    Ok(Json(raw_txns))
+}
+
+// ============================================================================
+// Comprehensive Transaction Analyzer Endpoints
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct FullAnalysisResponse {
+    pub round_id: u64,
+    pub total_transactions: usize,
+    pub analyzed_count: usize,
+    pub transactions: Vec<crate::tx_analyzer::FullTransactionAnalysis>,
+    pub round_summary: RoundAnalysisSummary,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RoundAnalysisSummary {
+    pub total_transactions: usize,
+    pub successful_transactions: usize,
+    pub failed_transactions: usize,
+    pub total_fee_paid: u64,
+    pub total_fee_sol: f64,
+    pub total_compute_units: u64,
+    pub unique_signers: usize,
+    pub programs_used: Vec<ProgramUsageSummary>,
+    pub ore_summary: Option<OreRoundSummary>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ProgramUsageSummary {
+    pub program: String,
+    pub name: String,
+    pub invocation_count: usize,
+}
+
+#[derive(Debug, Serialize)]
+pub struct OreRoundSummary {
+    pub total_deployments: usize,
+    pub deployments_matching_round: usize,
+    pub deployments_wrong_round: usize,
+    pub unique_miners: usize,
+    pub total_deployed_lamports: u64,
+    pub total_deployed_sol: f64,
+    pub squares_deployed: Vec<SquareDeploymentInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SquareDeploymentInfo {
+    pub square: u8,
+    pub deployment_count: usize,
+    pub total_lamports: u64,
+}
+
+/// GET /admin/transactions/{round_id}/full
+/// Comprehensive blockchain-explorer-level transaction analysis
+pub async fn get_round_transactions_full(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+    Query(query): Query<TransactionViewerQuery>,
+) -> Result<Json<FullAnalysisResponse>, (StatusCode, Json<AuthError>)> {
+    let limit = query.limit.unwrap_or(50);
+    let offset = query.offset.unwrap_or(0);
+    
+    // Get raw transactions
+    let raw_txns = state.clickhouse
+        .get_raw_transactions_for_round(round_id)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get raw transactions: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    let total_transactions = raw_txns.len();
+    let analyzer = crate::tx_analyzer::TransactionAnalyzer::new()
+        .with_expected_round(round_id);
+    
+    // Analyze transactions (paginated)
+    let mut transactions = Vec::new();
+    let mut all_analyses: Vec<crate::tx_analyzer::FullTransactionAnalysis> = Vec::new();
+    
+    // First pass: analyze all for summary
+    for raw_tx in &raw_txns {
+        match analyzer.analyze(&raw_tx.raw_json) {
+            Ok(analysis) => all_analyses.push(analysis),
+            Err(e) => tracing::warn!("Failed to analyze tx {}: {}", raw_tx.signature, e),
+        }
+    }
+    
+    // Paginate results for response
+    for (idx, analysis) in all_analyses.iter().enumerate() {
+        if idx < offset {
+            continue;
+        }
+        if transactions.len() >= limit {
+            break;
+        }
+        transactions.push(analysis.clone());
+    }
+    
+    // Build round summary from all analyses
+    let round_summary = build_round_summary(&all_analyses);
+    
+    Ok(Json(FullAnalysisResponse {
+        round_id,
+        total_transactions,
+        analyzed_count: all_analyses.len(),
+        transactions,
+        round_summary,
+    }))
+}
+
+fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis]) -> RoundAnalysisSummary {
+    use std::collections::{HashMap, HashSet};
+    
+    let mut total_fee = 0u64;
+    let mut total_compute = 0u64;
+    let mut successful = 0usize;
+    let mut failed = 0usize;
+    let mut signers_set: HashSet<String> = HashSet::new();
+    let mut programs_map: HashMap<String, (String, usize)> = HashMap::new();
+    
+    // ORE tracking
+    let mut ore_deployments: Vec<&crate::tx_analyzer::OreDeploymentInfo> = Vec::new();
+    let mut total_deployed = 0u64;
+    let mut matching_round = 0usize;
+    let mut wrong_round = 0usize;
+    let mut miners_set: HashSet<String> = HashSet::new();
+    let mut squares_map: HashMap<u8, (usize, u64)> = HashMap::new();
+    
+    for analysis in analyses {
+        total_fee += analysis.fee;
+        total_compute += analysis.compute_units_consumed.unwrap_or(0);
+        
+        if analysis.success {
+            successful += 1;
+        } else {
+            failed += 1;
+        }
+        
+        for signer in &analysis.signers {
+            signers_set.insert(signer.clone());
+        }
+        
+        for prog in &analysis.programs_invoked {
+            programs_map.entry(prog.pubkey.clone())
+                .and_modify(|(_, count)| *count += prog.invocation_count)
+                .or_insert((prog.name.clone(), prog.invocation_count));
+        }
+        
+        if let Some(ore) = &analysis.ore_analysis {
+            for deployment in &ore.deployments {
+                ore_deployments.push(deployment);
+                total_deployed += deployment.total_lamports;
+                miners_set.insert(deployment.miner.clone());
+                
+                if deployment.round_matches {
+                    matching_round += 1;
+                } else {
+                    wrong_round += 1;
+                }
+                
+                for &square in &deployment.squares {
+                    squares_map.entry(square)
+                        .and_modify(|(count, lamps)| {
+                            *count += 1;
+                            *lamps += deployment.amount_per_square;
+                        })
+                        .or_insert((1, deployment.amount_per_square));
+                }
+            }
+        }
+    }
+    
+    let programs_used: Vec<ProgramUsageSummary> = programs_map.into_iter()
+        .map(|(pubkey, (name, count))| ProgramUsageSummary {
+            program: pubkey,
+            name,
+            invocation_count: count,
+        })
+        .collect();
+    
+    let ore_summary = if !ore_deployments.is_empty() {
+        let mut squares_deployed: Vec<SquareDeploymentInfo> = squares_map.into_iter()
+            .map(|(square, (count, lamps))| SquareDeploymentInfo {
+                square,
+                deployment_count: count,
+                total_lamports: lamps,
+            })
+            .collect();
+        squares_deployed.sort_by_key(|s| s.square);
+        
+        Some(OreRoundSummary {
+            total_deployments: ore_deployments.len(),
+            deployments_matching_round: matching_round,
+            deployments_wrong_round: wrong_round,
+            unique_miners: miners_set.len(),
+            total_deployed_lamports: total_deployed,
+            total_deployed_sol: total_deployed as f64 / 1e9,
+            squares_deployed,
+        })
+    } else {
+        None
+    };
+    
+    RoundAnalysisSummary {
+        total_transactions: analyses.len(),
+        successful_transactions: successful,
+        failed_transactions: failed,
+        total_fee_paid: total_fee,
+        total_fee_sol: total_fee as f64 / 1e9,
+        total_compute_units: total_compute,
+        unique_signers: signers_set.len(),
+        programs_used,
+        ore_summary,
+    }
+}
+
+/// GET /admin/transactions/single/{signature}
+/// Analyze a single transaction by signature
+pub async fn get_single_transaction(
+    State(state): State<Arc<AppState>>,
+    Path(signature): Path<String>,
+) -> Result<Json<crate::tx_analyzer::FullTransactionAnalysis>, (StatusCode, Json<AuthError>)> {
+    // Try to find the transaction in our stored data
+    let raw_tx = state.clickhouse
+        .get_raw_transaction_by_signature(&signature)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get transaction: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    match raw_tx {
+        Some(tx) => {
+            let analyzer = crate::tx_analyzer::TransactionAnalyzer::new();
+            match analyzer.analyze(&tx.raw_json) {
+                Ok(analysis) => Ok(Json(analysis)),
+                Err(e) => Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(AuthError { error: format!("Analysis failed: {}", e) }),
+                )),
+            }
+        }
+        None => {
+            Err((
+                StatusCode::NOT_FOUND,
+                Json(AuthError { error: "Transaction not found in storage".to_string() }),
+            ))
+        }
     }
 }
 
