@@ -1366,7 +1366,7 @@ impl ClickHouseClient {
         Ok(results)
     }
     
-    /// Get ALL table sizes across all our databases (ore_stats + crank)
+    /// Get ALL table sizes across all databases (including system)
     pub async fn get_all_table_sizes(&self) -> Result<Vec<DetailedTableSizeRow>, ClickHouseError> {
         let results = self.client
             .query(r#"
@@ -1379,7 +1379,7 @@ impl ClickHouseClient {
                     count() AS parts_count,
                     max(modification_time) AS last_modified
                 FROM system.parts
-                WHERE active = 1 AND database IN ('ore_stats', 'crank')
+                WHERE active = 1
                 GROUP BY database, table
                 ORDER BY database, bytes_on_disk DESC
             "#)
@@ -1388,7 +1388,7 @@ impl ClickHouseClient {
         Ok(results)
     }
     
-    /// Get ClickHouse storage engine info for tables
+    /// Get ClickHouse storage engine info for tables (all databases)
     pub async fn get_table_engines(&self) -> Result<Vec<TableEngineRow>, ClickHouseError> {
         let results = self.client
             .query(r#"
@@ -1400,7 +1400,7 @@ impl ClickHouseClient {
                     sorting_key,
                     primary_key
                 FROM system.tables
-                WHERE database IN ('ore_stats', 'crank')
+                WHERE engine != ''
                 ORDER BY database, name
             "#)
             .fetch_all()
@@ -1824,22 +1824,40 @@ impl ClickHouseClient {
         };
         
         // Build min_rounds HAVING filter
-        let having_clause = if let Some(min) = min_rounds {
-            format!("HAVING count(DISTINCT round_id) >= {}", min)
-        } else {
+        let mut having_conditions = Vec::new();
+        if let Some(min) = min_rounds {
+            having_conditions.push(format!("count(DISTINCT round_id) >= {}", min));
+        }
+        
+        // sol_cost metric: only miners with negative net_sol AND ore_earned > 0
+        let is_sol_cost = metric == "sol_cost";
+        if is_sol_cost {
+            having_conditions.push("(toInt64(sum(sol_earned)) - toInt64(sum(amount))) < 0".to_string());
+            having_conditions.push("sum(ore_earned) > 0".to_string());
+        }
+        
+        let having_clause = if having_conditions.is_empty() {
             String::new()
+        } else {
+            format!("HAVING {}", having_conditions.join(" AND "))
         };
         
         // Build ordering based on metric
+        // sol_cost = abs(net_sol) / ore_earned - lower is better (ASC)
         let (value_expr, order) = match metric {
-            "sol_earned" => ("sum(sol_earned)", "DESC"),
-            "ore_earned" => ("sum(ore_earned)", "DESC"),
-            "rounds_won" => ("countIf(is_winner = 1)", "DESC"),
+            "sol_earned" => ("toInt64(sum(sol_earned))", "DESC"),
+            "ore_earned" => ("toInt64(sum(ore_earned))", "DESC"),
+            "sol_deployed" => ("toInt64(sum(amount))", "DESC"),
+            "sol_cost" => {
+                // cost per ore (lamports) = -net_sol / ore_earned
+                // We order ASC because lower cost is better
+                ("toInt64(-(toInt64(sum(sol_earned)) - toInt64(sum(amount))) * 100000000000 / sum(ore_earned))", "ASC")
+            },
             _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
         };
         
-        // Get total count (with min_rounds filter)
-        let count_query = if min_rounds.is_some() {
+        // Get total count (with filters)
+        let count_query = if !having_conditions.is_empty() {
             format!(
                 r#"SELECT count(*) FROM (
                     SELECT miner_pubkey 
@@ -1858,12 +1876,16 @@ impl ClickHouseClient {
         };
         let total_count: u64 = self.client.query(&count_query).fetch_one().await?;
         
-        // Get leaderboard page
+        // Get leaderboard page with all metrics
         let query = format!(
             r#"SELECT 
                    miner_pubkey,
                    {} as value,
-                   count(DISTINCT round_id) as rounds_played
+                   count(DISTINCT round_id) as rounds_played,
+                   sum(amount) as sol_deployed,
+                   sum(sol_earned) as sol_earned,
+                   sum(ore_earned) as ore_earned,
+                   toInt64(sum(sol_earned)) - toInt64(sum(amount)) as net_sol
                FROM deployments
                WHERE {}
                GROUP BY miner_pubkey
@@ -1878,11 +1900,29 @@ impl ClickHouseClient {
         let entries: Vec<crate::historical_routes::LeaderboardEntry> = rows
             .into_iter()
             .enumerate()
-            .map(|(i, r)| crate::historical_routes::LeaderboardEntry {
-                rank: (offset + i as u32 + 1),
-                miner_pubkey: r.miner_pubkey,
-                value: r.value,
-                rounds_played: r.rounds_played,
+            .map(|(i, r)| {
+                // Calculate sol_cost_per_ore: cost in lamports per ORE (with 11 decimals)
+                // Only if net_sol < 0 and ore_earned > 0
+                let sol_cost_per_ore = if r.net_sol < 0 && r.ore_earned > 0 {
+                    // cost = -net_sol (the loss) / ore_earned
+                    // This gives lamports per atomic ORE unit
+                    // To get lamports per 1 whole ORE, multiply by 10^11
+                    Some((-r.net_sol as i128 * 100_000_000_000i128 / r.ore_earned as i128) as i64)
+                } else {
+                    None
+                };
+                
+                crate::historical_routes::LeaderboardEntry {
+                    rank: (offset + i as u32 + 1),
+                    miner_pubkey: r.miner_pubkey,
+                    value: r.value,
+                    rounds_played: r.rounds_played,
+                    sol_deployed: r.sol_deployed,
+                    sol_earned: r.sol_earned,
+                    ore_earned: r.ore_earned,
+                    net_sol: r.net_sol,
+                    sol_cost_per_ore,
+                }
             })
             .collect();
         
@@ -1907,22 +1947,37 @@ impl ClickHouseClient {
         };
         
         // Build min_rounds HAVING filter
-        let having_clause = if let Some(min) = min_rounds {
-            format!("HAVING count(DISTINCT round_id) >= {}", min)
-        } else {
+        let mut having_conditions = Vec::new();
+        if let Some(min) = min_rounds {
+            having_conditions.push(format!("count(DISTINCT round_id) >= {}", min));
+        }
+        
+        // sol_cost metric: only miners with negative net_sol AND ore_earned > 0
+        let is_sol_cost = metric == "sol_cost";
+        if is_sol_cost {
+            having_conditions.push("(toInt64(sum(sol_earned)) - toInt64(sum(amount))) < 0".to_string());
+            having_conditions.push("sum(ore_earned) > 0".to_string());
+        }
+        
+        let having_clause = if having_conditions.is_empty() {
             String::new()
+        } else {
+            format!("HAVING {}", having_conditions.join(" AND "))
         };
         
         // Build ordering based on metric
         let (value_expr, order) = match metric {
-            "sol_earned" => ("sum(sol_earned)", "DESC"),
-            "ore_earned" => ("sum(ore_earned)", "DESC"),
-            "rounds_won" => ("countIf(is_winner = 1)", "DESC"),
+            "sol_earned" => ("toInt64(sum(sol_earned))", "DESC"),
+            "ore_earned" => ("toInt64(sum(ore_earned))", "DESC"),
+            "sol_deployed" => ("toInt64(sum(amount))", "DESC"),
+            "sol_cost" => {
+                ("toInt64(-(toInt64(sum(sol_earned)) - toInt64(sum(amount))) * 100000000000 / sum(ore_earned))", "ASC")
+            },
             _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
         };
         
-        // Get total count with search filter and min_rounds
-        let count_query = if min_rounds.is_some() {
+        // Get total count with search filter and filters
+        let count_query = if !having_conditions.is_empty() {
             format!(
                 r#"SELECT count(*) FROM (
                     SELECT miner_pubkey 
@@ -1950,12 +2005,20 @@ impl ClickHouseClient {
                    miner_pubkey,
                    value,
                    rounds_played,
+                   sol_deployed,
+                   sol_earned,
+                   ore_earned,
+                   net_sol,
                    rank
                FROM (
                    SELECT 
                        miner_pubkey,
                        {} as value,
                        count(DISTINCT round_id) as rounds_played,
+                       sum(amount) as sol_deployed,
+                       sum(sol_earned) as sol_earned,
+                       sum(ore_earned) as ore_earned,
+                       toInt64(sum(sol_earned)) - toInt64(sum(amount)) as net_sol,
                        row_number() OVER (ORDER BY {} {}) as rank
                    FROM deployments
                    WHERE {}
@@ -1975,6 +2038,10 @@ impl ClickHouseClient {
             miner_pubkey: String,
             value: i64,
             rounds_played: u64,
+            sol_deployed: u64,
+            sol_earned: u64,
+            ore_earned: u64,
+            net_sol: i64,
             rank: u64,
         }
         
@@ -1982,11 +2049,24 @@ impl ClickHouseClient {
         
         let entries: Vec<crate::historical_routes::LeaderboardEntry> = rows
             .into_iter()
-            .map(|r| crate::historical_routes::LeaderboardEntry {
-                rank: r.rank as u32,
-                miner_pubkey: r.miner_pubkey,
-                value: r.value,
-                rounds_played: r.rounds_played,
+            .map(|r| {
+                let sol_cost_per_ore = if r.net_sol < 0 && r.ore_earned > 0 {
+                    Some((-r.net_sol as i128 * 100_000_000_000i128 / r.ore_earned as i128) as i64)
+                } else {
+                    None
+                };
+                
+                crate::historical_routes::LeaderboardEntry {
+                    rank: r.rank as u32,
+                    miner_pubkey: r.miner_pubkey,
+                    value: r.value,
+                    rounds_played: r.rounds_played,
+                    sol_deployed: r.sol_deployed,
+                    sol_earned: r.sol_earned,
+                    ore_earned: r.ore_earned,
+                    net_sol: r.net_sol,
+                    sol_cost_per_ore,
+                }
             })
             .collect();
         
@@ -2818,6 +2898,10 @@ pub struct LeaderboardRow {
     pub miner_pubkey: String,
     pub value: i64,
     pub rounds_played: u64,
+    pub sol_deployed: u64,
+    pub sol_earned: u64,
+    pub ore_earned: u64,
+    pub net_sol: i64,
 }
 
 /// Treasury snapshot row.

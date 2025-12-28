@@ -507,6 +507,11 @@ export interface LeaderboardEntry {
   miner_pubkey: string;
   value: number;
   rounds_played: number;
+  sol_deployed: number;
+  sol_earned: number;
+  ore_earned: number;
+  net_sol: number;
+  sol_cost_per_ore: number | null;
 }
 
 export interface TreasurySnapshot {
@@ -1005,7 +1010,7 @@ class ApiClient {
   }
 
   async getLeaderboard(options?: {
-    metric?: "net_sol" | "sol_earned" | "ore_earned" | "rounds_won";
+    metric?: "net_sol" | "sol_deployed" | "sol_earned" | "ore_earned" | "sol_cost";
     roundRange?: "all" | "last_60" | "last_100" | "today";
     page?: number;
     limit?: number;

@@ -6,7 +6,7 @@ import { useRouter } from "next/navigation";
 import { api, LeaderboardEntry, OffsetResponse } from "@/lib/api";
 import { Header } from "@/components/Header";
 
-type MetricType = "net_sol" | "sol_earned" | "ore_earned" | "rounds_won";
+type MetricType = "net_sol" | "sol_deployed" | "sol_earned" | "ore_earned" | "sol_cost";
 type RangeType = "all" | "last_60" | "last_100" | "today";
 type MinRoundsType = 0 | 100 | 500 | 1000 | 5000;
 
@@ -103,9 +103,10 @@ export default function MinersPage() {
   const getMetricLabel = (m: MetricType): string => {
     switch (m) {
       case "net_sol": return "Net SOL";
+      case "sol_deployed": return "SOL Deployed";
       case "sol_earned": return "SOL Earned";
       case "ore_earned": return "ORE Earned";
-      case "rounds_won": return "Rounds Won";
+      case "sol_cost": return "SOL Cost/ORE";
     }
   };
 
@@ -136,18 +137,27 @@ export default function MinersPage() {
   const formatValue = (entry: LeaderboardEntry): string => {
     switch (metric) {
       case "net_sol":
+      case "sol_deployed":
       case "sol_earned":
         return formatSol(entry.value);
       case "ore_earned":
         return formatOre(entry.value);
-      case "rounds_won":
-        return entry.value.toLocaleString();
+      case "sol_cost":
+        // sol_cost_per_ore is in lamports per ORE, convert to SOL
+        if (entry.sol_cost_per_ore !== null) {
+          const solPerOre = entry.sol_cost_per_ore / LAMPORTS_PER_SOL;
+          return solPerOre.toFixed(4) + " SOL/ORE";
+        }
+        return "N/A";
     }
   };
 
   const getValueClass = (entry: LeaderboardEntry): string => {
     if (metric === "net_sol") {
       return entry.value >= 0 ? "text-green-400" : "text-red-400";
+    }
+    if (metric === "sol_cost") {
+      return "text-amber-400";
     }
     return "text-white";
   };
@@ -165,7 +175,7 @@ export default function MinersPage() {
             <div>
               <label className="block text-sm text-slate-400 mb-2">Rank By</label>
               <div className="flex flex-wrap gap-2">
-                {(["net_sol", "sol_earned", "ore_earned", "rounds_won"] as MetricType[]).map((m) => (
+                {(["net_sol", "sol_deployed", "sol_earned", "ore_earned", "sol_cost"] as MetricType[]).map((m) => (
                   <button
                     key={m}
                     onClick={() => handleMetricChange(m)}
@@ -179,6 +189,11 @@ export default function MinersPage() {
                   </button>
                 ))}
               </div>
+              {metric === "sol_cost" && (
+                <p className="text-xs text-slate-500 mt-1">
+                  Only shows miners with net loss and ORE earned. Lower cost is better.
+                </p>
+              )}
             </div>
 
             {/* Time Range */}
@@ -310,24 +325,29 @@ export default function MinersPage() {
         {/* Leaderboard Table */}
         {!loading && !error && leaderboard && (
           <>
-            <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-              <table className="w-full">
+            <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden overflow-x-auto">
+              <table className="w-full min-w-[900px]">
                 <thead>
                   <tr className="border-b border-slate-700/50 bg-slate-800/80">
-                    <th className="text-left px-6 py-4 text-sm font-medium text-slate-400 w-16">Rank</th>
-                    <th className="text-left px-6 py-4 text-sm font-medium text-slate-400">Miner</th>
-                    <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">{getMetricLabel(metric)}</th>
-                    <th className="text-right px-6 py-4 text-sm font-medium text-slate-400">Rounds</th>
-                    <th className="text-center px-6 py-4 text-sm font-medium text-slate-400">Actions</th>
+                    <th className="text-left px-4 py-4 text-sm font-medium text-slate-400 w-16">Rank</th>
+                    <th className="text-left px-4 py-4 text-sm font-medium text-slate-400">Miner</th>
+                    <th className="text-right px-4 py-4 text-sm font-medium text-slate-400">SOL Deployed</th>
+                    <th className="text-right px-4 py-4 text-sm font-medium text-slate-400">SOL Earned</th>
+                    <th className="text-right px-4 py-4 text-sm font-medium text-slate-400">Net SOL</th>
+                    <th className="text-right px-4 py-4 text-sm font-medium text-slate-400">ORE Earned</th>
+                    {metric === "sol_cost" && (
+                      <th className="text-right px-4 py-4 text-sm font-medium text-amber-400">SOL Cost/ORE</th>
+                    )}
+                    <th className="text-right px-4 py-4 text-sm font-medium text-slate-400">Rounds</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {leaderboard.data.map((entry, idx) => (
+                  {leaderboard.data.map((entry) => (
                     <tr
                       key={entry.miner_pubkey}
                       className="border-b border-slate-700/30 hover:bg-slate-700/30 transition-colors"
                     >
-                      <td className="px-6 py-4">
+                      <td className="px-4 py-3">
                         <div className={`text-lg font-bold ${
                           entry.rank === 1 ? "text-yellow-400" :
                           entry.rank === 2 ? "text-slate-300" :
@@ -337,27 +357,38 @@ export default function MinersPage() {
                           #{entry.rank}
                         </div>
                       </td>
-                      <td className="px-6 py-4">
+                      <td className="px-4 py-3">
                         <Link
                           href={`/miners/${entry.miner_pubkey}`}
-                          className="font-mono text-white hover:text-amber-400 transition-colors"
+                          className="font-mono text-white hover:text-amber-400 transition-colors text-sm"
                         >
                           {truncateAddress(entry.miner_pubkey)}
                         </Link>
                       </td>
-                      <td className={`px-6 py-4 text-right font-mono ${getValueClass(entry)}`}>
-                        {formatValue(entry)}
+                      <td className="px-4 py-3 text-right font-mono text-slate-300 text-sm">
+                        {formatSol(entry.sol_deployed)}
                       </td>
-                      <td className="px-6 py-4 text-right text-slate-400">
+                      <td className="px-4 py-3 text-right font-mono text-green-400 text-sm">
+                        {formatSol(entry.sol_earned)}
+                      </td>
+                      <td className={`px-4 py-3 text-right font-mono text-sm ${
+                        entry.net_sol >= 0 ? "text-green-400" : "text-red-400"
+                      }`}>
+                        {formatSol(entry.net_sol)}
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono text-cyan-400 text-sm">
+                        {formatOre(entry.ore_earned)}
+                      </td>
+                      {metric === "sol_cost" && (
+                        <td className="px-4 py-3 text-right font-mono text-amber-400 text-sm">
+                          {entry.sol_cost_per_ore !== null 
+                            ? (entry.sol_cost_per_ore / LAMPORTS_PER_SOL).toFixed(4) + " SOL"
+                            : "N/A"
+                          }
+                        </td>
+                      )}
+                      <td className="px-4 py-3 text-right text-slate-400 text-sm">
                         {entry.rounds_played.toLocaleString()}
-                      </td>
-                      <td className="px-6 py-4 text-center">
-                        <Link
-                          href={`/miners/${entry.miner_pubkey}`}
-                          className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
-                        >
-                          View Profile
-                        </Link>
                       </td>
                     </tr>
                   ))}

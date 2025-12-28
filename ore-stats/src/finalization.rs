@@ -89,7 +89,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         }
     }
     
-    let (all_gpa_miners, gpa_miners) = match gpa_result {
+    let (all_gpa_miners, gpa_miners, gpa_failed) = match gpa_result {
         Some(miners) => {
             let total_count = miners.len();
             let all_miners = miners.clone();
@@ -103,15 +103,16 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
                 round_miners.len(),
                 round_id
             );
-            (all_miners, round_miners)
+            (all_miners, round_miners, false)
         }
         None => {
             tracing::error!(
-                "CRITICAL: All {} GPA snapshot attempts failed for round {}! Round will have incomplete data.",
+                "CRITICAL: All {} GPA snapshot attempts failed for round {}! \
+                 Will still store round/treasury snapshots. Deployments need backfill via admin.",
                 max_retries, round_id
             );
-            // Return None to signal failure - caller should handle this
-            return None;
+            // Continue with empty miners - we'll still store round and treasury
+            (HashMap::new(), HashMap::new(), true)
         }
     };
     
@@ -280,6 +281,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_secs(),
+        gpa_failed,
     };
     
     tracing::info!(
@@ -451,14 +453,23 @@ pub async fn finalize_round(
     state.clickhouse.insert_round(round_insert).await?;
     tracing::debug!("Stored round {} to ClickHouse", round_id);
     
-    state.clickhouse.insert_deployments(all_deployments.clone()).await?;
-    tracing::debug!("Stored {} deployments to ClickHouse", all_deployments.len());
-    
     state.clickhouse.insert_treasury_snapshot(treasury_snapshot).await?;
     tracing::debug!("Stored treasury snapshot for round {}", round_id);
     
-    state.clickhouse.insert_miner_snapshots(miner_snapshots.clone()).await?;
-    tracing::debug!("Stored {} miner snapshots for round {}", miner_snapshots.len(), round_id);
+    // Only store deployments and miner snapshots if GPA succeeded
+    if snapshot.gpa_failed {
+        tracing::warn!(
+            "Round {} GPA snapshot failed - skipping deployments and miner snapshots. \
+             Use admin backfill to reconstruct deployments.",
+            round_id
+        );
+    } else {
+        state.clickhouse.insert_deployments(all_deployments.clone()).await?;
+        tracing::debug!("Stored {} deployments to ClickHouse", all_deployments.len());
+        
+        state.clickhouse.insert_miner_snapshots(miner_snapshots.clone()).await?;
+        tracing::debug!("Stored {} miner snapshots for round {}", miner_snapshots.len(), round_id);
+    }
     
     // Broadcast winning square announcement
     let _ = state.round_broadcast.send(LiveBroadcastData::WinningSquare {
@@ -467,13 +478,21 @@ pub async fn finalize_round(
         motherlode_hit: finalized_round.motherlode > 0,
     });
     
-    tracing::info!(
-        "Round {} finalized: winning_square={}, {} deployments, {} miner snapshots",
-        round_id,
-        winning_square,
-        all_deployments.len(),
-        miner_snapshots.len()
-    );
+    if snapshot.gpa_failed {
+        tracing::info!(
+            "Round {} finalized (PARTIAL - no deployments): winning_square={}, needs backfill",
+            round_id,
+            winning_square
+        );
+    } else {
+        tracing::info!(
+            "Round {} finalized: winning_square={}, {} deployments, {} miner snapshots",
+            round_id,
+            winning_square,
+            all_deployments.len(),
+            miner_snapshots.len()
+        );
+    }
     
     Ok(())
 }

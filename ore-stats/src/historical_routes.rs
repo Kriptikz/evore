@@ -201,6 +201,12 @@ pub struct LeaderboardEntry {
     pub miner_pubkey: String,
     pub value: i64, // The metric value (could be negative for net_sol)
     pub rounds_played: u64,
+    pub sol_deployed: u64,
+    pub sol_earned: u64,
+    pub ore_earned: u64,
+    pub net_sol: i64,
+    /// SOL cost per ORE (in lamports) - only set when net_sol < 0 and ore_earned > 0
+    pub sol_cost_per_ore: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]

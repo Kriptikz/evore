@@ -128,6 +128,9 @@ pub struct RoundSnapshot {
     
     /// Timestamp when snapshot was captured
     pub captured_at: u64,
+    
+    /// True if GPA snapshot failed - deployments need backfill via admin
+    pub gpa_failed: bool,
 }
 
 impl AppState {
