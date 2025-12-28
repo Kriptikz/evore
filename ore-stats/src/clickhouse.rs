@@ -1832,7 +1832,7 @@ impl ClickHouseClient {
         // sol_cost metric: only miners with negative net_sol AND ore_earned > 0
         let is_sol_cost = metric == "sol_cost";
         if is_sol_cost {
-            having_conditions.push("(toInt64(sum(sol_earned)) - toInt64(sum(amount))) < 0".to_string());
+            having_conditions.push("(sum(sol_earned) - sum(amount)) < 0".to_string());
             having_conditions.push("sum(ore_earned) > 0".to_string());
         }
         
@@ -1844,16 +1844,18 @@ impl ClickHouseClient {
         
         // Build ordering based on metric
         // sol_cost = abs(net_sol) / ore_earned - lower is better (ASC)
+        // Note: for sol_cost we compute raw ratio, scale to ORE in Rust
         let (value_expr, order) = match metric {
-            "sol_earned" => ("toInt64(sum(sol_earned))", "DESC"),
-            "ore_earned" => ("toInt64(sum(ore_earned))", "DESC"),
-            "sol_deployed" => ("toInt64(sum(amount))", "DESC"),
+            "sol_earned" => ("sum(sol_earned)", "DESC"),
+            "ore_earned" => ("sum(ore_earned)", "DESC"),
+            "sol_deployed" => ("sum(amount)", "DESC"),
             "sol_cost" => {
-                // cost per ore (lamports) = -net_sol / ore_earned
-                // We order ASC because lower cost is better
-                ("toInt64(-(toInt64(sum(sol_earned)) - toInt64(sum(amount))) * 100000000000 / sum(ore_earned))", "ASC")
+                // cost per atomic ORE = -net_sol / ore_earned (lamports per atomic ORE)
+                // We scale to SOL per whole ORE in Rust to avoid overflow
+                // Add 1 to denominator to avoid division by zero
+                ("-(sum(sol_earned) - sum(amount)) / (sum(ore_earned) + 1)", "ASC")
             },
-            _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
+            _ => ("sum(sol_earned) - sum(amount)", "DESC"), // net_sol (can be negative)
         };
         
         // Get total count (with filters)
@@ -1885,7 +1887,7 @@ impl ClickHouseClient {
                    sum(amount) as sol_deployed,
                    sum(sol_earned) as sol_earned,
                    sum(ore_earned) as ore_earned,
-                   toInt64(sum(sol_earned)) - toInt64(sum(amount)) as net_sol
+                   sum(sol_earned) - sum(amount) as net_sol
                FROM deployments
                WHERE {}
                GROUP BY miner_pubkey
@@ -1955,7 +1957,7 @@ impl ClickHouseClient {
         // sol_cost metric: only miners with negative net_sol AND ore_earned > 0
         let is_sol_cost = metric == "sol_cost";
         if is_sol_cost {
-            having_conditions.push("(toInt64(sum(sol_earned)) - toInt64(sum(amount))) < 0".to_string());
+            having_conditions.push("(sum(sol_earned) - sum(amount)) < 0".to_string());
             having_conditions.push("sum(ore_earned) > 0".to_string());
         }
         
@@ -1967,13 +1969,14 @@ impl ClickHouseClient {
         
         // Build ordering based on metric
         let (value_expr, order) = match metric {
-            "sol_earned" => ("toInt64(sum(sol_earned))", "DESC"),
-            "ore_earned" => ("toInt64(sum(ore_earned))", "DESC"),
-            "sol_deployed" => ("toInt64(sum(amount))", "DESC"),
+            "sol_earned" => ("sum(sol_earned)", "DESC"),
+            "ore_earned" => ("sum(ore_earned)", "DESC"),
+            "sol_deployed" => ("sum(amount)", "DESC"),
             "sol_cost" => {
-                ("toInt64(-(toInt64(sum(sol_earned)) - toInt64(sum(amount))) * 100000000000 / sum(ore_earned))", "ASC")
+                // cost per atomic ORE, scale in Rust
+                ("-(sum(sol_earned) - sum(amount)) / (sum(ore_earned) + 1)", "ASC")
             },
-            _ => ("toInt64(sum(sol_earned)) - toInt64(sum(amount))", "DESC"), // net_sol
+            _ => ("sum(sol_earned) - sum(amount)", "DESC"), // net_sol
         };
         
         // Get total count with search filter and filters
@@ -2018,7 +2021,7 @@ impl ClickHouseClient {
                        sum(amount) as sol_deployed,
                        sum(sol_earned) as sol_earned,
                        sum(ore_earned) as ore_earned,
-                       toInt64(sum(sol_earned)) - toInt64(sum(amount)) as net_sol,
+                       sum(sol_earned) - sum(amount) as net_sol,
                        row_number() OVER (ORDER BY {} {}) as rank
                    FROM deployments
                    WHERE {}
