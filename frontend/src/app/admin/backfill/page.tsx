@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { useAdmin } from "@/context/AdminContext";
-import { api, RoundStatus, RoundWithData } from "@/lib/api";
+import { api, RoundStatus, RoundWithData, RoundStatsResponse, FilterMode } from "@/lib/api";
 
 type WorkflowStep = "meta" | "txns" | "reconstruct" | "verify" | "finalize";
 type Tab = "backfill" | "data";
@@ -169,12 +169,16 @@ export default function BackfillPage() {
 
   // Data viewer state
   const [roundsData, setRoundsData] = useState<RoundWithData[]>([]);
+  const [missingRoundIds, setMissingRoundIds] = useState<number[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
-  const [showMissingOnly, setShowMissingOnly] = useState(false);
-  const [showInvalidOnly, setShowInvalidOnly] = useState(false);
+  const [filterMode, setFilterMode] = useState<FilterMode | "missing_rounds">("all");
   const [selectedRounds, setSelectedRounds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
   const [addingToBackfill, setAddingToBackfill] = useState(false);
+  
+  // Round stats
+  const [stats, setStats] = useState<RoundStatsResponse | null>(null);
+  const [statsLoading, setStatsLoading] = useState(false);
   
   // Round ID filter state
   const [startRound, setStartRound] = useState<string>("");
@@ -183,6 +187,7 @@ export default function BackfillPage() {
   // Pagination state
   const [hasMore, setHasMore] = useState(false);
   const [nextCursor, setNextCursor] = useState<number | null>(null);
+  const [currentPage, setCurrentPage] = useState(1);
   const [loadingMore, setLoadingMore] = useState(false);
 
   const fetchPendingRounds = useCallback(async () => {
@@ -198,20 +203,54 @@ export default function BackfillPage() {
     }
   }, [isAuthenticated]);
 
-  const fetchRoundsData = useCallback(async (reset = true) => {
+  const fetchStats = useCallback(async () => {
     if (!isAuthenticated) return;
-    setDataLoading(true);
+    setStatsLoading(true);
     try {
-      const res = await api.getRoundsWithData({
-        limit: 100,
-        missingDeploymentsOnly: showMissingOnly,
-        invalidOnly: showInvalidOnly,
+      const res = await api.getRoundStats({
         roundIdGte: startRound ? parseInt(startRound) : undefined,
         roundIdLte: endRound ? parseInt(endRound) : undefined,
       });
-      setRoundsData(res.rounds);
-      setHasMore(res.has_more);
-      setNextCursor(res.next_cursor ?? null);
+      setStats(res);
+    } catch (err) {
+      console.error("Failed to fetch stats:", err);
+    } finally {
+      setStatsLoading(false);
+    }
+  }, [isAuthenticated, startRound, endRound]);
+
+  const fetchRoundsData = useCallback(async (reset = true) => {
+    if (!isAuthenticated) return;
+    setDataLoading(true);
+    setMissingRoundIds([]);
+    setRoundsData([]);
+    
+    try {
+      if (filterMode === "missing_rounds") {
+        // Fetch missing round IDs
+        const res = await api.getMissingRounds({
+          limit: 100,
+          page: 1,
+          roundIdGte: startRound ? parseInt(startRound) : undefined,
+          roundIdLte: endRound ? parseInt(endRound) : undefined,
+        });
+        setMissingRoundIds(res.missing_round_ids);
+        setHasMore(res.has_more);
+        setCurrentPage(1);
+        setNextCursor(null);
+      } else {
+        // Fetch rounds with data
+        const res = await api.getRoundsWithData({
+          limit: 100,
+          filterMode: filterMode === "all" ? undefined : filterMode,
+          roundIdGte: startRound ? parseInt(startRound) : undefined,
+          roundIdLte: endRound ? parseInt(endRound) : undefined,
+        });
+        setRoundsData(res.rounds);
+        setHasMore(res.has_more);
+        setNextCursor(res.next_cursor ?? null);
+        setCurrentPage(1);
+      }
       setError(null);
       if (reset) {
         setSelectedRounds(new Set());
@@ -221,34 +260,50 @@ export default function BackfillPage() {
     } finally {
       setDataLoading(false);
     }
-  }, [isAuthenticated, showMissingOnly, showInvalidOnly, startRound, endRound]);
+  }, [isAuthenticated, filterMode, startRound, endRound]);
   
   const loadMoreRoundsData = useCallback(async () => {
-    if (!isAuthenticated || !hasMore || !nextCursor || loadingMore) return;
+    if (!isAuthenticated || !hasMore || loadingMore) return;
     setLoadingMore(true);
     try {
-      const res = await api.getRoundsWithData({
-        limit: 100,
-        before: nextCursor,
-        missingDeploymentsOnly: showMissingOnly,
-        invalidOnly: showInvalidOnly,
-        roundIdGte: startRound ? parseInt(startRound) : undefined,
-        roundIdLte: endRound ? parseInt(endRound) : undefined,
-      });
-      if (res.rounds.length > 0) {
-        setRoundsData(prev => [...prev, ...res.rounds]);
-        setHasMore(res.has_more);
-        setNextCursor(res.next_cursor ?? null);
-      } else {
-        setHasMore(false);
-        setNextCursor(null);
+      if (filterMode === "missing_rounds") {
+        const nextPage = currentPage + 1;
+        const res = await api.getMissingRounds({
+          limit: 100,
+          page: nextPage,
+          roundIdGte: startRound ? parseInt(startRound) : undefined,
+          roundIdLte: endRound ? parseInt(endRound) : undefined,
+        });
+        if (res.missing_round_ids.length > 0) {
+          setMissingRoundIds(prev => [...prev, ...res.missing_round_ids]);
+          setHasMore(res.has_more);
+          setCurrentPage(nextPage);
+        } else {
+          setHasMore(false);
+        }
+      } else if (nextCursor) {
+        const res = await api.getRoundsWithData({
+          limit: 100,
+          before: nextCursor,
+          filterMode: filterMode === "all" ? undefined : filterMode,
+          roundIdGte: startRound ? parseInt(startRound) : undefined,
+          roundIdLte: endRound ? parseInt(endRound) : undefined,
+        });
+        if (res.rounds.length > 0) {
+          setRoundsData(prev => [...prev, ...res.rounds]);
+          setHasMore(res.has_more);
+          setNextCursor(res.next_cursor ?? null);
+        } else {
+          setHasMore(false);
+          setNextCursor(null);
+        }
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load more rounds");
     } finally {
       setLoadingMore(false);
     }
-  }, [isAuthenticated, hasMore, nextCursor, loadingMore, showMissingOnly, showInvalidOnly, startRound, endRound]);
+  }, [isAuthenticated, hasMore, nextCursor, currentPage, loadingMore, filterMode, startRound, endRound]);
 
   useEffect(() => {
     if (!isAuthenticated) {
@@ -257,13 +312,14 @@ export default function BackfillPage() {
     }
     fetchPendingRounds();
     fetchRoundsData();
-  }, [fetchPendingRounds, fetchRoundsData, isAuthenticated]);
+    fetchStats();
+  }, [fetchPendingRounds, fetchRoundsData, fetchStats, isAuthenticated]);
 
   useEffect(() => {
     if (isAuthenticated) {
       fetchRoundsData(true);
     }
-  }, [showMissingOnly, showInvalidOnly, fetchRoundsData, isAuthenticated]);
+  }, [filterMode, fetchRoundsData, isAuthenticated]);
 
   // Separate effect for round ID filters - only triggers on Apply button or Enter
   const handleApplyFilters = useCallback(() => {
@@ -486,53 +542,79 @@ export default function BackfillPage() {
                 )}
               </div>
               
-              {/* Checkbox Filters */}
-              <div className="flex items-center gap-4">
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={showMissingOnly}
-                    onChange={(e) => {
-                      setShowMissingOnly(e.target.checked);
-                      if (e.target.checked) setShowInvalidOnly(false);
-                    }}
-                    className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-blue-500"
-                  />
-                  <span className="text-sm text-slate-300">Missing deployments only</span>
-                </label>
-                <label className="flex items-center gap-2 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    checked={showInvalidOnly}
-                    onChange={(e) => {
-                      setShowInvalidOnly(e.target.checked);
-                      if (e.target.checked) setShowMissingOnly(false);
-                    }}
-                    className="w-4 h-4 rounded border-slate-600 bg-slate-700 text-orange-500"
-                  />
-                  <span className="text-sm text-slate-300">Invalid data only</span>
-                </label>
+              {/* Filter Mode Selector */}
+              <div className="flex items-center gap-2">
+                <span className="text-sm text-slate-400">Filter:</span>
+                <select
+                  value={filterMode}
+                  onChange={(e) => setFilterMode(e.target.value as FilterMode | "missing_rounds")}
+                  className="px-3 py-1.5 bg-slate-700 border border-slate-600 rounded-lg text-sm text-white focus:ring-blue-500 focus:border-blue-500"
+                >
+                  <option value="all">All Rounds</option>
+                  <option value="missing_deployments">Missing Deployments Only {stats ? `(${stats.missing_deployments_count.toLocaleString()})` : ""}</option>
+                  <option value="invalid_deployments">Invalid Deployments Only {stats ? `(${stats.invalid_deployments_count.toLocaleString()})` : ""}</option>
+                  <option value="missing_rounds">Missing Rounds (Gaps) {stats ? `(${stats.missing_rounds_count.toLocaleString()})` : ""}</option>
+                </select>
               </div>
               <div className="flex items-center gap-2">
                 <span className="text-sm text-slate-400">
-                  {roundsData.length} rounds loaded
+                  {filterMode === "missing_rounds" 
+                    ? `${missingRoundIds.length} round IDs loaded`
+                    : `${roundsData.length} rounds loaded`
+                  }
                   {hasMore && " (more available)"}
                 </span>
                 <button
-                  onClick={() => fetchRoundsData(true)}
+                  onClick={() => { fetchRoundsData(true); fetchStats(); }}
                   className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors"
                 >
                   Refresh
                 </button>
               </div>
             </div>
+            
+            {/* Stats Summary */}
+            {stats && (
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4">
+                  <p className="text-xs text-slate-400 mb-1">Total Rounds</p>
+                  <p className="text-xl font-bold text-white">{stats.total_rounds.toLocaleString()}</p>
+                  <p className="text-xs text-slate-500">
+                    {stats.min_stored_round.toLocaleString()} - {stats.max_stored_round.toLocaleString()}
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg border border-red-500/30 p-4">
+                  <p className="text-xs text-slate-400 mb-1">Missing Deployments</p>
+                  <p className={`text-xl font-bold ${stats.missing_deployments_count > 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {stats.missing_deployments_count.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-slate-500">rounds with no deployment data</p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg border border-orange-500/30 p-4">
+                  <p className="text-xs text-slate-400 mb-1">Invalid Deployments</p>
+                  <p className={`text-xl font-bold ${stats.invalid_deployments_count > 0 ? 'text-orange-400' : 'text-green-400'}`}>
+                    {stats.invalid_deployments_count.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-slate-500">rounds with mismatched totals</p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg border border-yellow-500/30 p-4">
+                  <p className="text-xs text-slate-400 mb-1">Missing Rounds</p>
+                  <p className={`text-xl font-bold ${stats.missing_rounds_count > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                    {stats.missing_rounds_count.toLocaleString()}
+                  </p>
+                  <p className="text-xs text-slate-500">gaps in round sequence</p>
+                </div>
+              </div>
+            )}
 
             {/* Rounds Data Table */}
             <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
               <div className="px-6 py-4 border-b border-slate-700">
                 <h2 className="text-lg font-semibold text-white">
-                  Stored Rounds
-                  {showMissingOnly && ` (${roundsData.length} missing deployments)`}
+                  {filterMode === "missing_rounds" ? "Missing Round IDs" : 
+                   filterMode === "missing_deployments" ? "Rounds Missing Deployments" :
+                   filterMode === "invalid_deployments" ? "Rounds with Invalid Deployments" :
+                   "Stored Rounds"}
                 </h2>
               </div>
 
@@ -540,9 +622,39 @@ export default function BackfillPage() {
                 <div className="flex items-center justify-center h-48">
                   <div className="w-8 h-8 border-4 border-blue-500 border-t-transparent rounded-full animate-spin" />
                 </div>
+              ) : filterMode === "missing_rounds" ? (
+                missingRoundIds.length === 0 ? (
+                  <div className="p-8 text-center text-slate-400">
+                    No missing rounds! Sequence is complete.
+                  </div>
+                ) : (
+                  <div className="p-6">
+                    <div className="flex flex-wrap gap-2 mb-4">
+                      {missingRoundIds.map(id => (
+                        <span 
+                          key={id} 
+                          className="px-3 py-1.5 bg-yellow-500/20 text-yellow-400 text-sm font-mono rounded-lg"
+                        >
+                          {id.toLocaleString()}
+                        </span>
+                      ))}
+                    </div>
+                    {hasMore && (
+                      <button
+                        onClick={loadMoreRoundsData}
+                        disabled={loadingMore}
+                        className="w-full py-3 text-sm bg-slate-700 hover:bg-slate-600 text-slate-300 rounded-lg transition-colors disabled:opacity-50"
+                      >
+                        {loadingMore ? "Loading..." : "Load More Missing Rounds"}
+                      </button>
+                    )}
+                  </div>
+                )
               ) : roundsData.length === 0 ? (
                 <div className="p-8 text-center text-slate-400">
-                  {showMissingOnly ? "All rounds have deployment data!" : "No rounds found. Start a backfill."}
+                  {filterMode === "missing_deployments" ? "All rounds have deployment data!" : 
+                   filterMode === "invalid_deployments" ? "All rounds have valid deployment totals!" :
+                   "No rounds found. Start a backfill."}
                 </div>
               ) : (
                 <>

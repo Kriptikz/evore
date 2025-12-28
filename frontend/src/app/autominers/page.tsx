@@ -9,6 +9,7 @@ import { BulkActionBar } from "@/components/BulkActionBar";
 import { Header } from "@/components/Header";
 import { useEvore } from "@/hooks/useEvore";
 import { formatSol, formatOre } from "@/lib/accounts";
+import { getManagedMinerAuthPda } from "@/lib/pda";
 import { DEFAULT_DEPLOYER_PUBKEY, DEFAULT_DEPLOYER_BPS_FEE, DEFAULT_DEPLOYER_FLAT_FEE } from "@/lib/constants";
 
 export default function AutoMinersPage() {
@@ -20,6 +21,7 @@ export default function AutoMinersPage() {
     board,
     walletBalance,
     loading,
+    pendingBalances,
     createAutoMiner,
     bulkCreateAutoMiners,
     depositAutodeployBalance,
@@ -280,8 +282,8 @@ export default function AutoMinersPage() {
               </div>
             </div>
 
-            {/* Loading */}
-            {loading && (
+            {/* Initial loading only (before data is fetched) */}
+            {loading && managers.length === 0 && (
               <div className="flex items-center justify-center py-4">
                 <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
               </div>
@@ -323,6 +325,10 @@ export default function AutoMinersPage() {
                   const managerKey = manager.address.toBase58();
                   
                   if (!deployer) return null;
+                  
+                  // Check if auth PDA balance is still loading
+                  const [authPda] = getManagedMinerAuthPda(manager.address, BigInt(0));
+                  const balanceLoading = pendingBalances.has(authPda.toBase58());
 
                   return (
                     <AutoMinerCard
@@ -338,6 +344,7 @@ export default function AutoMinersPage() {
                       miner={miner}
                       currentBoardRoundId={board?.roundId}
                       isSelected={selectedManagers.has(managerKey)}
+                      balanceLoading={balanceLoading}
                       onToggleSelect={() => toggleSelection(managerKey)}
                       onDeposit={(authId, amount) => depositAutodeployBalance(manager.address, authId, amount)}
                       onClaimSol={() => claimSol(manager.address)}

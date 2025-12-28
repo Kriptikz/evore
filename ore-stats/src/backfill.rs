@@ -200,10 +200,21 @@ pub struct RoundsWithDataQuery {
     pub round_id_gte: Option<u64>,
     /// Filter: maximum round_id (inclusive)
     pub round_id_lte: Option<u64>,
-    /// Only show rounds with no deployments
-    pub missing_deployments_only: Option<bool>,
-    /// Only show rounds where deployments_sum != total_deployed (data integrity issue)
-    pub invalid_only: Option<bool>,
+    /// Filter mode: "all", "missing_deployments", "invalid_deployments", "missing_rounds"
+    pub filter_mode: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MissingRoundsResponse {
+    pub missing_round_ids: Vec<u64>,
+    pub total: u32,
+    pub has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<u32>,
+    pub min_stored_round: u64,
+    pub max_stored_round: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -825,15 +836,13 @@ pub async fn get_round_data_status(
 /// - `limit`: Number of rounds per page (default 50, max 200)
 /// - `page`: Page number (1-based) for offset pagination
 /// - `before`: Cursor - get rounds before this round_id (more efficient for deep pagination)
-/// - `missing_deployments_only`: Only show rounds with no deployments
-/// - `invalid_only`: Only show rounds where deployments don't match total_deployed
+/// - `filter_mode`: "all" (default), "missing_deployments", "invalid_deployments"
 pub async fn get_rounds_with_data(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RoundsWithDataQuery>,
 ) -> Result<Json<RoundsWithDataResponse>, (StatusCode, Json<ErrorResponse>)> {
     let limit = params.limit.unwrap_or(50).min(200);
-    let missing_only = params.missing_deployments_only.unwrap_or(false);
-    let invalid_only = params.invalid_only.unwrap_or(false);
+    let filter_mode = params.filter_mode.as_deref().unwrap_or("all");
     
     // Round ID filters
     let round_id_gte = params.round_id_gte;
@@ -852,60 +861,124 @@ pub async fn get_rounds_with_data(
         (None, None)
     };
     
-    // Get rounds from ClickHouse with filters and pagination
-    let (rounds, has_more) = state.clickhouse
-        .get_rounds_filtered_for_admin(round_id_gte, round_id_lte, before_round_id, offset, limit)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: format!("ClickHouse error: {}", e) }),
-            )
-        })?;
-    
-    // Enrich with deployment counts and validation
-    let mut enriched = Vec::new();
-    for r in rounds {
-        // Get both count and sum in one query for efficiency
-        let (deployment_count, deployments_sum) = state.clickhouse
-            .get_deployment_stats_for_round(r.round_id)
-            .await
-            .unwrap_or((0, 0));
-        
-        // Calculate validation: deployments_sum should match total_deployed
-        let discrepancy = r.total_deployed as i64 - deployments_sum as i64;
-        let is_valid = deployment_count > 0 && discrepancy == 0;
-        
-        // Filter if missing_deployments_only is set
-        if missing_only && deployment_count > 0 {
-            continue;
+    // Handle different filter modes with server-side queries
+    let (enriched, has_more) = match filter_mode {
+        "missing_deployments" => {
+            // Server-side query for rounds with no deployments
+            let (rounds, has_more) = state.clickhouse
+                .get_rounds_with_missing_deployments(round_id_gte, round_id_lte, before_round_id, offset, limit)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse { error: format!("ClickHouse error: {}", e) }),
+                    )
+                })?;
+            
+            let enriched: Vec<RoundWithData> = rounds.into_iter().map(|r| {
+                RoundWithData {
+                    round_id: r.round_id,
+                    start_slot: r.start_slot,
+                    end_slot: r.end_slot,
+                    winning_square: r.winning_square,
+                    top_miner: r.top_miner,
+                    total_deployed: r.total_deployed,
+                    total_winnings: r.total_winnings,
+                    unique_miners: r.unique_miners,
+                    motherlode: r.motherlode,
+                    deployment_count: 0,
+                    source: r.source,
+                    deployments_sum: 0,
+                    is_valid: false,
+                    discrepancy: r.total_deployed as i64,
+                }
+            }).collect();
+            
+            (enriched, has_more)
+        },
+        "invalid_deployments" => {
+            // Server-side query for rounds with mismatched deployment totals
+            let (rounds, has_more) = state.clickhouse
+                .get_rounds_with_invalid_deployments(round_id_gte, round_id_lte, before_round_id, offset, limit)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse { error: format!("ClickHouse error: {}", e) }),
+                    )
+                })?;
+            
+            let enriched: Vec<RoundWithData> = rounds.into_iter().map(|r| {
+                let discrepancy = r.total_deployed as i64 - r.deployments_sum as i64;
+                let is_valid = r.deployment_count > 0 && discrepancy == 0;
+                RoundWithData {
+                    round_id: r.round_id,
+                    start_slot: r.start_slot,
+                    end_slot: r.end_slot,
+                    winning_square: r.winning_square,
+                    top_miner: r.top_miner,
+                    total_deployed: r.total_deployed,
+                    total_winnings: r.total_winnings,
+                    unique_miners: r.unique_miners,
+                    motherlode: r.motherlode,
+                    deployment_count: r.deployment_count,
+                    source: r.source,
+                    deployments_sum: r.deployments_sum,
+                    is_valid,
+                    discrepancy,
+                }
+            }).collect();
+            
+            (enriched, has_more)
+        },
+        _ => {
+            // Default: get all rounds and enrich
+            let (rounds, has_more) = state.clickhouse
+                .get_rounds_filtered_for_admin(round_id_gte, round_id_lte, before_round_id, offset, limit)
+                .await
+                .map_err(|e| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(ErrorResponse { error: format!("ClickHouse error: {}", e) }),
+                    )
+                })?;
+            
+            // Enrich with deployment counts and validation
+            let mut enriched = Vec::new();
+            for r in rounds {
+                // Get both count and sum in one query for efficiency
+                let (deployment_count, deployments_sum) = state.clickhouse
+                    .get_deployment_stats_for_round(r.round_id)
+                    .await
+                    .unwrap_or((0, 0));
+                
+                // Calculate validation: deployments_sum should match total_deployed
+                let discrepancy = r.total_deployed as i64 - deployments_sum as i64;
+                let is_valid = deployment_count > 0 && discrepancy == 0;
+                
+                enriched.push(RoundWithData {
+                    round_id: r.round_id,
+                    start_slot: r.start_slot,
+                    end_slot: r.end_slot,
+                    winning_square: r.winning_square,
+                    top_miner: r.top_miner,
+                    total_deployed: r.total_deployed,
+                    total_winnings: r.total_winnings,
+                    unique_miners: r.unique_miners,
+                    motherlode: r.motherlode,
+                    deployment_count,
+                    source: r.source,
+                    deployments_sum,
+                    is_valid,
+                    discrepancy,
+                });
+            }
+            
+            (enriched, has_more)
         }
-        
-        // Filter if invalid_only is set (only show rounds with mismatched totals)
-        if invalid_only && (deployment_count == 0 || is_valid) {
-            continue;
-        }
-        
-        enriched.push(RoundWithData {
-            round_id: r.round_id,
-            start_slot: r.start_slot,
-            end_slot: r.end_slot,
-            winning_square: r.winning_square,
-            top_miner: r.top_miner,
-            total_deployed: r.total_deployed,
-            total_winnings: r.total_winnings,
-            unique_miners: r.unique_miners,
-            motherlode: r.motherlode,
-            deployment_count,
-            source: r.source,
-            deployments_sum,
-            is_valid,
-            discrepancy,
-        });
-    }
+    };
     
-    // Get next cursor (last round_id in results before filtering)
-    // Note: We use the last enriched round since filtering may change what's available
+    // Get next cursor (last round_id in results)
     let next_cursor = if has_more {
         enriched.last().map(|r| r.round_id)
     } else {
@@ -920,6 +993,104 @@ pub async fn get_rounds_with_data(
         has_more,
         next_cursor,
         page: params.page,
+    }))
+}
+
+/// GET /admin/rounds/missing - Get missing round IDs (gaps in stored data)
+pub async fn get_missing_rounds(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RoundsWithDataQuery>,
+) -> Result<Json<MissingRoundsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let limit = params.limit.unwrap_or(50).min(200);
+    
+    // Round ID filters
+    let round_id_gte = params.round_id_gte;
+    let round_id_lte = params.round_id_lte;
+    
+    // Determine pagination mode
+    let offset = if let Some(page) = params.page {
+        let page = page.max(1);
+        Some((page - 1) * limit)
+    } else {
+        None
+    };
+    
+    let (missing_ids, has_more, min_stored, max_stored) = state.clickhouse
+        .get_missing_round_ids(round_id_gte, round_id_lte, offset, limit)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    let total = missing_ids.len() as u32;
+    
+    Ok(Json(MissingRoundsResponse {
+        missing_round_ids: missing_ids,
+        total,
+        has_more,
+        next_cursor: None, // Missing rounds use offset pagination only
+        page: params.page,
+        min_stored_round: min_stored,
+        max_stored_round: max_stored,
+    }))
+}
+
+/// GET /admin/rounds/stats - Get counts for each filter category
+#[derive(Debug, Serialize)]
+pub struct RoundStatsResponse {
+    pub total_rounds: u64,
+    pub missing_deployments_count: u64,
+    pub invalid_deployments_count: u64,
+    pub missing_rounds_count: u64,
+    pub min_stored_round: u64,
+    pub max_stored_round: u64,
+}
+
+pub async fn get_round_stats(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<RoundsWithDataQuery>,
+) -> Result<Json<RoundStatsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    let round_id_gte = params.round_id_gte;
+    let round_id_lte = params.round_id_lte;
+    
+    // Get all counts
+    let total_rounds = state.clickhouse
+        .get_rounds_count_filtered(round_id_gte, round_id_lte)
+        .await
+        .unwrap_or(0);
+    
+    let missing_deployments_count = state.clickhouse
+        .get_rounds_with_missing_deployments_count(round_id_gte, round_id_lte)
+        .await
+        .unwrap_or(0);
+    
+    let invalid_deployments_count = state.clickhouse
+        .get_rounds_with_invalid_deployments_count(round_id_gte, round_id_lte)
+        .await
+        .unwrap_or(0);
+    
+    let missing_rounds_count = state.clickhouse
+        .get_missing_round_ids_count(round_id_gte, round_id_lte)
+        .await
+        .unwrap_or(0);
+    
+    // Get min/max round IDs
+    let (min_stored, max_stored) = state.clickhouse
+        .get_missing_round_ids(None, None, None, 1) // Just to get the range
+        .await
+        .map(|(_, _, min, max)| (min, max))
+        .unwrap_or((0, 0));
+    
+    Ok(Json(RoundStatsResponse {
+        total_rounds,
+        missing_deployments_count,
+        invalid_deployments_count,
+        missing_rounds_count,
+        min_stored_round: min_stored,
+        max_stored_round: max_stored,
     }))
 }
 

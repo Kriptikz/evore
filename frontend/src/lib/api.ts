@@ -200,6 +200,27 @@ export interface RoundsWithDataResponse {
   page?: number;
 }
 
+export interface MissingRoundsResponse {
+  missing_round_ids: number[];
+  total: number;
+  has_more: boolean;
+  next_cursor?: number;
+  page?: number;
+  min_stored_round: number;
+  max_stored_round: number;
+}
+
+export interface RoundStatsResponse {
+  total_rounds: number;
+  missing_deployments_count: number;
+  invalid_deployments_count: number;
+  missing_rounds_count: number;
+  min_stored_round: number;
+  max_stored_round: number;
+}
+
+export type FilterMode = "all" | "missing_deployments" | "invalid_deployments";
+
 export interface RoundStatus {
   round_id: number;
   meta_fetched: boolean;
@@ -747,8 +768,12 @@ class ApiClient {
 
   // ========== Request Logs ==========
 
-  async getRequestLogs(hours = 24, limit = 100): Promise<{ hours: number; logs: RequestLogRow[] }> {
-    return this.request("GET", `/admin/requests/logs?hours=${hours}&limit=${limit}`, { requireAuth: true });
+  async getRequestLogs(hours = 24, limit = 100, ipHash?: string): Promise<{ hours: number; logs: RequestLogRow[] }> {
+    const params = new URLSearchParams();
+    params.set("hours", hours.toString());
+    params.set("limit", limit.toString());
+    if (ipHash) params.set("ip_hash", ipHash);
+    return this.request("GET", `/admin/requests/logs?${params.toString()}`, { requireAuth: true });
   }
 
   async getEndpointSummary(hours = 24): Promise<{ hours: number; endpoints: EndpointSummaryRow[] }> {
@@ -818,8 +843,7 @@ class ApiClient {
     before?: number;
     roundIdGte?: number;
     roundIdLte?: number;
-    missingDeploymentsOnly?: boolean;
-    invalidOnly?: boolean;
+    filterMode?: FilterMode;
   }): Promise<RoundsWithDataResponse> {
     const params = new URLSearchParams();
     if (options?.limit) params.set("limit", options.limit.toString());
@@ -827,10 +851,35 @@ class ApiClient {
     if (options?.before) params.set("before", options.before.toString());
     if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
     if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
-    if (options?.missingDeploymentsOnly) params.set("missing_deployments_only", "true");
-    if (options?.invalidOnly) params.set("invalid_only", "true");
+    if (options?.filterMode) params.set("filter_mode", options.filterMode);
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/admin/rounds/data${query}`, { requireAuth: true });
+  }
+  
+  async getMissingRounds(options?: {
+    limit?: number;
+    page?: number;
+    roundIdGte?: number;
+    roundIdLte?: number;
+  }): Promise<MissingRoundsResponse> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set("limit", options.limit.toString());
+    if (options?.page) params.set("page", options.page.toString());
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/admin/rounds/missing${query}`, { requireAuth: true });
+  }
+  
+  async getRoundStats(options?: {
+    roundIdGte?: number;
+    roundIdLte?: number;
+  }): Promise<RoundStatsResponse> {
+    const params = new URLSearchParams();
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/admin/rounds/stats${query}`, { requireAuth: true });
   }
 
   async bulkDeleteRounds(roundIds: number[], deleteRounds: boolean, deleteDeployments: boolean): Promise<BulkDeleteResponse> {

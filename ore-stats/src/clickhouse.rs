@@ -419,6 +419,288 @@ impl ClickHouseClient {
         Ok(count)
     }
     
+    /// Get rounds that have no deployments stored (missing deployment data)
+    pub async fn get_rounds_with_missing_deployments(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        before_round_id: Option<u64>,
+        offset: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<RoundRow>, bool), ClickHouseError> {
+        let mut conditions = vec!["total_deployed > 0".to_string()]; // Only care about rounds that should have deployments
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("r.round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("r.round_id <= {}", lte));
+        }
+        if let Some(before) = before_round_id {
+            conditions.push(format!("r.round_id < {}", before));
+        }
+        
+        let where_clause = conditions.join(" AND ");
+        let fetch_limit = limit + 1;
+        let skip = offset.unwrap_or(0);
+        
+        // Use LEFT JOIN to find rounds with no deployments
+        let query = format!(r#"
+            SELECT 
+                r.round_id,
+                r.start_slot,
+                r.end_slot,
+                r.winning_square,
+                r.top_miner,
+                r.top_miner_reward,
+                r.total_deployed,
+                r.total_vaulted,
+                r.total_winnings,
+                r.motherlode,
+                r.motherlode_hit,
+                r.total_deployments,
+                r.unique_miners,
+                r.source,
+                r.created_at
+            FROM rounds r
+            LEFT JOIN (
+                SELECT round_id, count() as dep_count
+                FROM deployments
+                GROUP BY round_id
+            ) d ON r.round_id = d.round_id
+            WHERE {} AND (d.dep_count IS NULL OR d.dep_count = 0)
+            ORDER BY r.round_id DESC
+            LIMIT {} OFFSET {}
+        "#, where_clause, fetch_limit, skip);
+        
+        let results: Vec<RoundRow> = self.client
+            .query(&query)
+            .fetch_all()
+            .await?;
+        
+        let has_more = results.len() > limit as usize;
+        let rounds: Vec<RoundRow> = results.into_iter().take(limit as usize).collect();
+        
+        Ok((rounds, has_more))
+    }
+    
+    /// Get rounds where deployment amounts don't match total_deployed (invalid data)
+    pub async fn get_rounds_with_invalid_deployments(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        before_round_id: Option<u64>,
+        offset: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<RoundRowWithDeploymentStats>, bool), ClickHouseError> {
+        let mut conditions = vec!["r.total_deployed > 0".to_string()]; // Only care about rounds that should have deployments
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("r.round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("r.round_id <= {}", lte));
+        }
+        if let Some(before) = before_round_id {
+            conditions.push(format!("r.round_id < {}", before));
+        }
+        
+        let where_clause = conditions.join(" AND ");
+        let fetch_limit = limit + 1;
+        let skip = offset.unwrap_or(0);
+        
+        // Join with deployments sum and filter for mismatches
+        let query = format!(r#"
+            SELECT 
+                r.round_id,
+                r.start_slot,
+                r.end_slot,
+                r.winning_square,
+                r.top_miner,
+                r.top_miner_reward,
+                r.total_deployed,
+                r.total_vaulted,
+                r.total_winnings,
+                r.motherlode,
+                r.motherlode_hit,
+                r.total_deployments,
+                r.unique_miners,
+                r.source,
+                r.created_at,
+                COALESCE(d.dep_count, 0) as deployment_count,
+                COALESCE(d.dep_sum, 0) as deployments_sum
+            FROM rounds r
+            LEFT JOIN (
+                SELECT round_id, count() as dep_count, sum(amount) as dep_sum
+                FROM deployments
+                GROUP BY round_id
+            ) d ON r.round_id = d.round_id
+            WHERE {} AND (
+                d.dep_count IS NULL OR d.dep_count = 0 OR d.dep_sum != r.total_deployed
+            )
+            ORDER BY r.round_id DESC
+            LIMIT {} OFFSET {}
+        "#, where_clause, fetch_limit, skip);
+        
+        let results: Vec<RoundRowWithDeploymentStats> = self.client
+            .query(&query)
+            .fetch_all()
+            .await?;
+        
+        let has_more = results.len() > limit as usize;
+        let rounds: Vec<RoundRowWithDeploymentStats> = results.into_iter().take(limit as usize).collect();
+        
+        Ok((rounds, has_more))
+    }
+    
+    /// Get missing round IDs (gaps between min and max stored round)
+    pub async fn get_missing_round_ids(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+        offset: Option<u32>,
+        limit: u32,
+    ) -> Result<(Vec<u64>, bool, u64, u64), ClickHouseError> {
+        // First get the range of round IDs
+        let range_query = "SELECT min(round_id) as min_id, max(round_id) as max_id FROM rounds";
+        let (min_id, max_id): (u64, u64) = self.client.query(range_query).fetch_one().await?;
+        
+        if min_id == 0 && max_id == 0 {
+            return Ok((vec![], false, 0, 0));
+        }
+        
+        // Apply filters if provided
+        let actual_min = round_id_gte.map(|g| g.max(min_id)).unwrap_or(min_id);
+        let actual_max = round_id_lte.map(|l| l.min(max_id)).unwrap_or(max_id);
+        
+        if actual_min > actual_max {
+            return Ok((vec![], false, min_id, max_id));
+        }
+        
+        let fetch_limit = limit + 1;
+        let skip = offset.unwrap_or(0);
+        
+        // Generate all expected IDs and find ones that don't exist
+        // Using numbers() table function to generate the range
+        let query = format!(r#"
+            SELECT n.number as missing_id
+            FROM numbers({}, {}) n
+            WHERE n.number NOT IN (
+                SELECT round_id FROM rounds WHERE round_id >= {} AND round_id <= {}
+            )
+            ORDER BY n.number DESC
+            LIMIT {} OFFSET {}
+        "#, actual_min, actual_max - actual_min + 1, actual_min, actual_max, fetch_limit, skip);
+        
+        let results: Vec<u64> = self.client
+            .query(&query)
+            .fetch_all()
+            .await?;
+        
+        let has_more = results.len() > limit as usize;
+        let missing_ids: Vec<u64> = results.into_iter().take(limit as usize).collect();
+        
+        Ok((missing_ids, has_more, min_id, max_id))
+    }
+    
+    /// Get count of rounds with missing deployments
+    pub async fn get_rounds_with_missing_deployments_count(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+    ) -> Result<u64, ClickHouseError> {
+        let mut conditions = vec!["total_deployed > 0".to_string()];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("r.round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("r.round_id <= {}", lte));
+        }
+        
+        let where_clause = conditions.join(" AND ");
+        
+        let query = format!(r#"
+            SELECT count()
+            FROM rounds r
+            LEFT JOIN (
+                SELECT round_id, count() as dep_count
+                FROM deployments
+                GROUP BY round_id
+            ) d ON r.round_id = d.round_id
+            WHERE {} AND (d.dep_count IS NULL OR d.dep_count = 0)
+        "#, where_clause);
+        
+        let count: u64 = self.client.query(&query).fetch_one().await?;
+        Ok(count)
+    }
+    
+    /// Get count of rounds with invalid deployments
+    pub async fn get_rounds_with_invalid_deployments_count(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+    ) -> Result<u64, ClickHouseError> {
+        let mut conditions = vec!["r.total_deployed > 0".to_string()];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("r.round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("r.round_id <= {}", lte));
+        }
+        
+        let where_clause = conditions.join(" AND ");
+        
+        let query = format!(r#"
+            SELECT count()
+            FROM rounds r
+            LEFT JOIN (
+                SELECT round_id, count() as dep_count, sum(amount) as dep_sum
+                FROM deployments
+                GROUP BY round_id
+            ) d ON r.round_id = d.round_id
+            WHERE {} AND (
+                d.dep_count IS NULL OR d.dep_count = 0 OR d.dep_sum != r.total_deployed
+            )
+        "#, where_clause);
+        
+        let count: u64 = self.client.query(&query).fetch_one().await?;
+        Ok(count)
+    }
+    
+    /// Get count of missing round IDs
+    pub async fn get_missing_round_ids_count(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+    ) -> Result<u64, ClickHouseError> {
+        let range_query = "SELECT min(round_id) as min_id, max(round_id) as max_id FROM rounds";
+        let (min_id, max_id): (u64, u64) = self.client.query(range_query).fetch_one().await?;
+        
+        if min_id == 0 && max_id == 0 {
+            return Ok(0);
+        }
+        
+        let actual_min = round_id_gte.map(|g| g.max(min_id)).unwrap_or(min_id);
+        let actual_max = round_id_lte.map(|l| l.min(max_id)).unwrap_or(max_id);
+        
+        if actual_min > actual_max {
+            return Ok(0);
+        }
+        
+        let query = format!(r#"
+            SELECT count()
+            FROM numbers({}, {}) n
+            WHERE n.number NOT IN (
+                SELECT round_id FROM rounds WHERE round_id >= {} AND round_id <= {}
+            )
+        "#, actual_min, actual_max - actual_min + 1, actual_min, actual_max);
+        
+        let count: u64 = self.client.query(&query).fetch_one().await?;
+        Ok(count)
+    }
+    
     /// Get total count of rounds in database.
     pub async fn get_rounds_count(&self) -> Result<u64, ClickHouseError> {
         let result: u64 = self.client
@@ -918,27 +1200,50 @@ impl ClickHouseClient {
     
     // ========== Request Logs Queries ==========
     
-    /// Get recent request logs.
-    pub async fn get_request_logs(&self, hours: u32, limit: u32) -> Result<Vec<RequestLogRow>, ClickHouseError> {
-        let results = self.client
-            .query(r#"
-                SELECT 
-                    timestamp,
-                    endpoint,
-                    method,
-                    status_code,
-                    duration_ms,
-                    ip_hash,
-                    user_agent
-                FROM request_logs
-                WHERE timestamp > now() - INTERVAL ? HOUR
-                ORDER BY timestamp DESC
-                LIMIT ?
-            "#)
-            .bind(hours)
-            .bind(limit)
-            .fetch_all()
-            .await?;
+    /// Get recent request logs, optionally filtered by IP hash.
+    pub async fn get_request_logs(&self, hours: u32, limit: u32, ip_hash: Option<&str>) -> Result<Vec<RequestLogRow>, ClickHouseError> {
+        let results = if let Some(ip) = ip_hash {
+            self.client
+                .query(r#"
+                    SELECT 
+                        timestamp,
+                        endpoint,
+                        method,
+                        status_code,
+                        duration_ms,
+                        ip_hash,
+                        user_agent
+                    FROM request_logs
+                    WHERE timestamp > now() - INTERVAL ? HOUR AND ip_hash = ?
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                "#)
+                .bind(hours)
+                .bind(ip)
+                .bind(limit)
+                .fetch_all()
+                .await?
+        } else {
+            self.client
+                .query(r#"
+                    SELECT 
+                        timestamp,
+                        endpoint,
+                        method,
+                        status_code,
+                        duration_ms,
+                        ip_hash,
+                        user_agent
+                    FROM request_logs
+                    WHERE timestamp > now() - INTERVAL ? HOUR
+                    ORDER BY timestamp DESC
+                    LIMIT ?
+                "#)
+                .bind(hours)
+                .bind(limit)
+                .fetch_all()
+                .await?
+        };
         Ok(results)
     }
     
@@ -1835,6 +2140,29 @@ pub struct RoundRow {
     pub source: String,
     #[serde(default)]
     pub created_at: i64,  // DateTime64(3) as unix timestamp
+}
+
+/// Round row with deployment statistics for invalid data queries.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RoundRowWithDeploymentStats {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub winning_square: u8,
+    pub top_miner: String,
+    pub top_miner_reward: u64,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub motherlode: u64,
+    pub motherlode_hit: u8,
+    pub total_deployments: u32,
+    pub unique_miners: u32,
+    pub source: String,
+    #[serde(default)]
+    pub created_at: i64,
+    pub deployment_count: u64,
+    pub deployments_sum: u64,
 }
 
 /// Deployment row for queries.

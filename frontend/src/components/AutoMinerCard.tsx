@@ -31,6 +31,7 @@ interface AutoMinerCardProps {
   miner?: MinerData;
   currentBoardRoundId?: bigint;
   isSelected?: boolean;
+  balanceLoading?: boolean;
   onToggleSelect?: () => void;
   onDeposit: (authId: bigint, amount: bigint) => Promise<string>;
   onClaimSol: () => Promise<string>;
@@ -77,6 +78,7 @@ export function AutoMinerCard({
   miner,
   currentBoardRoundId,
   isSelected = false,
+  balanceLoading = false,
   onToggleSelect,
   onDeposit,
   onClaimSol,
@@ -207,9 +209,16 @@ export function AutoMinerCard({
         {deployer && (
           <div className="text-right">
             <p className="text-xs text-zinc-500">Balance</p>
-            <p className={`text-lg font-bold ${balanceTooLow ? 'text-red-400' : 'text-yellow-400'}`}>
-              {formatSol(deployer.autodeployBalance)} SOL
-            </p>
+            {balanceLoading ? (
+              <div className="flex items-center justify-end gap-2">
+                <div className="w-4 h-4 border-2 border-yellow-400 border-t-transparent rounded-full animate-spin" />
+                <span className="text-sm text-zinc-500">Loading...</span>
+              </div>
+            ) : (
+              <p className={`text-lg font-bold ${balanceTooLow ? 'text-red-400' : 'text-yellow-400'}`}>
+                {formatSol(deployer.autodeployBalance)} SOL
+              </p>
+            )}
           </div>
         )}
       </div>

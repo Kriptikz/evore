@@ -613,17 +613,26 @@ pub struct IpActivityResponse {
     pub activity: Vec<crate::clickhouse::IpActivityRow>,
 }
 
-/// GET /admin/requests/logs?hours=24&limit=100
-/// Get recent request logs
+#[derive(Debug, Deserialize)]
+pub struct RequestLogsQuery {
+    #[serde(default = "default_hours")]
+    pub hours: u32,
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+    pub ip_hash: Option<String>,
+}
+
+/// GET /admin/requests/logs?hours=24&limit=100&ip_hash=xyz
+/// Get recent request logs, optionally filtered by IP hash
 pub async fn get_request_logs(
     State(state): State<Arc<AppState>>,
-    Query(params): Query<RpcMetricsQuery>,
+    Query(params): Query<RequestLogsQuery>,
 ) -> Result<Json<RequestLogsResponse>, (StatusCode, Json<AuthError>)> {
     let hours = params.hours;
     let limit = params.limit;
     
     let logs = state.clickhouse
-        .get_request_logs(hours, limit)
+        .get_request_logs(hours, limit, params.ip_hash.as_deref())
         .await
         .map_err(|e| {
             tracing::error!("Failed to get request logs: {}", e);
@@ -980,6 +989,8 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/backfill/deployments", post(crate::backfill::add_to_backfill_workflow))
         .route("/rounds/pending", get(crate::backfill::get_pending_rounds))
         .route("/rounds/data", get(crate::backfill::get_rounds_with_data))
+        .route("/rounds/missing", get(crate::backfill::get_missing_rounds))
+        .route("/rounds/stats", get(crate::backfill::get_round_stats))
         .route("/rounds/bulk-delete", post(crate::backfill::bulk_delete_rounds))
         .route("/rounds/{round_id}/status", get(crate::backfill::get_round_data_status))
         .route("/rounds/{round_id}", delete(crate::backfill::delete_round_data))

@@ -115,6 +115,7 @@ export function useEvore() {
 
   // Manual SOL balance fetching for auth PDAs (not cached on backend)
   const [authBalances, setAuthBalances] = useState<Map<string, bigint>>(new Map());
+  const [pendingBalances, setPendingBalances] = useState<Set<string>>(new Set());
   const balanceFetchQueueRef = useRef<string[]>([]);
   const balanceFetchingRef = useRef<boolean>(false);
 
@@ -169,6 +170,12 @@ export function useEvore() {
       const authPda = balanceFetchQueueRef.current.shift();
       if (authPda) {
         await fetchAuthBalance(authPda);
+        // Remove from pending set after fetch completes
+        setPendingBalances(prev => {
+          const next = new Set(prev);
+          next.delete(authPda);
+          return next;
+        });
         // Wait 1 second between fetches (rate limit)
         await new Promise(resolve => setTimeout(resolve, 1000));
       }
@@ -177,11 +184,36 @@ export function useEvore() {
     balanceFetchingRef.current = false;
   }, [fetchAuthBalance]);
   
-  // Queue auth PDAs for balance fetching
-  const queueAuthBalances = useCallback((authPdas: string[]) => {
+  // Queue auth PDAs for balance fetching, sorted by ORE descending
+  // Pass minerOreMap to sort by claimable ORE (highest first = loads top of list first)
+  const queueAuthBalances = useCallback((authPdas: string[], minerOreMap?: Map<string, bigint>) => {
     // Only queue PDAs we haven't fetched yet
     const newPdas = authPdas.filter(pda => !authBalances.has(pda));
-    balanceFetchQueueRef.current = Array.from(new Set([...balanceFetchQueueRef.current, ...newPdas]));
+    
+    // Add to pending set
+    if (newPdas.length > 0) {
+      setPendingBalances(prev => {
+        const next = new Set(prev);
+        newPdas.forEach(pda => next.add(pda));
+        return next;
+      });
+    }
+    
+    // Merge with existing queue and dedupe
+    const combined = Array.from(new Set([...balanceFetchQueueRef.current, ...newPdas]));
+    
+    // Sort by ORE balance (highest first) if minerOreMap provided
+    if (minerOreMap && minerOreMap.size > 0) {
+      combined.sort((a, b) => {
+        const oreA = minerOreMap.get(a) ?? BigInt(0);
+        const oreB = minerOreMap.get(b) ?? BigInt(0);
+        if (oreB > oreA) return 1;
+        if (oreB < oreA) return -1;
+        return 0;
+      });
+    }
+    
+    balanceFetchQueueRef.current = combined;
     processBalanceQueue();
   }, [authBalances, processBalanceQueue]);
 
@@ -306,10 +338,30 @@ export function useEvore() {
       setDeployers(newDeployers);
       setMiners(newMiners);
       
-      // Queue auth PDAs for manual balance fetching
+      // Build a map of auth PDA -> claimable ORE for sorting
+      // This ensures balances are fetched top-to-bottom in the sorted list
+      const minerOreMap = new Map<string, bigint>();
+      for (const [minerKey, miner] of Array.from(newMiners.entries())) {
+        const claimableOre = miner.rewardsOre + miner.refinedOre;
+        // minerKey is "managerAddress-authId", get the auth PDA
+        const parts = minerKey.split("-");
+        if (parts.length >= 2) {
+          const managerAddr = new PublicKey(parts[0]);
+          const authId = BigInt(parts[1]);
+          const [authPda] = getManagedMinerAuthPda(managerAddr, authId);
+          const authPdaStr = authPda.toBase58();
+          // Use max if multiple miners map to same auth PDA (shouldn't happen, but just in case)
+          const existing = minerOreMap.get(authPdaStr) ?? BigInt(0);
+          if (claimableOre > existing) {
+            minerOreMap.set(authPdaStr, claimableOre);
+          }
+        }
+      }
+      
+      // Queue auth PDAs for manual balance fetching, sorted by claimable ORE
       if (authPdasToFetch.length > 0) {
         console.log(`[useEvore] Queuing ${authPdasToFetch.length} auth PDAs for balance fetching:`, authPdasToFetch);
-        queueAuthBalances(authPdasToFetch);
+        queueAuthBalances(authPdasToFetch, minerOreMap);
       }
     } catch (err) {
       console.error("Error fetching my miners:", err);
@@ -847,6 +899,7 @@ export function useEvore() {
     board,
     walletBalance,
     loading,
+    pendingBalances,
     error,
     fetchManagers,
     fetchDeployers,
