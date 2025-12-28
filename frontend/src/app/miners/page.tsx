@@ -134,7 +134,7 @@ export default function MinersPage() {
             <div>
               <label className="block text-sm text-slate-400 mb-2">Sort By</label>
               <div className="flex flex-wrap gap-2">
-                {(["refined_ore", "unclaimed_ore", "lifetime_sol", "lifetime_ore"] as SortByType[]).map((s) => (
+                {(["unclaimed_ore", "refined_ore", "lifetime_sol", "lifetime_ore"] as SortByType[]).map((s) => (
                   <button
                     key={s}
                     onClick={() => handleSortChange(s)}
@@ -219,10 +219,10 @@ export default function MinersPage() {
                         Miner
                       </th>
                       <th className="px-6 py-4 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
-                        Refined ORE
+                        Unclaimed ORE
                       </th>
                       <th className="px-6 py-4 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
-                        Unclaimed ORE
+                        Refined ORE
                       </th>
                       <th className="px-6 py-4 text-right text-xs font-medium text-slate-400 uppercase tracking-wider">
                         Lifetime SOL
@@ -252,11 +252,11 @@ export default function MinersPage() {
                             {truncateAddress(entry.miner_pubkey)}
                           </Link>
                         </td>
-                        <td className={`px-6 py-4 text-right font-mono ${sortBy === "refined_ore" ? "text-amber-400 font-medium" : "text-white"}`}>
-                          {formatOre(entry.refined_ore)}
-                        </td>
                         <td className={`px-6 py-4 text-right font-mono ${sortBy === "unclaimed_ore" ? "text-amber-400 font-medium" : "text-white"}`}>
                           {formatOre(entry.unclaimed_ore)}
+                        </td>
+                        <td className={`px-6 py-4 text-right font-mono ${sortBy === "refined_ore" ? "text-amber-400 font-medium" : "text-white"}`}>
+                          {formatOre(entry.refined_ore)}
                         </td>
                         <td className={`px-6 py-4 text-right font-mono ${sortBy === "lifetime_sol" ? "text-amber-400 font-medium" : "text-white"}`}>
                           {formatSol(entry.lifetime_sol)}

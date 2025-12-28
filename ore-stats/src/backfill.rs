@@ -538,19 +538,36 @@ pub async fn backfill_round_deployments(
         round_id, raw_transactions.len()
     );
     
+    // Log first transaction raw_json length to check if it's actually stored
+    if let Some(first) = raw_transactions.first() {
+        tracing::info!(
+            "Round {} backfill: first tx sig={}, raw_json len={}",
+            round_id, first.signature, first.raw_json.len()
+        );
+    }
+    
     // Parse raw_json back to Value for processing
     let mut all_transactions: Vec<serde_json::Value> = Vec::new();
+    let mut parse_errors = 0;
     for raw_tx in &raw_transactions {
         match serde_json::from_str(&raw_tx.raw_json) {
             Ok(tx) => all_transactions.push(tx),
             Err(e) => {
-                tracing::warn!(
-                    "Failed to parse stored transaction {}: {}",
-                    raw_tx.signature, e
-                );
+                parse_errors += 1;
+                if parse_errors <= 3 {
+                    tracing::warn!(
+                        "Failed to parse stored transaction {}: {}",
+                        raw_tx.signature, e
+                    );
+                }
             }
         }
     }
+    
+    tracing::info!(
+        "Round {} backfill: parsed {}/{} transactions successfully (errors: {})",
+        round_id, all_transactions.len(), raw_transactions.len(), parse_errors
+    );
     
     if all_transactions.is_empty() {
         return Ok(BackfillDeploymentsResponse {
@@ -564,9 +581,19 @@ pub async fn backfill_round_deployments(
     }
     
     // Parse deployments from transactions
+    tracing::info!(
+        "Round {} backfill: looking for deployments matching round PDA {}",
+        round_id, round_pda
+    );
+    
     let helius = state.helius.read().await;
     let parsed_deployments = helius.parse_deployments_from_round_page(&round_pda, &all_transactions)
         .map_err(|e| format!("Failed to parse deployments: {}", e))?;
+    
+    tracing::info!(
+        "Round {} backfill: parse_deployments_from_round_page returned {} deployments",
+        round_id, parsed_deployments.len()
+    );
     
     if parsed_deployments.is_empty() {
         return Ok(BackfillDeploymentsResponse {

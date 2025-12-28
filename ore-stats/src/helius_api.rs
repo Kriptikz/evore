@@ -786,6 +786,9 @@ impl HeliusApi {
         txs: &[Value],
     ) -> Result<Vec<ParsedDeployment>, HeliusError> {
         let mut out = Vec::new();
+        let mut skipped_no_deploy = 0;
+        let mut skipped_wrong_round = 0;
+        let mut deploy_found = 0;
 
         for tx in txs {
             // Skip failed transactions (we also filter status=succeeded in the RPC call,
@@ -925,13 +928,17 @@ impl HeliusApi {
             };
 
             // OUTER instructions
+            let mut tx_has_deploy = false;
             if let Some(ixs) = message
                 .get("instructions")
                 .and_then(Value::as_array)
             {
                 for ix in ixs {
                     if let Some(decoded) = decode_ore_deploy_ix(ix, &account_keys)? {
+                        tx_has_deploy = true;
+                        deploy_found += 1;
                         if decoded.round_pda != expected_round_pda {
+                            skipped_wrong_round += 1;
                             continue;
                         }
 
@@ -1047,7 +1054,16 @@ impl HeliusApi {
                     }
                 }
             }
+            
+            if !tx_has_deploy {
+                skipped_no_deploy += 1;
+            }
         }
+
+        tracing::info!(
+            "parse_deployments_from_round_page: txs={}, deploys_found={}, wrong_round={}, no_deploy={}, matched={}",
+            txs.len(), deploy_found, skipped_wrong_round, skipped_no_deploy, out.len()
+        );
 
         Ok(out)
     }

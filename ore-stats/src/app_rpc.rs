@@ -121,13 +121,21 @@ impl AppRpc {
             .with_batch(ctx.batch_size)
             .success(duration_ms, result_count, response_size);
             
+            tracing::debug!(
+                "Logging RPC metric: method={} target_type={} result_count={} duration_ms={}",
+                ctx.method, ctx.target_type, result_count, duration_ms
+            );
+            
             // Fire and forget - don't block on metrics logging
             let ch = ch.clone();
+            let method = ctx.method.clone();
             tokio::spawn(async move {
                 if let Err(e) = ch.insert_rpc_metric(insert).await {
-                    tracing::warn!("Failed to log RPC metrics: {}", e);
+                    tracing::error!("Failed to log RPC metric for {}: {}", method, e);
                 }
             });
+        } else {
+            tracing::debug!("No ClickHouse client - skipping RPC metric for {}", ctx.method);
         }
     }
     

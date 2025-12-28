@@ -147,7 +147,12 @@ pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
                             );
                         }
                     } else {
-                        tracing::warn!("No snapshot available for round {} finalization", last_round_id);
+                        tracing::error!(
+                            "CRITICAL: Failed to capture snapshot for round {}! \
+                             GPA miners snapshot failed after all retries. \
+                             Round will need to be reconstructed via admin panel.",
+                            last_round_id
+                        );
                     }
                     
                     // Clear deployment tracking for new round

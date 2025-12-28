@@ -43,16 +43,54 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     drop(round_cache);
     
     // === STEP 1: IMMEDIATELY take GPA miners snapshot (source of truth) ===
+    // This is CRITICAL - we have ~15 seconds before the next round starts
+    // and miners deploy again (updating their round_id). Use the full window!
     tracing::info!("Round {} ending - taking GPA miners snapshot IMMEDIATELY...", round_id);
     
     // Get treasury for refined_ore calculation
     let treasury_cache = state.treasury_cache.read().await;
-    let treasury_for_gpa = treasury_cache.as_ref();
+    let treasury_for_gpa = treasury_cache.clone();
+    drop(treasury_cache);
     
     // Store ALL miners from GPA (for full historical tracking ~1/min)
     // and also filter for round deployers for deployment processing
-    let (all_gpa_miners, gpa_miners) = match state.rpc.get_all_miners_gpa(treasury_for_gpa).await {
-        Ok(miners) => {
+    let mut gpa_result: Option<HashMap<String, Miner>> = None;
+    let max_retries = 7;
+    
+    for attempt in 1..=max_retries {
+        match state.rpc.get_all_miners_gpa(treasury_for_gpa.as_ref()).await {
+            Ok(miners) => {
+                tracing::info!(
+                    "GPA snapshot attempt {}/{}: fetched {} miners",
+                    attempt, max_retries, miners.len()
+                );
+                gpa_result = Some(miners);
+                break;
+            }
+            Err(e) => {
+                tracing::error!(
+                    "GPA snapshot attempt {}/{} failed: {}",
+                    attempt, max_retries, e
+                );
+                
+                if attempt < max_retries {
+                    // Use the full ~15 second window with 7 attempts
+                    // Delays: 1s, 1.5s, 2s, 2s, 2s, 2s = ~10.5s total between retries
+                    // Plus ~0.5s per attempt overhead = fits in ~15s window
+                    let delay = if attempt <= 2 {
+                        Duration::from_millis(500 + 500 * attempt as u64) // 1s, 1.5s
+                    } else {
+                        Duration::from_secs(2) // 2s for remaining attempts
+                    };
+                    tracing::info!("Retrying GPA snapshot in {:?}...", delay);
+                    tokio::time::sleep(delay).await;
+                }
+            }
+        }
+    }
+    
+    let (all_gpa_miners, gpa_miners) = match gpa_result {
+        Some(miners) => {
             let total_count = miners.len();
             let all_miners = miners.clone();
             let round_miners: HashMap<String, Miner> = miners
@@ -60,19 +98,22 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
                 .filter(|(_, m)| m.round_id == round_id)
                 .collect();
             tracing::info!(
-                "GPA snapshot: {} total miners, {} with round_id={}",
+                "GPA snapshot SUCCESS: {} total miners, {} with round_id={}",
                 total_count,
                 round_miners.len(),
                 round_id
             );
             (all_miners, round_miners)
         }
-        Err(e) => {
-            tracing::error!("Failed to get GPA miners snapshot: {}. Will fall back to cache.", e);
-            (HashMap::new(), HashMap::new())
+        None => {
+            tracing::error!(
+                "CRITICAL: All {} GPA snapshot attempts failed for round {}! Round will have incomplete data.",
+                max_retries, round_id
+            );
+            // Return None to signal failure - caller should handle this
+            return None;
         }
     };
-    drop(treasury_cache);
     
     // === STEP 2: Log WebSocket pending_deployments count ===
     let ws_deployments = state.pending_deployments.read().await.clone();
