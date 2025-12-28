@@ -112,7 +112,7 @@ export function useEvore() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const refreshIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  
+
   // Manual SOL balance fetching for auth PDAs (not cached on backend)
   const [authBalances, setAuthBalances] = useState<Map<string, bigint>>(new Map());
   const balanceFetchQueueRef = useRef<string[]>([]);
@@ -144,8 +144,8 @@ export function useEvore() {
       const res = await fetch(`${API_BASE}/balance/${authPda}`);
       if (!res.ok) {
         console.error(`[useEvore] Failed to fetch balance for ${authPda}: ${res.status}`);
-        return;
-      }
+      return;
+    }
       const data = await res.json();
       console.log(`[useEvore] Got balance for ${authPda}: ${data.lamports} lamports`);
       setAuthBalances(prev => {
@@ -181,7 +181,7 @@ export function useEvore() {
   const queueAuthBalances = useCallback((authPdas: string[]) => {
     // Only queue PDAs we haven't fetched yet
     const newPdas = authPdas.filter(pda => !authBalances.has(pda));
-    balanceFetchQueueRef.current = [...new Set([...balanceFetchQueueRef.current, ...newPdas])];
+    balanceFetchQueueRef.current = Array.from(new Set([...balanceFetchQueueRef.current, ...newPdas]));
     processBalanceQueue();
   }, [authBalances, processBalanceQueue]);
 
