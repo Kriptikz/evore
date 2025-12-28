@@ -1497,7 +1497,12 @@ impl ClickHouseClient {
     /// Get all raw transactions for a round (for reconstruction).
     pub async fn get_raw_transactions_for_round(&self, round_id: u64) -> Result<Vec<RawTransaction>, ClickHouseError> {
         let results = self.client
-            .query("SELECT * FROM raw_transactions FINAL WHERE round_id = ? ORDER BY slot ASC")
+            .query(
+                "SELECT signature, slot, block_time, round_id, tx_type, raw_json, signer, authority 
+                 FROM raw_transactions FINAL 
+                 WHERE round_id = ? 
+                 ORDER BY slot ASC"
+            )
             .bind(round_id)
             .fetch_all()
             .await?;
