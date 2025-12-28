@@ -50,7 +50,7 @@ export default function AutoMinersPage() {
   const getMinerForManager = (managerAddress: PublicKey) => {
     const prefix = managerAddress.toBase58();
     // Find any miner key that starts with this manager address
-    for (const [key, miner] of miners.entries()) {
+    for (const [key, miner] of Array.from(miners.entries())) {
       if (key.startsWith(prefix + "-")) {
         return miner;
       }
@@ -62,7 +62,7 @@ export default function AutoMinersPage() {
   const getAllMinersForManager = (managerAddress: PublicKey) => {
     const prefix = managerAddress.toBase58();
     const result: typeof miners extends Map<string, infer V> ? V[] : never[] = [];
-    for (const [key, miner] of miners.entries()) {
+    for (const [key, miner] of Array.from(miners.entries())) {
       if (key.startsWith(prefix + "-")) {
         result.push(miner);
       }
