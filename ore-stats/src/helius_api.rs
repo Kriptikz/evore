@@ -795,15 +795,22 @@ impl HeliusApi {
                 continue;
             }
 
-            let meta = tx
-                .get("meta")
-                .ok_or_else(|| HeliusError::Decode("missing meta".into()))?;
+            let meta = match tx.get("meta") {
+                Some(m) => m,
+                None => {
+                    tracing::warn!("Skipping tx: missing meta");
+                    continue;
+                }
+            };
 
             // Slot
-            let slot = tx
-                .get("slot")
-                .and_then(Value::as_u64)
-                .ok_or_else(|| HeliusError::Decode("missing slot".into()))?;
+            let slot = match tx.get("slot").and_then(Value::as_u64) {
+                Some(s) => s,
+                None => {
+                    tracing::warn!("Skipping tx: missing slot");
+                    continue;
+                }
+            };
 
             // Signature (first one)
             let signature = tx
@@ -816,59 +823,96 @@ impl HeliusApi {
                 .to_string();
 
             // Message + account keys
-            let message = tx
-                .get("transaction")
-                .and_then(|t| t.get("message"))
-                .ok_or_else(|| HeliusError::Decode("missing message".into()))?;
+            let message = match tx.get("transaction").and_then(|t| t.get("message")) {
+                Some(m) => m,
+                None => {
+                    tracing::warn!("Skipping tx {}: missing message", signature);
+                    continue;
+                }
+            };
 
-            let account_keys_json = message
-                .get("accountKeys")
-                .and_then(Value::as_array)
-                .ok_or_else(|| HeliusError::Decode("missing accountKeys".into()))?;
+            let account_keys_json = match message.get("accountKeys").and_then(Value::as_array) {
+                Some(keys) => keys,
+                None => {
+                    tracing::warn!("Skipping tx {}: missing accountKeys", signature);
+                    continue;
+                }
+            };
 
             let mut account_keys = Vec::with_capacity(account_keys_json.len());
+            let mut skip_tx = false;
             for k in account_keys_json {
-                let s = k
-                    .as_str()
-                    .ok_or_else(|| HeliusError::Decode("account key not string".into()))?;
-                let pk = Pubkey::try_from(s)
-                    .map_err(|_| HeliusError::Decode("invalid pubkey".into()))?;
-                account_keys.push(pk);
+                match k.as_str().and_then(|s| Pubkey::try_from(s).ok()) {
+                    Some(pk) => account_keys.push(pk),
+                    None => {
+                        tracing::warn!("Skipping tx {}: invalid account key", signature);
+                        skip_tx = true;
+                        break;
+                    }
+                }
+            }
+            if skip_tx {
+                continue;
             }
 
             // Balances
-            let pre_balances_json = meta
-                .get("preBalances")
-                .and_then(Value::as_array)
-                .ok_or_else(|| HeliusError::Decode("missing preBalances".into()))?;
+            let pre_balances_json = match meta.get("preBalances").and_then(Value::as_array) {
+                Some(b) => b,
+                None => {
+                    tracing::warn!("Skipping tx {}: missing preBalances", signature);
+                    continue;
+                }
+            };
 
-            let post_balances_json = meta
-                .get("postBalances")
-                .and_then(Value::as_array)
-                .ok_or_else(|| HeliusError::Decode("missing postBalances".into()))?;
+            let post_balances_json = match meta.get("postBalances").and_then(Value::as_array) {
+                Some(b) => b,
+                None => {
+                    tracing::warn!("Skipping tx {}: missing postBalances", signature);
+                    continue;
+                }
+            };
 
             if pre_balances_json.len() != post_balances_json.len()
                 || pre_balances_json.len() != account_keys.len()
             {
-                return Err(HeliusError::Decode(
-                    "pre/post balances length mismatch with accountKeys".into(),
-                ));
+                // Skip this transaction instead of failing - data may be corrupted or different format
+                tracing::warn!(
+                    "Skipping tx with balance mismatch: preBalances={}, postBalances={}, accountKeys={}",
+                    pre_balances_json.len(), post_balances_json.len(), account_keys.len()
+                );
+                continue;
             }
 
             let mut pre_balances: Vec<u64> = Vec::with_capacity(pre_balances_json.len());
             let mut post_balances: Vec<u64> = Vec::with_capacity(post_balances_json.len());
+            let mut balance_parse_error = false;
 
             for v in pre_balances_json {
-                let n = v
-                    .as_u64()
-                    .ok_or_else(|| HeliusError::Decode("preBalance not u64".into()))?;
-                pre_balances.push(n);
+                match v.as_u64() {
+                    Some(n) => pre_balances.push(n),
+                    None => {
+                        tracing::warn!("Skipping tx {}: preBalance not u64", signature);
+                        balance_parse_error = true;
+                        break;
+                    }
+                }
             }
+            if balance_parse_error {
+                continue;
+            }
+            
             for v in post_balances_json {
-                let n = v
-                    .as_u64()
-                    .ok_or_else(|| HeliusError::Decode("postBalance not u64".into()))?;
-                post_balances.push(n);
+                match v.as_u64() {
+                    Some(n) => post_balances.push(n),
+                    None => {
+                        tracing::warn!("Skipping tx {}: postBalance not u64", signature);
+                        balance_parse_error = true;
+                        break;
+                    }
+                }
+            }
+            if balance_parse_error {
+                continue;
             }
 
             // Helper to get lamport delta for an account index in the message

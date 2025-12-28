@@ -354,42 +354,118 @@ pub async fn get_pending_rounds(
 }
 
 /// POST /admin/fetch-txns/{round_id}
-/// Fetch transactions for a round via Helius v2 API
+/// Fetch transactions for a round via Helius v2 API and store to ClickHouse
 pub async fn fetch_round_transactions(
     State(state): State<Arc<AppState>>,
     Path(round_id): Path<u64>,
 ) -> Result<Json<FetchTxnsResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::clickhouse::RawTransaction;
+    
     tracing::info!("Fetching transactions for round {}", round_id);
     
-    // Use Helius to fetch transactions for the round
-    let mut helius = state.helius.write().await;
+    // Fetch all pages of transactions
+    let mut all_transactions = Vec::new();
+    let mut pagination_token: Option<String> = None;
+    let mut page_count = 0u32;
     
-    let result = helius.get_transactions_for_round(round_id, None).await;
-    
-    match result {
-        Ok(page) => {
-            let tx_count = page.transactions.len() as u32;
-            
-            // Store raw transactions to ClickHouse
-            // TODO: Implement raw transaction storage
-            
-            // Update PostgreSQL status
-            update_round_status_txns_fetched(&state.postgres, round_id, tx_count as i32).await;
-            
-            Ok(Json(FetchTxnsResponse {
-                round_id,
-                transactions_fetched: tx_count,
-                status: "success".to_string(),
-            }))
-        }
-        Err(e) => {
-            tracing::error!("Failed to fetch transactions for round {}: {}", round_id, e);
-            Err((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ErrorResponse { error: format!("Helius error: {}", e) }),
-            ))
+    loop {
+        let mut helius = state.helius.write().await;
+        let result = helius.get_transactions_for_round(round_id, pagination_token.clone()).await;
+        
+        match result {
+            Ok(page) => {
+                let tx_count = page.transactions.len();
+                all_transactions.extend(page.transactions);
+                page_count += 1;
+                
+                tracing::info!(
+                    "Round {} fetch: page {} with {} transactions (total: {})",
+                    round_id, page_count, tx_count, all_transactions.len()
+                );
+                
+                if page.pagination_token.is_none() {
+                    break;
+                }
+                pagination_token = page.pagination_token;
+                
+                // Safety limit
+                if page_count > 100 {
+                    tracing::warn!("Round {} fetch: hit page limit", round_id);
+                    break;
+                }
+            }
+            Err(e) => {
+                tracing::error!("Failed to fetch transactions for round {}: {}", round_id, e);
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ErrorResponse { error: format!("Helius error: {}", e) }),
+                ));
+            }
         }
     }
+    
+    // Convert to RawTransaction for storage
+    let mut raw_txs: Vec<RawTransaction> = Vec::new();
+    
+    for tx in &all_transactions {
+        let signature = tx
+            .get("transaction")
+            .and_then(|t| t.get("signatures"))
+            .and_then(|s| s.as_array())
+            .and_then(|sigs| sigs.get(0))
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        
+        let slot = tx.get("slot").and_then(|s| s.as_u64()).unwrap_or(0);
+        let block_time = tx.get("blockTime").and_then(|t| t.as_i64()).unwrap_or(0);
+        
+        // Get signer from first account
+        let signer = tx
+            .get("transaction")
+            .and_then(|t| t.get("message"))
+            .and_then(|m| m.get("accountKeys"))
+            .and_then(|a| a.as_array())
+            .and_then(|keys| keys.get(0))
+            .and_then(|k| k.as_str())
+            .unwrap_or_default()
+            .to_string();
+        
+        raw_txs.push(RawTransaction {
+            signature,
+            slot,
+            block_time,
+            round_id,
+            tx_type: "deploy".to_string(),
+            raw_json: tx.to_string(),
+            signer,
+            authority: String::new(), // Will be parsed during reconstruction
+        });
+    }
+    
+    let tx_count = raw_txs.len() as u32;
+    
+    // Store to ClickHouse
+    if !raw_txs.is_empty() {
+        if let Err(e) = state.clickhouse.insert_raw_transactions(raw_txs).await {
+            tracing::error!("Failed to store raw transactions: {}", e);
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ErrorResponse { error: format!("Failed to store transactions: {}", e) }),
+            ));
+        }
+    }
+    
+    // Update PostgreSQL status
+    update_round_status_txns_fetched(&state.postgres, round_id, tx_count as i32).await;
+    
+    tracing::info!("Round {} fetch complete: {} transactions stored", round_id, tx_count);
+    
+    Ok(Json(FetchTxnsResponse {
+        round_id,
+        transactions_fetched: tx_count,
+        status: "success".to_string(),
+    }))
 }
 
 /// POST /admin/reconstruct/{round_id}
@@ -419,7 +495,7 @@ pub async fn reconstruct_round(
 /// Backfill deployments for a single round
 /// 
 /// Flow:
-/// 1. Fetch all transactions for the round (with pagination)
+/// 1. Get stored transactions from ClickHouse
 /// 2. Parse deploy instructions from transactions
 /// 3. Build and store deployment records to ClickHouse
 pub async fn backfill_round_deployments(
@@ -442,45 +518,48 @@ pub async fn backfill_round_deployments(
     // Derive the round PDA
     let (round_pda, _) = evore::ore_api::round_pda(round_id);
     
-    // Fetch all transactions for this round
-    let mut all_transactions = Vec::new();
-    let mut pagination_token: Option<String> = None;
-    let mut page_count = 0u32;
+    // Get stored transactions from ClickHouse
+    let raw_transactions = state.clickhouse.get_raw_transactions_for_round(round_id).await
+        .map_err(|e| format!("Failed to get stored transactions: {}", e))?;
     
-    loop {
-        let mut helius = state.helius.write().await;
-        let page = helius.get_transactions_for_round(round_id, pagination_token.clone()).await
-            .map_err(|e| format!("Failed to fetch transactions page {}: {}", page_count, e))?;
-        
-        let tx_count = page.transactions.len();
-        all_transactions.extend(page.transactions);
-        page_count += 1;
-        
-        tracing::info!(
-            "Round {} backfill: fetched page {} with {} transactions (total: {})",
-            round_id, page_count, tx_count, all_transactions.len()
-        );
-        
-        if page.pagination_token.is_none() {
-            break;
-        }
-        pagination_token = page.pagination_token;
-        
-        // Safety limit
-        if page_count > 100 {
-            tracing::warn!("Round {} backfill: hit page limit", round_id);
-            break;
+    if raw_transactions.is_empty() {
+        return Ok(BackfillDeploymentsResponse {
+            round_id,
+            transactions_fetched: 0,
+            deployments_found: 0,
+            deployments_stored: 0,
+            status: "no_transactions_stored".to_string(),
+            error: Some("No transactions stored. Run fetch-txns first.".to_string()),
+        });
+    }
+    
+    tracing::info!(
+        "Round {} backfill: found {} stored transactions",
+        round_id, raw_transactions.len()
+    );
+    
+    // Parse raw_json back to Value for processing
+    let mut all_transactions: Vec<serde_json::Value> = Vec::new();
+    for raw_tx in &raw_transactions {
+        match serde_json::from_str(&raw_tx.raw_json) {
+            Ok(tx) => all_transactions.push(tx),
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to parse stored transaction {}: {}",
+                    raw_tx.signature, e
+                );
+            }
         }
     }
     
     if all_transactions.is_empty() {
         return Ok(BackfillDeploymentsResponse {
             round_id,
-            transactions_fetched: 0,
+            transactions_fetched: raw_transactions.len() as u32,
             deployments_found: 0,
             deployments_stored: 0,
-            status: "no_transactions".to_string(),
-            error: None,
+            status: "parse_error".to_string(),
+            error: Some("Failed to parse any stored transactions".to_string()),
         });
     }
     
