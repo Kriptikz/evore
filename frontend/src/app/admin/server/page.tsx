@@ -123,89 +123,11 @@ export default function ServerMetricsPage() {
         {timeseries.length > 0 && (
           <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
             <h2 className="text-lg font-semibold text-white mb-4">Requests Per Minute</h2>
-            <div className="relative" style={{ height: chartHeight + 40 }}>
-              {/* Y-axis labels */}
-              <div className="absolute left-0 top-0 h-full w-12 flex flex-col justify-between text-xs text-slate-500">
-                <span>{formatNumber(maxRequests)}</span>
-                <span>{formatNumber(Math.round(maxRequests / 2))}</span>
-                <span>0</span>
-              </div>
-              
-              {/* Chart area */}
-              <div className="ml-14 relative" style={{ height: chartHeight }}>
-                {/* Grid lines */}
-                <div className="absolute inset-0 flex flex-col justify-between pointer-events-none">
-                  <div className="border-b border-slate-700/50" />
-                  <div className="border-b border-slate-700/50" />
-                  <div className="border-b border-slate-700/50" />
-                </div>
-                
-                {/* Bars */}
-                <div className="flex items-end h-full gap-px">
-                  {timeseries.map((point, i) => {
-                    const height = (point.request_count / maxRequests) * 100;
-                    const successHeight = (point.success_count / maxRequests) * 100;
-                    const errorHeight = (point.error_count / maxRequests) * 100;
-                    
-                    return (
-                      <div 
-                        key={i} 
-                        className="flex-1 flex flex-col justify-end group relative"
-                        style={{ minWidth: 2, maxWidth: 8 }}
-                      >
-                        {/* Tooltip */}
-                        <div className="absolute bottom-full mb-2 left-1/2 -translate-x-1/2 hidden group-hover:block z-10">
-                          <div className="bg-slate-900 border border-slate-700 rounded px-2 py-1 text-xs whitespace-nowrap">
-                            <div className="text-slate-400">
-                              {new Date(point.minute_ts * 1000).toLocaleTimeString()}
-                            </div>
-                            <div className="text-white font-semibold">{point.request_count} req</div>
-                            <div className="text-green-400">{point.success_count} success</div>
-                            <div className="text-red-400">{point.error_count} errors</div>
-                            <div className="text-yellow-400">{point.avg_latency_ms.toFixed(1)}ms</div>
-                          </div>
-                        </div>
-                        
-                        {/* Bar with error portion on top */}
-                        <div 
-                          className="w-full bg-green-500/60 rounded-t-sm"
-                          style={{ height: `${successHeight}%` }}
-                        />
-                        {errorHeight > 0 && (
-                          <div 
-                            className="w-full bg-red-500"
-                            style={{ height: `${errorHeight}%` }}
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-              
-              {/* X-axis labels */}
-              <div className="ml-14 flex justify-between text-xs text-slate-500 mt-2">
-                {timeseries.length > 0 && (
-                  <>
-                    <span>{new Date(timeseries[0].minute_ts * 1000).toLocaleTimeString()}</span>
-                    <span>{new Date(timeseries[Math.floor(timeseries.length / 2)]?.minute_ts * 1000).toLocaleTimeString()}</span>
-                    <span>{new Date(timeseries[timeseries.length - 1].minute_ts * 1000).toLocaleTimeString()}</span>
-                  </>
-                )}
-              </div>
-            </div>
-            
-            {/* Legend */}
-            <div className="flex gap-4 mt-3 text-xs text-slate-400">
-              <div className="flex items-center gap-1">
-                <div className="w-3 h-3 bg-green-500/60 rounded-sm" />
-                <span>Success</span>
-              </div>
-              <div className="flex items-center gap-1">
-                <div className="w-3 h-3 bg-red-500 rounded-sm" />
-                <span>Errors</span>
-              </div>
-            </div>
+            <RequestsChart 
+              data={timeseries} 
+              height={chartHeight} 
+              maxRequests={maxRequests}
+            />
           </div>
         )}
 
@@ -327,4 +249,206 @@ function formatNumber(num: number): string {
   if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M";
   if (num >= 1_000) return (num / 1_000).toFixed(1) + "K";
   return num.toString();
+}
+
+// SVG Line Chart Component
+function RequestsChart({ 
+  data, 
+  height, 
+  maxRequests 
+}: { 
+  data: RequestsPerMinuteRow[]; 
+  height: number; 
+  maxRequests: number;
+}) {
+  const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
+  
+  if (data.length === 0) return null;
+  
+  const width = 800; // Will be scaled by viewBox
+  const padding = { top: 20, right: 20, bottom: 30, left: 50 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  
+  // Generate path for the line
+  const getX = (index: number) => padding.left + (index / (data.length - 1)) * chartWidth;
+  const getY = (value: number) => padding.top + chartHeight - (value / maxRequests) * chartHeight;
+  
+  // Create line path for total requests
+  const linePath = data.map((point, i) => {
+    const x = getX(i);
+    const y = getY(point.request_count);
+    return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+  }).join(' ');
+  
+  // Create area path (filled area under the line)
+  const areaPath = `${linePath} L ${getX(data.length - 1)} ${padding.top + chartHeight} L ${getX(0)} ${padding.top + chartHeight} Z`;
+  
+  // Create line path for errors
+  const errorLinePath = data.map((point, i) => {
+    const x = getX(i);
+    const y = getY(point.error_count);
+    return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
+  }).join(' ');
+  
+  // Y-axis labels
+  const yLabels = [0, maxRequests / 2, maxRequests].map(v => ({
+    value: v,
+    y: getY(v),
+    label: formatNumber(Math.round(v))
+  }));
+  
+  // X-axis labels (show 5 labels)
+  const xLabelIndices = [0, Math.floor(data.length / 4), Math.floor(data.length / 2), Math.floor(3 * data.length / 4), data.length - 1];
+  
+  const hoveredPoint = hoveredIndex !== null ? data[hoveredIndex] : null;
+
+  return (
+    <div className="relative">
+      <svg 
+        viewBox={`0 0 ${width} ${height}`} 
+        className="w-full h-auto"
+        preserveAspectRatio="xMidYMid meet"
+      >
+        {/* Grid lines */}
+        {yLabels.map((label, i) => (
+          <line 
+            key={i}
+            x1={padding.left} 
+            y1={label.y} 
+            x2={width - padding.right} 
+            y2={label.y}
+            stroke="#334155"
+            strokeWidth="1"
+            strokeDasharray="4"
+          />
+        ))}
+        
+        {/* Y-axis labels */}
+        {yLabels.map((label, i) => (
+          <text 
+            key={i}
+            x={padding.left - 8} 
+            y={label.y + 4}
+            textAnchor="end"
+            className="fill-slate-500 text-xs"
+            style={{ fontSize: '10px' }}
+          >
+            {label.label}
+          </text>
+        ))}
+        
+        {/* Filled area under the line */}
+        <path 
+          d={areaPath} 
+          fill="url(#gradient)" 
+          opacity="0.3"
+        />
+        
+        {/* Gradient definition */}
+        <defs>
+          <linearGradient id="gradient" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#22c55e" stopOpacity="0.6" />
+            <stop offset="100%" stopColor="#22c55e" stopOpacity="0.1" />
+          </linearGradient>
+        </defs>
+        
+        {/* Main line (requests) */}
+        <path 
+          d={linePath} 
+          fill="none" 
+          stroke="#22c55e" 
+          strokeWidth="2"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+        />
+        
+        {/* Error line */}
+        <path 
+          d={errorLinePath} 
+          fill="none" 
+          stroke="#ef4444" 
+          strokeWidth="2"
+          strokeLinejoin="round"
+          strokeLinecap="round"
+          opacity="0.8"
+        />
+        
+        {/* Data points for hover detection */}
+        {data.map((point, i) => (
+          <circle
+            key={i}
+            cx={getX(i)}
+            cy={getY(point.request_count)}
+            r={hoveredIndex === i ? 6 : 4}
+            fill={hoveredIndex === i ? "#22c55e" : "transparent"}
+            stroke={hoveredIndex === i ? "#22c55e" : "transparent"}
+            strokeWidth="2"
+            className="cursor-pointer"
+            onMouseEnter={() => setHoveredIndex(i)}
+            onMouseLeave={() => setHoveredIndex(null)}
+          />
+        ))}
+        
+        {/* Hover indicator line */}
+        {hoveredIndex !== null && (
+          <line
+            x1={getX(hoveredIndex)}
+            y1={padding.top}
+            x2={getX(hoveredIndex)}
+            y2={padding.top + chartHeight}
+            stroke="#64748b"
+            strokeWidth="1"
+            strokeDasharray="4"
+          />
+        )}
+        
+        {/* X-axis labels */}
+        {xLabelIndices.map((idx) => (
+          <text 
+            key={idx}
+            x={getX(idx)} 
+            y={height - 8}
+            textAnchor="middle"
+            className="fill-slate-500"
+            style={{ fontSize: '10px' }}
+          >
+            {new Date(data[idx].minute_ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+          </text>
+        ))}
+      </svg>
+      
+      {/* Tooltip */}
+      {hoveredPoint && hoveredIndex !== null && (
+        <div 
+          className="absolute bg-slate-900 border border-slate-700 rounded-lg px-3 py-2 text-xs shadow-lg pointer-events-none z-10"
+          style={{
+            left: `${(hoveredIndex / (data.length - 1)) * 100}%`,
+            top: '10px',
+            transform: 'translateX(-50%)',
+          }}
+        >
+          <div className="text-slate-400 mb-1">
+            {new Date(hoveredPoint.minute_ts * 1000).toLocaleString()}
+          </div>
+          <div className="text-white font-semibold">{hoveredPoint.request_count} requests</div>
+          <div className="text-green-400">{hoveredPoint.success_count} success</div>
+          <div className="text-red-400">{hoveredPoint.error_count} errors</div>
+          <div className="text-yellow-400">{hoveredPoint.avg_latency_ms.toFixed(1)}ms avg</div>
+        </div>
+      )}
+      
+      {/* Legend */}
+      <div className="flex gap-4 mt-3 text-xs text-slate-400">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-0.5 bg-green-500 rounded" />
+          <span>Requests</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-0.5 bg-red-500 rounded" />
+          <span>Errors</span>
+        </div>
+      </div>
+    </div>
+  );
 }
