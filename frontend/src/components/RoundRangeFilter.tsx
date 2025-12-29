@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useEffect } from "react";
 
 interface RoundRangeFilterProps {
   /** Current minimum round (inclusive) */
@@ -15,8 +15,6 @@ interface RoundRangeFilterProps {
   compact?: boolean;
 }
 
-type QuickSelect = "all" | "last_60" | "last_100" | "last_1000" | "custom";
-
 export function RoundRangeFilter({
   roundMin,
   roundMax,
@@ -24,315 +22,227 @@ export function RoundRangeFilter({
   onChange,
   compact = false,
 }: RoundRangeFilterProps) {
-  const [customMin, setCustomMin] = useState<string>(roundMin?.toString() ?? "");
-  const [customMax, setCustomMax] = useState<string>(roundMax?.toString() ?? "");
-  const [showCustomInputs, setShowCustomInputs] = useState(false);
+  const [minInput, setMinInput] = useState<string>(roundMin?.toString() ?? "");
+  const [maxInput, setMaxInput] = useState<string>(roundMax?.toString() ?? "");
 
-  // Calculate the actual round numbers for quick filters
-  const quickFilterRounds = {
-    last_60: currentRoundId ? currentRoundId - 60 : undefined,
-    last_100: currentRoundId ? currentRoundId - 100 : undefined,
-    last_1000: currentRoundId ? currentRoundId - 1000 : undefined,
-  };
-
-  // Determine which quick select is active
-  const getActiveQuickSelect = useCallback((): QuickSelect => {
-    if (roundMin === undefined && roundMax === undefined) {
-      return "all";
-    }
-    if (currentRoundId && roundMax === undefined) {
-      if (roundMin === quickFilterRounds.last_60) return "last_60";
-      if (roundMin === quickFilterRounds.last_100) return "last_100";
-      if (roundMin === quickFilterRounds.last_1000) return "last_1000";
-    }
-    return "custom";
-  }, [roundMin, roundMax, currentRoundId, quickFilterRounds.last_60, quickFilterRounds.last_100, quickFilterRounds.last_1000]);
-
-  const activeSelect = getActiveQuickSelect();
-
-  // Update custom inputs when props change
+  // Sync inputs when props change (e.g., from URL navigation)
   useEffect(() => {
-    setCustomMin(roundMin?.toString() ?? "");
-    setCustomMax(roundMax?.toString() ?? "");
+    setMinInput(roundMin?.toString() ?? "");
+    setMaxInput(roundMax?.toString() ?? "");
   }, [roundMin, roundMax]);
 
-  // Show custom inputs if we have a custom filter active
-  useEffect(() => {
-    if (activeSelect === "custom" && (roundMin !== undefined || roundMax !== undefined)) {
-      setShowCustomInputs(true);
-    }
-  }, [activeSelect, roundMin, roundMax]);
+  const isAllTime = roundMin === undefined && roundMax === undefined;
 
-  const handleQuickSelect = (select: QuickSelect) => {
-    switch (select) {
-      case "all":
-        setShowCustomInputs(false);
-        onChange(undefined, undefined);
-        break;
-      case "last_60":
-        setShowCustomInputs(false);
-        if (currentRoundId) {
-          onChange(currentRoundId - 60, undefined);
-        }
-        break;
-      case "last_100":
-        setShowCustomInputs(false);
-        if (currentRoundId) {
-          onChange(currentRoundId - 100, undefined);
-        }
-        break;
-      case "last_1000":
-        setShowCustomInputs(false);
-        if (currentRoundId) {
-          onChange(currentRoundId - 1000, undefined);
-        }
-        break;
-      case "custom":
-        setShowCustomInputs(true);
-        break;
-    }
+  // Check if inputs differ from current applied values
+  const minInputValue = minInput ? parseInt(minInput, 10) : undefined;
+  const maxInputValue = maxInput ? parseInt(maxInput, 10) : undefined;
+  const hasUnappliedChanges = 
+    (minInputValue !== roundMin) || 
+    (maxInputValue !== roundMax);
+
+  // Quick preset values for min
+  const presets = [
+    { label: "60", offset: 60 },
+    { label: "100", offset: 100 },
+    { label: "1k", offset: 1000 },
+  ];
+
+  const handleAllTime = () => {
+    setMinInput("");
+    setMaxInput("");
+    onChange(undefined, undefined);
   };
 
-  const handleApplyCustom = () => {
-    const min = customMin ? parseInt(customMin, 10) : undefined;
-    const max = customMax ? parseInt(customMax, 10) : undefined;
+  const handlePresetClick = (offset: number) => {
+    if (!currentRoundId) return;
+    const newMin = currentRoundId - offset;
+    setMinInput(newMin.toString());
+    setMaxInput("");
+    onChange(newMin, undefined);
+  };
+
+  const handleApply = () => {
+    const min = minInput ? parseInt(minInput, 10) : undefined;
+    const max = maxInput ? parseInt(maxInput, 10) : undefined;
     onChange(
       min !== undefined && !isNaN(min) ? min : undefined,
       max !== undefined && !isNaN(max) ? max : undefined
     );
   };
 
-  const handleClearCustom = () => {
-    setCustomMin("");
-    setCustomMax("");
-    onChange(undefined, undefined);
-    setShowCustomInputs(false);
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleApply();
+    }
   };
 
-  // Format the current filter description
-  const getFilterDescription = () => {
-    if (roundMin === undefined && roundMax === undefined) return null;
-    
-    const minStr = roundMin !== undefined ? `#${roundMin.toLocaleString()}` : "Start";
-    const maxStr = roundMax !== undefined ? `#${roundMax.toLocaleString()}` : "Now";
-    
-    if (activeSelect !== "custom" && activeSelect !== "all") {
-      const count = activeSelect === "last_60" ? 60 : activeSelect === "last_100" ? 100 : 1000;
-      return `Showing last ${count} rounds (${minStr} → ${maxStr})`;
+  // Check if a preset is currently active
+  const getActivePreset = (): number | null => {
+    if (!currentRoundId || roundMin === undefined || roundMax !== undefined) return null;
+    for (const preset of presets) {
+      if (roundMin === currentRoundId - preset.offset) {
+        return preset.offset;
+      }
     }
-    
-    return `${minStr} → ${maxStr}`;
+    return null;
   };
+
+  const activePreset = getActivePreset();
 
   if (compact) {
     return (
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-xs text-slate-500 uppercase tracking-wide">From:</span>
-        
-        {/* Quick filter chips */}
-        <div className="flex flex-wrap gap-1">
-          <button
-            onClick={() => handleQuickSelect("all")}
-            className={`px-2.5 py-1 text-xs rounded-full transition-all ${
-              activeSelect === "all"
-                ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/50"
-                : "bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300"
-            }`}
-          >
-            All
-          </button>
-          
-          {[
-            { key: "last_60" as const, count: 60 },
-            { key: "last_100" as const, count: 100 },
-            { key: "last_1000" as const, count: 1000 },
-          ].map(({ key, count }) => (
-            <button
-              key={key}
-              onClick={() => handleQuickSelect(key)}
-              disabled={!currentRoundId}
-              className={`px-2.5 py-1 text-xs rounded-full transition-all ${
-                activeSelect === key
-                  ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/50"
-                  : "bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300 disabled:opacity-50 disabled:cursor-not-allowed"
-              }`}
-              title={quickFilterRounds[key] ? `Round #${quickFilterRounds[key].toLocaleString()}+` : undefined}
-            >
-              Last {count}
-            </button>
-          ))}
-          
-          <button
-            onClick={() => handleQuickSelect("custom")}
-            className={`px-2.5 py-1 text-xs rounded-full transition-all ${
-              activeSelect === "custom" || showCustomInputs
-                ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/50"
-                : "bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300"
-            }`}
-          >
-            Custom
-          </button>
-        </div>
+      <div className="flex items-center gap-3">
+        {/* All Time button */}
+        <button
+          onClick={handleAllTime}
+          className={`px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
+            isAllTime
+              ? "bg-amber-500 text-black"
+              : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white"
+          }`}
+        >
+          All Time
+        </button>
 
-        {/* Custom inputs */}
-        {showCustomInputs && (
-          <div className="flex items-center gap-1.5">
+        <div className="h-4 w-px bg-slate-700" />
+
+        {/* Range inputs with presets */}
+        <div className="flex items-center gap-2">
+          {/* Min input with presets above */}
+          <div className="flex flex-col gap-1">
+            <div className="flex gap-0.5">
+              {presets.map(({ label, offset }) => (
+                <button
+                  key={offset}
+                  onClick={() => handlePresetClick(offset)}
+                  disabled={!currentRoundId}
+                  className={`px-1.5 py-0.5 text-[10px] font-mono rounded transition-all ${
+                    activePreset === offset
+                      ? "bg-amber-500/30 text-amber-400"
+                      : "bg-slate-800/50 text-slate-500 hover:bg-slate-700 hover:text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                  }`}
+                  title={currentRoundId ? `Round #${(currentRoundId - offset).toLocaleString()}` : undefined}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
             <input
               type="number"
               placeholder="Min"
-              value={customMin}
-              onChange={(e) => setCustomMin(e.target.value)}
-              className="w-20 px-2 py-1 text-xs bg-slate-800 border border-slate-700 rounded text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
+              value={minInput}
+              onChange={(e) => setMinInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              className="w-24 px-2 py-1 text-xs font-mono bg-slate-800 border border-slate-700 rounded text-white placeholder-slate-500 focus:border-amber-500/50 focus:outline-none"
             />
-            <span className="text-slate-600">→</span>
-            <input
-              type="number"
-              placeholder="Max"
-              value={customMax}
-              onChange={(e) => setCustomMax(e.target.value)}
-              className="w-20 px-2 py-1 text-xs bg-slate-800 border border-slate-700 rounded text-white placeholder-slate-500 focus:border-amber-500 focus:outline-none"
-            />
-            <button
-              onClick={handleApplyCustom}
-              className="px-2 py-1 text-xs bg-amber-500 text-black rounded hover:bg-amber-400 font-medium"
-            >
-              Go
-            </button>
-            {(roundMin !== undefined || roundMax !== undefined) && (
-              <button
-                onClick={handleClearCustom}
-                className="px-2 py-1 text-xs text-slate-400 hover:text-white"
-              >
-                ✕
-              </button>
-            )}
           </div>
-        )}
+
+          <span className="text-slate-600 text-xs">→</span>
+
+          {/* Max input */}
+          <input
+            type="number"
+            placeholder="Max"
+            value={maxInput}
+            onChange={(e) => setMaxInput(e.target.value)}
+            onKeyDown={handleKeyDown}
+            className="w-24 px-2 py-1 text-xs font-mono bg-slate-800 border border-slate-700 rounded text-white placeholder-slate-500 focus:border-amber-500/50 focus:outline-none"
+          />
+
+          {/* Apply button - only show when there are unapplied changes */}
+          {hasUnappliedChanges && (
+            <button
+              onClick={handleApply}
+              className="px-2 py-1 text-xs font-medium bg-amber-500 text-black rounded hover:bg-amber-400 transition-colors"
+            >
+              Apply
+            </button>
+          )}
+        </div>
       </div>
     );
   }
 
   return (
     <div className="bg-slate-900/50 border border-slate-800/50 rounded-xl p-4">
-      <div className="flex flex-col gap-3">
-        {/* Header with current filter */}
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <svg className="w-4 h-4 text-slate-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M3 4a1 1 0 011-1h16a1 1 0 011 1v2.586a1 1 0 01-.293.707l-6.414 6.414a1 1 0 00-.293.707V17l-4 4v-6.586a1 1 0 00-.293-.707L3.293 7.293A1 1 0 013 6.586V4z" />
-            </svg>
-            <span className="text-sm font-medium text-slate-300">Round Filter</span>
+      <div className="flex items-center gap-4">
+        {/* All Time button */}
+        <button
+          onClick={handleAllTime}
+          className={`px-4 py-2 text-sm font-medium rounded-lg transition-all ${
+            isAllTime
+              ? "bg-gradient-to-r from-amber-500 to-orange-500 text-black"
+              : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700"
+          }`}
+        >
+          All Time
+        </button>
+
+        <div className="h-8 w-px bg-slate-700/50" />
+
+        {/* Range selector */}
+        <div className="flex items-center gap-3">
+          {/* Min input with presets */}
+          <div className="flex flex-col gap-1.5">
+            <div className="flex gap-1">
+              {presets.map(({ label, offset }) => (
+                <button
+                  key={offset}
+                  onClick={() => handlePresetClick(offset)}
+                  disabled={!currentRoundId}
+                  className={`px-2 py-0.5 text-xs font-mono rounded transition-all ${
+                    activePreset === offset
+                      ? "bg-amber-500/20 text-amber-400 ring-1 ring-amber-500/30"
+                      : "bg-slate-800/80 text-slate-500 hover:bg-slate-700 hover:text-slate-300 disabled:opacity-40 disabled:cursor-not-allowed"
+                  }`}
+                  title={currentRoundId ? `Set min to #${(currentRoundId - offset).toLocaleString()}` : "Loading..."}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            <input
+              type="number"
+              placeholder="Min round"
+              value={minInput}
+              onChange={(e) => setMinInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              className="w-32 px-3 py-2 text-sm font-mono bg-slate-800/50 border border-slate-700/50 rounded-lg text-white placeholder-slate-500 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 focus:outline-none"
+            />
           </div>
-          
-          {getFilterDescription() && (
-            <span className="text-xs text-amber-400/80 font-mono">
-              {getFilterDescription()}
-            </span>
+
+          <span className="text-slate-600 mt-5">→</span>
+
+          {/* Max input */}
+          <div className="flex flex-col gap-1.5">
+            <div className="h-5" /> {/* Spacer to align with presets row */}
+            <input
+              type="number"
+              placeholder="Max round"
+              value={maxInput}
+              onChange={(e) => setMaxInput(e.target.value)}
+              onKeyDown={handleKeyDown}
+              className="w-32 px-3 py-2 text-sm font-mono bg-slate-800/50 border border-slate-700/50 rounded-lg text-white placeholder-slate-500 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 focus:outline-none"
+            />
+          </div>
+
+          {/* Apply button - only show when there are unapplied changes */}
+          {hasUnappliedChanges && (
+            <button
+              onClick={handleApply}
+              className="mt-5 px-4 py-2 text-sm font-medium bg-gradient-to-r from-amber-500 to-orange-500 text-black rounded-lg hover:from-amber-400 hover:to-orange-400 transition-all"
+            >
+              Apply
+            </button>
           )}
         </div>
 
-        {/* Quick filters - show as "Starting from" with round numbers */}
-        <div className="flex flex-wrap items-center gap-2">
-          <button
-            onClick={() => handleQuickSelect("all")}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-all ${
-              activeSelect === "all"
-                ? "bg-gradient-to-r from-amber-500/20 to-orange-500/20 text-amber-400 ring-1 ring-amber-500/30 font-medium"
-                : "bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300 border border-slate-700/50"
-            }`}
-          >
-            All Time
-          </button>
-
-          <div className="h-4 w-px bg-slate-700/50" />
-          
-          <span className="text-xs text-slate-500 uppercase tracking-wide">Last:</span>
-          
-          {[
-            { key: "last_60" as const, count: 60 },
-            { key: "last_100" as const, count: 100 },
-            { key: "last_1000" as const, count: 1000 },
-          ].map(({ key, count }) => {
-            const roundNum = quickFilterRounds[key];
-            return (
-              <button
-                key={key}
-                onClick={() => handleQuickSelect(key)}
-                disabled={!currentRoundId}
-                className={`group relative px-3 py-1.5 text-sm rounded-lg transition-all ${
-                  activeSelect === key
-                    ? "bg-gradient-to-r from-amber-500/20 to-orange-500/20 text-amber-400 ring-1 ring-amber-500/30 font-medium"
-                    : "bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300 border border-slate-700/50 disabled:opacity-50 disabled:cursor-not-allowed"
-                }`}
-              >
-                <span>{count}</span>
-                {roundNum && activeSelect !== key && (
-                  <span className="ml-1.5 text-xs text-slate-500 font-mono">
-                    #{roundNum.toLocaleString()}+
-                  </span>
-                )}
-              </button>
-            );
-          })}
-
-          <div className="h-4 w-px bg-slate-700/50" />
-
-          <button
-            onClick={() => handleQuickSelect("custom")}
-            className={`px-3 py-1.5 text-sm rounded-lg transition-all flex items-center gap-1.5 ${
-              showCustomInputs
-                ? "bg-gradient-to-r from-amber-500/20 to-orange-500/20 text-amber-400 ring-1 ring-amber-500/30 font-medium"
-                : "bg-slate-800/50 text-slate-400 hover:bg-slate-700/50 hover:text-slate-300 border border-slate-700/50"
-            }`}
-          >
-            <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z" />
-            </svg>
-            Custom Range
-          </button>
-        </div>
-
-        {/* Custom range inputs - slide in when active */}
-        {showCustomInputs && (
-          <div className="flex items-center gap-3 pt-2 border-t border-slate-800/50">
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-slate-500 uppercase tracking-wide">From:</label>
-              <input
-                type="number"
-                placeholder="Start round"
-                value={customMin}
-                onChange={(e) => setCustomMin(e.target.value)}
-                className="w-32 px-3 py-2 text-sm bg-slate-800/50 border border-slate-700/50 rounded-lg text-white placeholder-slate-500 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 focus:outline-none font-mono"
-              />
-            </div>
-            
-            <span className="text-slate-600">→</span>
-            
-            <div className="flex items-center gap-2">
-              <label className="text-xs text-slate-500 uppercase tracking-wide">To:</label>
-              <input
-                type="number"
-                placeholder="End round"
-                value={customMax}
-                onChange={(e) => setCustomMax(e.target.value)}
-                className="w-32 px-3 py-2 text-sm bg-slate-800/50 border border-slate-700/50 rounded-lg text-white placeholder-slate-500 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 focus:outline-none font-mono"
-              />
-            </div>
-
-            <div className="flex items-center gap-2 ml-auto">
-              <button
-                onClick={handleApplyCustom}
-                className="px-4 py-2 text-sm bg-gradient-to-r from-amber-500 to-orange-500 text-black rounded-lg hover:from-amber-400 hover:to-orange-400 font-medium transition-all"
-              >
-                Apply
-              </button>
-              <button
-                onClick={handleClearCustom}
-                className="px-4 py-2 text-sm bg-slate-800/50 text-slate-400 rounded-lg hover:bg-slate-700/50 hover:text-slate-300 border border-slate-700/50 transition-all"
-              >
-                Clear
-              </button>
-            </div>
+        {/* Current filter indicator */}
+        {!isAllTime && !hasUnappliedChanges && (
+          <div className="ml-auto text-xs text-slate-500">
+            <span className="text-amber-400/70 font-mono">
+              #{roundMin?.toLocaleString() ?? "1"} → #{roundMax?.toLocaleString() ?? "now"}
+            </span>
           </div>
         )}
       </div>
