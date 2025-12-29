@@ -1876,16 +1876,15 @@ impl ClickHouseClient {
         if winner_only == Some(true) {
             conditions.push("d.is_winner = 1".to_string());
         }
-        // Filter for exactly 1 ORE (100_000_000_000 atomic units = 1e11)
-        // This is the base reward with no motherlode
+        // Filter for +1 ORE wins: miner was the top_miner for the round
         if base_ore_only == Some(true) {
-            conditions.push("d.ore_earned = 100000000000".to_string());
+            conditions.push("d.is_top_miner = 1".to_string());
         }
-        // Filter for motherlode hits: ORE earned is > 0 but != 1.0
-        // Either <1.0 ORE or >1.0 ORE indicates a motherlode hit
+        // Filter for motherlode wins: miner was on winning square when motherlode hit
+        // Check is_winner = 1 AND round had motherlode_hit = 1
         if motherlode_only == Some(true) {
-            conditions.push("d.ore_earned > 0".to_string());
-            conditions.push("d.ore_earned != 100000000000".to_string());
+            conditions.push("d.is_winner = 1".to_string());
+            conditions.push("r.motherlode_hit = 1".to_string());
         }
         if let Some(c) = cursor {
             // Cursor format: "round:square"
