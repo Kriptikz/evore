@@ -1947,7 +1947,10 @@ pub async fn get_round_transactions_full(
 ) -> Result<Json<FullAnalysisResponse>, (StatusCode, Json<AuthError>)> {
     let limit = query.limit.unwrap_or(500).min(1000);
     let offset = query.offset.unwrap_or(0);
-    
+
+
+    tracing::info!("Getting raw transactions for round {}", round_id);
+
     // Get all raw transactions for this round
     let raw_txns = state.clickhouse
         .get_raw_transactions_for_round(round_id)
@@ -1962,6 +1965,7 @@ pub async fn get_round_transactions_full(
         .with_expected_round(round_id);
     
     // Analyze only the paginated subset
+    tracing::info!("Analyzing transactions");
     let mut transactions = Vec::new();
     let mut analyzed_count = 0usize;
     
@@ -1975,8 +1979,10 @@ pub async fn get_round_transactions_full(
         }
     }
     
+    tracing::info!("Building round summary");
     let round_summary = build_round_summary(&transactions);
     
+    tracing::info!("Sending response");
     Ok(Json(FullAnalysisResponse {
         round_id,
         total_transactions,
