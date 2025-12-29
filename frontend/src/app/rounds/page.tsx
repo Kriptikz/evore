@@ -2,19 +2,22 @@
 
 import { useState, useEffect, useCallback, Suspense } from "react";
 import Link from "next/link";
-import { api, HistoricalRound, CursorResponse } from "@/lib/api";
+import { useRouter } from "next/navigation";
+import { api, HistoricalRound } from "@/lib/api";
 import { Header } from "@/components/Header";
 import { RoundRangeFilter } from "@/components/RoundRangeFilter";
 import { useMultiUrlState } from "@/hooks/useUrlState";
-import { formatSol, truncateAddress } from "@/lib/format";
+import { formatSol, formatOre, truncateAddress } from "@/lib/format";
 
 function RoundsContent() {
+  const router = useRouter();
   const [rounds, setRounds] = useState<HistoricalRound[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [cursor, setCursor] = useState<string | null>(null);
   const [currentRoundId, setCurrentRoundId] = useState<number | undefined>(undefined);
+  const [roundSearch, setRoundSearch] = useState<string>("");
 
   // URL state for filters
   const [urlState, setUrlState] = useMultiUrlState({
@@ -26,6 +29,20 @@ function RoundsContent() {
   const roundMin = urlState.round_min;
   const roundMax = urlState.round_max;
   const motherlodeOnly = urlState.motherlode;
+
+  // Handle direct round search/navigation
+  const handleRoundSearch = () => {
+    const roundId = parseInt(roundSearch, 10);
+    if (!isNaN(roundId) && roundId > 0) {
+      router.push(`/?round=${roundId}`);
+    }
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleRoundSearch();
+    }
+  };
 
   // Fetch current round ID
   useEffect(() => {
@@ -89,6 +106,31 @@ function RoundsContent() {
 
       {/* Filters */}
       <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6 mb-8 space-y-4">
+        {/* Go to Round Search */}
+        <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-slate-400">Go to Round:</label>
+            <div className="relative">
+              <input
+                type="number"
+                placeholder="Enter round #"
+                value={roundSearch}
+                onChange={(e) => setRoundSearch(e.target.value)}
+                onKeyDown={handleSearchKeyDown}
+                className="w-36 px-3 py-2 text-sm font-mono bg-slate-800/50 border border-slate-700/50 rounded-lg text-white placeholder-slate-500 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 focus:outline-none"
+              />
+            </div>
+            <button
+              onClick={handleRoundSearch}
+              disabled={!roundSearch}
+              className="px-3 py-2 text-sm font-medium bg-amber-500 text-black rounded-lg hover:bg-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+            >
+              Go →
+            </button>
+          </div>
+        </div>
+
+        {/* Round Range Filter */}
         <RoundRangeFilter
           roundMin={roundMin}
           roundMax={roundMax}
@@ -96,16 +138,46 @@ function RoundsContent() {
           onChange={handleRoundRangeChange}
         />
         
+        {/* Motherlode Filter */}
         <div className="flex items-center gap-4">
-          <label className="flex items-center gap-2 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={motherlodeOnly}
-              onChange={handleMotherlodeToggle}
-              className="w-4 h-4 rounded bg-slate-700 border-slate-600 text-amber-500 focus:ring-amber-500/50"
-            />
-            <span className="text-sm text-slate-300">Motherlode hits only</span>
-          </label>
+          <button
+            onClick={handleMotherlodeToggle}
+            className={`flex items-center gap-2.5 px-4 py-2.5 rounded-lg font-medium text-sm transition-all ${
+              motherlodeOnly
+                ? "bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 text-black shadow-lg shadow-amber-500/30 ring-2 ring-amber-400/50"
+                : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700 hover:border-amber-500/30"
+            }`}
+          >
+            {/* Diamond/Gem Icon for Motherlode */}
+            <svg 
+              className={`w-5 h-5 ${motherlodeOnly ? "text-black drop-shadow-sm" : "text-amber-400"}`} 
+              viewBox="0 0 24 24" 
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              {/* Diamond shape */}
+              <polygon points="12,2 22,9 12,22 2,9" fill={motherlodeOnly ? "currentColor" : "none"} />
+              {/* Facet lines */}
+              <line x1="12" y1="2" x2="12" y2="22" opacity="0.5" />
+              <line x1="2" y1="9" x2="22" y2="9" opacity="0.5" />
+              <line x1="7" y1="9" x2="12" y2="22" opacity="0.3" />
+              <line x1="17" y1="9" x2="12" y2="22" opacity="0.3" />
+            </svg>
+            <span>Motherlodes Only</span>
+            {motherlodeOnly && (
+              <span className="ml-1 text-lg">💎</span>
+            )}
+          </button>
+          
+          {motherlodeOnly && (
+            <span className="text-xs text-amber-400/70 flex items-center gap-1">
+              <span className="inline-block w-2 h-2 bg-amber-400 rounded-full animate-pulse" />
+              Filtering by motherlode hits
+            </span>
+          )}
         </div>
       </div>
 
@@ -213,7 +285,7 @@ function RoundsContent() {
                     <td className="px-4 py-3 text-center">
                       {round.motherlode_hit ? (
                         <span className="inline-flex items-center gap-1 px-2 py-1 bg-amber-500/20 text-amber-400 rounded-full text-xs font-medium">
-                          💎 {formatSol(round.motherlode)}
+                          💎 {formatOre(round.motherlode)}
                         </span>
                       ) : (
                         <span className="text-slate-600">—</span>
