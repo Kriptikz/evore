@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback, useMemo, Suspense, useRef } from "react";
 import Link from "next/link";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter } from "next/navigation";
 import { useOreStats, formatSol, formatOre, truncateAddress, type PendingRound, type RoundSummary as ContextRoundSummary } from "@/context/OreStatsContext";
 import { Header } from "@/components/Header";
 
@@ -1201,6 +1201,7 @@ function RoundDetailView({
 }
 
 function HomePageContent() {
+  const router = useRouter();
   const searchParams = useSearchParams();
   const initialRoundId = searchParams.get("round");
   
@@ -1217,6 +1218,10 @@ function HomePageContent() {
     refreshRounds 
   } = useOreStats();
   
+  // Filter state
+  const [roundSearch, setRoundSearch] = useState<string>("");
+  const [motherlodeOnly, setMotherlodeOnly] = useState(false);
+  
   // Local state for page-specific data
   const [selectedRoundId, setSelectedRoundId] = useState<number | null>(
     initialRoundId ? parseInt(initialRoundId) : 0
@@ -1228,6 +1233,27 @@ function HomePageContent() {
   
   // Track previous round for clearing deployments on transition
   const [prevRoundId, setPrevRoundId] = useState<number | null>(null);
+
+  // Handle direct round search/navigation
+  const handleRoundSearch = () => {
+    const roundId = parseInt(roundSearch, 10);
+    if (!isNaN(roundId) && roundId > 0) {
+      setSelectedRoundId(roundId);
+      router.push(`/?round=${roundId}`);
+    }
+  };
+
+  const handleSearchKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter") {
+      handleRoundSearch();
+    }
+  };
+
+  // Filter rounds by motherlode
+  const filteredRounds = useMemo(() => {
+    if (!motherlodeOnly) return rounds;
+    return rounds.filter(r => r.motherlode_hit || r.motherlode > 0);
+  }, [rounds, motherlodeOnly]);
   
   // Clear live deployments when round changes
   useEffect(() => {
@@ -1392,19 +1418,73 @@ function HomePageContent() {
           {/* Rounds List (Left Sidebar) */}
           <div className="lg:col-span-1 bg-slate-900/80 rounded-xl border border-slate-800/50 p-4">
             <h2 className="text-lg font-semibold text-white mb-4">Rounds</h2>
+            
+            {/* Filters */}
+            <div className="space-y-3 mb-4 pb-4 border-b border-slate-700/50">
+              {/* Go to Round */}
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  placeholder="Go to round #"
+                  value={roundSearch}
+                  onChange={(e) => setRoundSearch(e.target.value)}
+                  onKeyDown={handleSearchKeyDown}
+                  className="flex-1 px-3 py-2 text-sm font-mono bg-slate-800/50 border border-slate-700/50 rounded-lg text-white placeholder-slate-500 focus:border-amber-500/50 focus:ring-1 focus:ring-amber-500/20 focus:outline-none"
+                />
+                <button
+                  onClick={handleRoundSearch}
+                  disabled={!roundSearch}
+                  className="px-3 py-2 text-sm font-medium bg-amber-500 text-black rounded-lg hover:bg-amber-400 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  Go
+                </button>
+              </div>
+              
+              {/* Motherlode Filter */}
+              <button
+                onClick={() => setMotherlodeOnly(!motherlodeOnly)}
+                className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg font-medium text-sm transition-all ${
+                  motherlodeOnly
+                    ? "bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 text-black shadow-lg shadow-amber-500/20"
+                    : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700"
+                }`}
+              >
+                <svg 
+                  className={`w-4 h-4 ${motherlodeOnly ? "text-black" : "text-amber-400"}`} 
+                  viewBox="0 0 24 24" 
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                >
+                  <polygon points="12,2 22,9 12,22 2,9" fill={motherlodeOnly ? "currentColor" : "none"} />
+                </svg>
+                <span>Motherlodes</span>
+                {motherlodeOnly && <span className="text-lg">💎</span>}
+              </button>
+              
+              {motherlodeOnly && (
+                <div className="text-xs text-amber-400/70 text-center flex items-center justify-center gap-1">
+                  <span className="inline-block w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
+                  {filteredRounds.length} motherlode rounds
+                </div>
+              )}
+            </div>
+            
             {contextLoading && rounds.length === 0 ? (
               <div className="flex items-center justify-center h-48">
                 <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
               </div>
             ) : (
               <RoundsList
-                rounds={rounds}
+                rounds={filteredRounds}
                 pendingRounds={pendingRounds}
                 selectedRoundId={selectedRoundId}
                 onSelectRound={setSelectedRoundId}
                 liveRound={liveRound}
                 currentSlot={currentSlot}
-                hasMore={hasMoreRounds}
+                hasMore={hasMoreRounds && !motherlodeOnly}
                 loadingMore={loadingMoreRounds}
                 onLoadMore={loadMoreRounds}
               />

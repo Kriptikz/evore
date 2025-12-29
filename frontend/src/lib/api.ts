@@ -549,6 +549,17 @@ export interface LeaderboardEntry {
   sol_cost_per_ore: number | null;
 }
 
+export interface CostPerOreStats {
+  /** Total number of rounds in the range */
+  total_rounds: number;
+  /** Total SOL vaulted across all rounds (lamports) */
+  total_vaulted_lamports: number;
+  /** Total ORE minted (atomic units, 11 decimals) = rounds + motherlode ORE */
+  total_ore_minted_atomic: number;
+  /** Cost per ORE in lamports (total_vaulted / total_ore) */
+  cost_per_ore_lamports: number;
+}
+
 export interface TreasurySnapshot {
   round_id: number;
   balance: number;
@@ -1101,6 +1112,17 @@ class ApiClient {
     if (options?.minRounds) params.set("min_rounds", options.minRounds.toString());
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/history/leaderboard${query}`);
+  }
+
+  async getCostPerOreStats(options?: {
+    roundIdGte?: number;
+    roundIdLte?: number;
+  }): Promise<CostPerOreStats> {
+    const params = new URLSearchParams();
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/rounds/cost-per-ore${query}`);
   }
 
   async getTreasuryHistory(options?: {

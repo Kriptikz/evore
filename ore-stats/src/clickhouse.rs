@@ -2038,6 +2038,75 @@ impl ClickHouseClient {
         }))
     }
     
+    /// Get aggregate cost per ORE stats for a round range.
+    /// Returns (total_rounds, total_vaulted_lamports, total_ore_minted, cost_per_ore_lamports).
+    /// Cost per ORE = total_vaulted / (total_rounds + motherlode_ore)
+    /// Each round mints 1 ORE, plus any motherlode ORE when motherlode hits.
+    pub async fn get_cost_per_ore_stats(
+        &self,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+    ) -> Result<CostPerOreStats, ClickHouseError> {
+        // Build round filter
+        let mut conditions = Vec::new();
+        if round_id_gte.is_some() {
+            conditions.push("round_id >= ?".to_string());
+        }
+        if round_id_lte.is_some() {
+            conditions.push("round_id <= ?".to_string());
+        }
+        
+        let where_clause = if conditions.is_empty() {
+            String::new()
+        } else {
+            format!("WHERE {}", conditions.join(" AND "))
+        };
+        
+        // Query aggregates:
+        // - count() = total rounds
+        // - sum(total_vaulted) = total cost in lamports
+        // - sum(motherlode * motherlode_hit) = total motherlode ORE (atomic units, 11 decimals)
+        let query = format!(r#"
+            SELECT 
+                count() as total_rounds,
+                sum(total_vaulted) as total_vaulted,
+                sum(motherlode * motherlode_hit) as total_motherlode_ore
+            FROM rounds
+            {}
+        "#, where_clause);
+        
+        let mut q = self.client.query(&query);
+        if let Some(gte) = round_id_gte {
+            q = q.bind(gte);
+        }
+        if let Some(lte) = round_id_lte {
+            q = q.bind(lte);
+        }
+        
+        let row: (u64, u64, u64) = q.fetch_one().await?;
+        let (total_rounds, total_vaulted, total_motherlode_ore) = row;
+        
+        // Each round mints 1 ORE (100_000_000_000 atomic units = 10^11)
+        // Plus motherlode ORE when it hits
+        const ORE_DECIMALS: u64 = 100_000_000_000; // 10^11
+        let total_ore_atomic = total_rounds * ORE_DECIMALS + total_motherlode_ore;
+        
+        // Cost per ORE in lamports (total_vaulted / total_ore in full ORE units)
+        // To avoid precision loss: cost_per_ore = total_vaulted * ORE_DECIMALS / total_ore_atomic
+        let cost_per_ore_lamports = if total_ore_atomic > 0 {
+            (total_vaulted as u128 * ORE_DECIMALS as u128 / total_ore_atomic as u128) as u64
+        } else {
+            0
+        };
+        
+        Ok(CostPerOreStats {
+            total_rounds,
+            total_vaulted_lamports: total_vaulted,
+            total_ore_minted_atomic: total_ore_atomic,
+            cost_per_ore_lamports,
+        })
+    }
+    
     /// Get leaderboard with pagination.
     pub async fn get_leaderboard(
         &self,
@@ -3117,6 +3186,19 @@ pub struct RequestsPerMinuteRow {
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct RequestCountRow {
     pub cnt: u64,
+}
+
+/// Cost per ORE aggregate stats for a round range.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CostPerOreStats {
+    /// Total number of rounds in the range
+    pub total_rounds: u64,
+    /// Total SOL vaulted across all rounds (lamports)
+    pub total_vaulted_lamports: u64,
+    /// Total ORE minted (atomic units, 11 decimals) = rounds + motherlode ORE
+    pub total_ore_minted_atomic: u64,
+    /// Cost per ORE in lamports (total_vaulted / total_ore)
+    pub cost_per_ore_lamports: u64,
 }
 
 // ============================================================================

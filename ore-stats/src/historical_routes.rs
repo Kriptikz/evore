@@ -287,6 +287,9 @@ pub fn historical_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/leaderboard/ore", get(get_leaderboard_ore))
         .route("/leaderboard/winners", get(get_leaderboard_winners))
         
+        // Aggregate stats
+        .route("/rounds/cost-per-ore", get(get_cost_per_ore))
+        
         // Treasury history
         .route("/treasury/history", get(get_treasury_history))
         
@@ -718,6 +721,36 @@ async fn get_leaderboard_internal(
         total_count,
         total_pages,
     }))
+}
+
+// ============================================================================
+// Cost Per ORE Stats Handler
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+struct CostPerOreQuery {
+    round_id_gte: Option<u64>,
+    round_id_lte: Option<u64>,
+}
+
+/// GET /history/rounds/cost-per-ore - Get aggregate cost per ORE stats for a round range
+/// 
+/// Returns the average cost in SOL to acquire 1 ORE for the specified round range.
+/// Each round mints 1 ORE, and when motherlode hits, additional ORE is minted.
+/// The "cost" is the total SOL vaulted across all rounds in the range.
+async fn get_cost_per_ore(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<CostPerOreQuery>,
+) -> Result<Json<crate::clickhouse::CostPerOreStats>, (StatusCode, Json<ErrorResponse>)> {
+    let stats = state.clickhouse
+        .get_cost_per_ore_stats(params.round_id_gte, params.round_id_lte)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get cost per ORE stats: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
+        })?;
+    
+    Ok(Json(stats))
 }
 
 // ============================================================================

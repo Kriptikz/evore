@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback, Suspense } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { api, LeaderboardEntry, OffsetResponse } from "@/lib/api";
+import { api, LeaderboardEntry, OffsetResponse, CostPerOreStats } from "@/lib/api";
 import { Header } from "@/components/Header";
 import { RoundRangeFilter } from "@/components/RoundRangeFilter";
 import { useMultiUrlState } from "@/hooks/useUrlState";
@@ -15,6 +15,7 @@ type MinRoundsType = 0 | 100 | 500 | 1000 | 5000;
 function LeaderboardContent() {
   const router = useRouter();
   const [leaderboard, setLeaderboard] = useState<OffsetResponse<LeaderboardEntry> | null>(null);
+  const [costPerOre, setCostPerOre] = useState<CostPerOreStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [currentRoundId, setCurrentRoundId] = useState<number | undefined>(undefined);
@@ -73,16 +74,23 @@ function LeaderboardContent() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.getLeaderboard({
-        metric: metric,
-        roundIdGte: roundMin,
-        roundIdLte: roundMax,
-        page: debouncedSearch ? 1 : page,
-        limit: 50,
-        search: debouncedSearch || undefined,
-        minRounds: minRounds > 0 ? minRounds : undefined,
-      });
-      setLeaderboard(data);
+      const [leaderboardData, costData] = await Promise.all([
+        api.getLeaderboard({
+          metric: metric,
+          roundIdGte: roundMin,
+          roundIdLte: roundMax,
+          page: debouncedSearch ? 1 : page,
+          limit: 50,
+          search: debouncedSearch || undefined,
+          minRounds: minRounds > 0 ? minRounds : undefined,
+        }),
+        api.getCostPerOreStats({
+          roundIdGte: roundMin,
+          roundIdLte: roundMax,
+        }),
+      ]);
+      setLeaderboard(leaderboardData);
+      setCostPerOre(costData);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load leaderboard");
     } finally {
@@ -263,7 +271,7 @@ function LeaderboardContent() {
 
       {/* Stats Summary */}
       {leaderboard && (
-        <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+        <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
           <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
             <div className="text-slate-400 text-sm">Total Miners</div>
             <div className="text-2xl font-bold text-white">{leaderboard.total_count.toLocaleString()}</div>
@@ -280,6 +288,20 @@ function LeaderboardContent() {
             <div className="text-slate-400 text-sm">Time Period</div>
             <div className="text-2xl font-bold text-white">{getRangeLabel()}</div>
           </div>
+          {costPerOre && (
+            <div className="bg-gradient-to-br from-cyan-500/10 to-blue-500/10 rounded-xl border border-cyan-500/30 p-4">
+              <div className="text-cyan-400 text-sm flex items-center gap-1">
+                Cost per ORE
+                <span className="text-xs text-cyan-400/60" title="Average SOL cost to acquire 1 ORE in the selected round range">ⓘ</span>
+              </div>
+              <div className="text-2xl font-bold text-cyan-300">
+                {formatSol(costPerOre.cost_per_ore_lamports)} SOL
+              </div>
+              <div className="text-xs text-slate-500 mt-1">
+                {costPerOre.total_rounds.toLocaleString()} rounds • {formatOre(costPerOre.total_ore_minted_atomic)} ORE minted
+              </div>
+            </div>
+          )}
         </div>
       )}
 
