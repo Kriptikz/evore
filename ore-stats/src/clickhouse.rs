@@ -755,18 +755,20 @@ impl ClickHouseClient {
         let results = self.client
             .query(r#"
                 SELECT 
-                    round_id,
-                    miner_pubkey,
-                    square_id,
-                    amount,
-                    deployed_slot,
-                    sol_earned,
-                    ore_earned,
-                    is_winner,
-                    is_top_miner
-                FROM deployments
-                WHERE round_id = ?
-                ORDER BY amount DESC
+                    d.round_id,
+                    d.miner_pubkey,
+                    d.square_id,
+                    d.amount,
+                    d.deployed_slot,
+                    d.sol_earned,
+                    d.ore_earned,
+                    d.is_winner,
+                    d.is_top_miner,
+                    COALESCE(r.winning_square, 255) as winning_square
+                FROM deployments d
+                LEFT JOIN rounds r ON d.round_id = r.round_id
+                WHERE d.round_id = ?
+                ORDER BY d.amount DESC
             "#)
             .bind(round_id)
             .fetch_all()
@@ -1699,7 +1701,8 @@ impl ClickHouseClient {
         
         let query = format!(
             r#"SELECT d.round_id, d.miner_pubkey, d.square_id, d.amount, d.deployed_slot,
-                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner, r.winning_square
+                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner, 
+                      COALESCE(r.winning_square, 255) as winning_square
                FROM deployments d
                LEFT JOIN rounds r ON d.round_id = r.round_id
                WHERE {}
@@ -1764,7 +1767,8 @@ impl ClickHouseClient {
         
         let query = format!(
             r#"SELECT d.round_id, d.miner_pubkey, d.square_id, d.amount, d.deployed_slot,
-                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner, r.winning_square
+                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner,
+                      COALESCE(r.winning_square, 255) as winning_square
                FROM deployments d
                LEFT JOIN rounds r ON d.round_id = r.round_id
                WHERE {}
@@ -1810,7 +1814,8 @@ impl ClickHouseClient {
         
         let query = format!(
             r#"SELECT d.round_id, d.miner_pubkey, d.square_id, d.amount, d.deployed_slot,
-                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner, r.winning_square
+                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner,
+                      COALESCE(r.winning_square, 255) as winning_square
                FROM deployments d
                LEFT JOIN rounds r ON d.round_id = r.round_id
                WHERE {}

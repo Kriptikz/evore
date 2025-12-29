@@ -198,9 +198,11 @@ function MinerDeploymentsGrouped({
                       Winner
                     </span>
                   )}
-                  <span className="text-xs text-slate-500">
-                    Winning square: {group.winning_square}
-                  </span>
+                  {group.winning_square < 25 && (
+                    <span className="text-xs text-slate-500">
+                      Winning square: {group.winning_square}
+                    </span>
+                  )}
                 </div>
                 <div className="flex items-center gap-4 text-sm">
                   <span className="font-mono text-white">{formatSol(group.total_amount)}</span>
@@ -216,8 +218,9 @@ function MinerDeploymentsGrouped({
               {/* Squares Grid - Highlight ONLY the actual winning square */}
               <div className="flex flex-wrap gap-1.5">
                 {deployedSquares.map((squareId) => {
-                  const isWinningSquare = squareId === group.winning_square;
-                  const minerDeployedToWinner = group.amounts[group.winning_square] > 0;
+                  const hasValidWinningSquare = group.winning_square < 25;
+                  const isWinningSquare = hasValidWinningSquare && squareId === group.winning_square;
+                  const minerDeployedToWinner = hasValidWinningSquare && group.amounts[group.winning_square] > 0;
                   
                   return (
                     <span

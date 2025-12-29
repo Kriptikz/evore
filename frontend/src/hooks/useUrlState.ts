@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useState, useRef, useMemo } from "react";
 import { useRouter, useSearchParams, usePathname } from "next/navigation";
 
 /**
@@ -23,26 +23,29 @@ export function useUrlState<T extends string | number | boolean | undefined>(
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const replace = options?.replace ?? false;
+  
+  // Store default value in ref to avoid dependency changes
+  const defaultRef = useRef(defaultValue);
 
   // Parse value from URL
   const parseValue = useCallback((): T => {
     const urlValue = searchParams.get(key);
     if (urlValue === null) {
-      return defaultValue;
+      return defaultRef.current;
     }
 
     // Parse based on type of default value
-    if (typeof defaultValue === "number") {
+    if (typeof defaultRef.current === "number") {
       const parsed = Number(urlValue);
-      return (isNaN(parsed) ? defaultValue : parsed) as T;
+      return (isNaN(parsed) ? defaultRef.current : parsed) as T;
     }
-    if (typeof defaultValue === "boolean") {
+    if (typeof defaultRef.current === "boolean") {
       return (urlValue === "true") as T;
     }
     return urlValue as T;
-  }, [searchParams, key, defaultValue]);
+  }, [searchParams, key]);
 
-  const [value, setValue] = useState<T>(parseValue);
+  const [value, setValue] = useState<T>(() => parseValue());
 
   // Sync state when URL changes (browser back/forward)
   useEffect(() => {
@@ -55,7 +58,7 @@ export function useUrlState<T extends string | number | boolean | undefined>(
 
     const params = new URLSearchParams(searchParams.toString());
     
-    if (newValue === defaultValue || newValue === undefined || newValue === "") {
+    if (newValue === defaultRef.current || newValue === undefined || newValue === "") {
       // Remove param if it's the default value
       params.delete(key);
     } else {
@@ -70,7 +73,7 @@ export function useUrlState<T extends string | number | boolean | undefined>(
     } else {
       router.push(newUrl, { scroll: false });
     }
-  }, [router, pathname, searchParams, key, defaultValue, replace]);
+  }, [router, pathname, searchParams, key, replace]);
 
   return [value, updateValue];
 }
@@ -90,14 +93,18 @@ export function useMultiUrlState<T extends Record<string, string | number | bool
   const searchParams = useSearchParams();
   const replace = options?.replace ?? false;
 
-  // Parse all values from URL
+  // Memoize defaults to avoid reference changes
+  const defaultsRef = useRef(defaults);
+  const defaultKeys = useMemo(() => Object.keys(defaults), []);
+
+  // Parse all values from URL - only run once on mount and when searchParams change
   const parseValues = useCallback((): T => {
-    const result = { ...defaults };
+    const result = { ...defaultsRef.current };
     
-    for (const key of Object.keys(defaults)) {
+    for (const key of defaultKeys) {
       const urlValue = searchParams.get(key);
       if (urlValue !== null) {
-        const defaultValue = defaults[key];
+        const defaultValue = defaultsRef.current[key];
         if (typeof defaultValue === "number") {
           const parsed = Number(urlValue);
           (result as Record<string, unknown>)[key] = isNaN(parsed) ? defaultValue : parsed;
@@ -110,9 +117,9 @@ export function useMultiUrlState<T extends Record<string, string | number | bool
     }
     
     return result;
-  }, [searchParams, defaults]);
+  }, [searchParams, defaultKeys]);
 
-  const [values, setValues] = useState<T>(parseValues);
+  const [values, setValues] = useState<T>(() => parseValues());
 
   // Sync state when URL changes
   useEffect(() => {
@@ -121,13 +128,12 @@ export function useMultiUrlState<T extends Record<string, string | number | bool
 
   // Update multiple URL params at once
   const updateValues = useCallback((updates: Partial<T>) => {
-    const newValues = { ...values, ...updates };
-    setValues(newValues);
+    setValues(prev => ({ ...prev, ...updates }));
 
     const params = new URLSearchParams(searchParams.toString());
     
     for (const [key, newValue] of Object.entries(updates)) {
-      const defaultValue = defaults[key];
+      const defaultValue = defaultsRef.current[key];
       if (newValue === defaultValue || newValue === undefined || newValue === "") {
         params.delete(key);
       } else {
@@ -143,8 +149,7 @@ export function useMultiUrlState<T extends Record<string, string | number | bool
     } else {
       router.push(newUrl, { scroll: false });
     }
-  }, [router, pathname, searchParams, values, defaults, replace]);
+  }, [router, pathname, searchParams, replace]);
 
   return [values, updateValues];
 }
-
