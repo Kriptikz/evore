@@ -70,7 +70,8 @@ export function Header() {
             >
               Miners
             </Link>
-            <Link 
+            {/* AutoMiners link hidden - feature not ready for public yet */}
+            {/* <Link 
               href="/autominers" 
               className={`text-sm transition-colors ${
                 isActive('/autominers') || isActive('/manage')
@@ -79,7 +80,7 @@ export function Header() {
               }`}
             >
               AutoMiners
-            </Link>
+            </Link> */}
           </nav>
         </div>
         <WalletMultiButton />

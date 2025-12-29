@@ -23,9 +23,18 @@ export default function RequestLogsPage() {
   
   // Filters for logs
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
-  const [endpointFilter, setEndpointFilter] = useState<string>("");
+  const [endpointFilter, setEndpointFilter] = useState<string>(""); // Local input state
+  const [debouncedEndpointFilter, setDebouncedEndpointFilter] = useState<string>(""); // Debounced value for API
   const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [ipLogsLoading, setIpLogsLoading] = useState(false);
+
+  // Debounce endpoint filter input
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setDebouncedEndpointFilter(endpointFilter);
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [endpointFilter]);
 
   // Convert status filter to API params
   const getStatusParams = (filter: StatusFilter): { statusGte?: number; statusLte?: number } => {
@@ -53,7 +62,7 @@ export default function RequestLogsPage() {
           hours,
           limit,
           ipHash: ipToFilter || undefined,
-          endpoint: endpointFilter || undefined,
+          endpoint: debouncedEndpointFilter || undefined,
           ...statusParams,
         }),
         api.getEndpointSummary(hours),
@@ -70,7 +79,7 @@ export default function RequestLogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [isAuthenticated, hours, limit, selectedIp, endpointFilter, statusFilter]);
+  }, [isAuthenticated, hours, limit, selectedIp, debouncedEndpointFilter, statusFilter]);
 
   // Fetch logs for a specific IP
   const fetchLogsForIp = useCallback(async (ipHash: string) => {
@@ -86,7 +95,7 @@ export default function RequestLogsPage() {
         hours,
         limit,
         ipHash,
-        endpoint: endpointFilter || undefined,
+        endpoint: debouncedEndpointFilter || undefined,
         ...statusParams,
       });
       setLogs(res.logs);
@@ -96,7 +105,7 @@ export default function RequestLogsPage() {
     } finally {
       setIpLogsLoading(false);
     }
-  }, [isAuthenticated, hours, limit, endpointFilter, statusFilter]);
+  }, [isAuthenticated, hours, limit, debouncedEndpointFilter, statusFilter]);
 
   // Clear IP filter and reload all logs
   const clearIpFilter = useCallback(async () => {
@@ -107,7 +116,7 @@ export default function RequestLogsPage() {
       const res = await api.getRequestLogs({
         hours,
         limit,
-        endpoint: endpointFilter || undefined,
+        endpoint: debouncedEndpointFilter || undefined,
         ...statusParams,
       });
       setLogs(res.logs);
@@ -116,7 +125,7 @@ export default function RequestLogsPage() {
     } finally {
       setIpLogsLoading(false);
     }
-  }, [hours, limit, endpointFilter, statusFilter]);
+  }, [hours, limit, debouncedEndpointFilter, statusFilter]);
 
   useEffect(() => {
     fetchData();
@@ -195,7 +204,10 @@ export default function RequestLogsPage() {
                 />
                 {endpointFilter && (
                   <button
-                    onClick={() => setEndpointFilter("")}
+                    onClick={() => {
+                      setEndpointFilter("");
+                      setDebouncedEndpointFilter("");
+                    }}
                     className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
                   >
                     ✕
@@ -232,7 +244,10 @@ export default function RequestLogsPage() {
                 <div className="flex items-center gap-1 bg-purple-500/20 border border-purple-500/40 text-purple-400 px-2 py-1 rounded text-sm">
                   <span>Endpoint: {endpointFilter}</span>
                   <button
-                    onClick={() => setEndpointFilter("")}
+                    onClick={() => {
+                      setEndpointFilter("");
+                      setDebouncedEndpointFilter("");
+                    }}
                     className="ml-1 text-purple-300 hover:text-white transition-colors"
                   >
                     ✕
@@ -254,6 +269,7 @@ export default function RequestLogsPage() {
                 onClick={() => {
                   setSelectedIp(null);
                   setEndpointFilter("");
+                  setDebouncedEndpointFilter("");
                   setStatusFilter("all");
                 }}
                 className="text-sm text-slate-400 hover:text-white transition-colors ml-2"

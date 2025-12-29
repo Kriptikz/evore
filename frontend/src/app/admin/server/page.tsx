@@ -54,13 +54,13 @@ export default function ServerMetricsPage() {
     ? validMetrics.reduce((sum, m) => sum + m.latency_avg, 0) / validMetrics.length 
     : 0;
 
-  // Calculate chart dimensions (handle empty/short arrays safely)
+  // Calculate chart dimensions (handle empty/short arrays and null values safely)
   const chartHeight = 150;
   const maxRequests = timeseries.length > 0 
-    ? Math.max(...timeseries.map(t => t.request_count), 1) 
+    ? Math.max(...timeseries.map(t => t.request_count ?? 0), 1) 
     : 1;
   const maxLatency = timeseries.length > 0 
-    ? Math.max(...timeseries.map(t => t.avg_latency_ms), 1) 
+    ? Math.max(...timeseries.map(t => t.avg_latency_ms ?? 0), 1) 
     : 1;
 
   return (
@@ -287,20 +287,20 @@ function RequestsChart({
   const getX = (index: number) => padding.left + (index / Math.max(data.length - 1, 1)) * chartWidth;
   const getY = (value: number) => padding.top + chartHeight - (value / Math.max(maxRequests, 1)) * chartHeight;
   
-  // Create line path for total requests
+  // Create line path for total requests (handle null values)
   const linePath = data.map((point, i) => {
     const x = getX(i);
-    const y = getY(point.request_count);
+    const y = getY(point.request_count ?? 0);
     return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
   }).join(' ');
   
   // Create area path (filled area under the line)
   const areaPath = `${linePath} L ${getX(data.length - 1)} ${padding.top + chartHeight} L ${getX(0)} ${padding.top + chartHeight} Z`;
   
-  // Create line path for errors
+  // Create line path for errors (handle null values)
   const errorLinePath = data.map((point, i) => {
     const x = getX(i);
-    const y = getY(point.error_count);
+    const y = getY(point.error_count ?? 0);
     return `${i === 0 ? 'M' : 'L'} ${x} ${y}`;
   }).join(' ');
   
@@ -398,7 +398,7 @@ function RequestsChart({
           <circle
             key={i}
             cx={getX(i)}
-            cy={getY(point.request_count)}
+            cy={getY(point.request_count ?? 0)}
             r={hoveredIndex === i ? 6 : 4}
             fill={hoveredIndex === i ? "#22c55e" : "transparent"}
             stroke={hoveredIndex === i ? "#22c55e" : "transparent"}
@@ -450,10 +450,10 @@ function RequestsChart({
           <div className="text-slate-400 mb-1">
             {new Date(hoveredPoint.minute_ts * 1000).toLocaleString()}
           </div>
-          <div className="text-white font-semibold">{hoveredPoint.request_count} requests</div>
-          <div className="text-green-400">{hoveredPoint.success_count} success</div>
-          <div className="text-red-400">{hoveredPoint.error_count} errors</div>
-          <div className="text-yellow-400">{hoveredPoint.avg_latency_ms.toFixed(1)}ms avg</div>
+          <div className="text-white font-semibold">{hoveredPoint.request_count ?? 0} requests</div>
+          <div className="text-green-400">{hoveredPoint.success_count ?? 0} success</div>
+          <div className="text-red-400">{hoveredPoint.error_count ?? 0} errors</div>
+          <div className="text-yellow-400">{(hoveredPoint.avg_latency_ms ?? 0).toFixed(1)}ms avg</div>
         </div>
       )}
       
