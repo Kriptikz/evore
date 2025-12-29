@@ -189,6 +189,10 @@ async fn main() -> anyhow::Result<()> {
     automation_states::spawn_automation_task(state.clone());
     tracing::info!("Automation state reconstruction task started");
     
+    // Transaction parse queue background task
+    automation_states::spawn_transaction_parse_task(state.clone());
+    tracing::info!("Transaction parse queue task started");
+    
     // ========== Axum Router ==========
     
     let app = Router::new()

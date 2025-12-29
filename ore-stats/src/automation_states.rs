@@ -1541,105 +1541,380 @@ async fn process_single_item_with_stats(
 }
 
 // ============================================================================
-// Backfill Integration
+// Backfill Integration - Queue-Based System
 // ============================================================================
 
-/// Parse transactions for a round and queue automation state fetches for all deployments.
-/// Called from backfill flow after transactions are fetched.
-pub async fn queue_from_round_transactions(
+/// Response for queue operations
+#[derive(Debug, Serialize)]
+pub struct QueueRoundResponse {
+    pub success: bool,
+    pub round_id: u64,
+    pub status: String,
+    pub message: String,
+}
+
+/// POST /admin/automation/queue-round/{round_id}
+/// Instantly queues a round for transaction parsing (no processing, just adds to queue)
+pub async fn queue_round_for_parsing(
     State(state): State<Arc<AppState>>,
     Path(round_id): Path<u64>,
-) -> Result<Json<AddToQueueResponse>, (StatusCode, Json<AuthError>)> {
-    // Get raw transactions for this round
-    let raw_txns = state.clickhouse
-        .get_raw_transactions_for_round(round_id)
-        .await
-        .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
-            )
-        })?;
+) -> Result<Json<QueueRoundResponse>, (StatusCode, Json<AuthError>)> {
+    // Check if already queued
+    let existing: Option<(String,)> = sqlx::query_as(
+        "SELECT status FROM transaction_parse_queue WHERE round_id = $1"
+    )
+    .bind(round_id as i64)
+    .fetch_optional(&state.postgres)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?;
     
-    if raw_txns.is_empty() {
-        return Ok(Json(AddToQueueResponse {
-            queued: 0,
-            already_exists: 0,
-            errors: vec!["No transactions found for round".to_string()],
+    if let Some((status,)) = existing {
+        return Ok(Json(QueueRoundResponse {
+            success: false,
+            round_id,
+            status,
+            message: "Round already in queue".to_string(),
         }));
     }
     
-    // Parse transactions to find deployments
-    let analyzer = crate::tx_analyzer::TransactionAnalyzer::new()
-        .with_expected_round(round_id);
+    // Add to queue
+    sqlx::query(
+        "INSERT INTO transaction_parse_queue (round_id, status) VALUES ($1, 'pending')"
+    )
+    .bind(round_id as i64)
+    .execute(&state.postgres)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?;
     
-    let mut queued = 0u32;
-    let mut already_exists = 0u32;
-    let mut errors = Vec::new();
+    tracing::info!("Queued round {} for transaction parsing", round_id);
     
+    Ok(Json(QueueRoundResponse {
+        success: true,
+        round_id,
+        status: "pending".to_string(),
+        message: "Round queued for processing".to_string(),
+    }))
+}
+
+/// GET /admin/automation/parse-queue
+/// Get status of transaction parse queue
+#[derive(Debug, Serialize)]
+pub struct ParseQueueStats {
+    pub pending: i64,
+    pub processing: i64,
+    pub completed: i64,
+    pub failed: i64,
+}
+
+pub async fn get_parse_queue_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ParseQueueStats>, (StatusCode, Json<AuthError>)> {
+    let stats: (i64, i64, i64, i64) = sqlx::query_as(r#"
+        SELECT 
+            COUNT(*) FILTER (WHERE status = 'pending'),
+            COUNT(*) FILTER (WHERE status = 'processing'),
+            COUNT(*) FILTER (WHERE status = 'completed'),
+            COUNT(*) FILTER (WHERE status = 'failed')
+        FROM transaction_parse_queue
+    "#)
+    .fetch_one(&state.postgres)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?;
+    
+    Ok(Json(ParseQueueStats {
+        pending: stats.0,
+        processing: stats.1,
+        completed: stats.2,
+        failed: stats.3,
+    }))
+}
+
+/// GET /admin/automation/parse-queue/items
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct ParseQueueItem {
+    pub id: i32,
+    pub round_id: i64,
+    pub status: String,
+    pub txns_found: Option<i32>,
+    pub deploys_queued: Option<i32>,
+    pub errors_count: Option<i32>,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    pub last_error: Option<String>,
+}
+
+pub async fn get_parse_queue_items(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<std::collections::HashMap<String, String>>,
+) -> Result<Json<Vec<ParseQueueItem>>, (StatusCode, Json<AuthError>)> {
+    let status_filter = query.get("status").map(|s| s.as_str());
+    let limit = query.get("limit").and_then(|s| s.parse().ok()).unwrap_or(50);
+    
+    let items: Vec<ParseQueueItem> = if let Some(status) = status_filter {
+        sqlx::query_as(r#"
+            SELECT id, round_id, status, txns_found, deploys_queued, errors_count,
+                   created_at, started_at, completed_at, last_error
+            FROM transaction_parse_queue
+            WHERE status = $1
+            ORDER BY created_at DESC
+            LIMIT $2
+        "#)
+        .bind(status)
+        .bind(limit)
+        .fetch_all(&state.postgres)
+        .await
+    } else {
+        sqlx::query_as(r#"
+            SELECT id, round_id, status, txns_found, deploys_queued, errors_count,
+                   created_at, started_at, completed_at, last_error
+            FROM transaction_parse_queue
+            ORDER BY created_at DESC
+            LIMIT $1
+        "#)
+        .bind(limit)
+        .fetch_all(&state.postgres)
+        .await
+    }.map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?;
+    
+    Ok(Json(items))
+}
+
+// ============================================================================
+// Background Transaction Parse Worker
+// ============================================================================
+
+/// Spawn background task that processes the transaction_parse_queue
+pub fn spawn_transaction_parse_task(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        tracing::info!("Transaction parse worker started");
+        
+        loop {
+            // Check for pending items
+            match process_next_parse_item(&state).await {
+                Ok(true) => {
+                    // Processed one, immediately check for more
+                    continue;
+                }
+                Ok(false) => {
+                    // No pending items, wait before checking again
+                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+                }
+                Err(e) => {
+                    tracing::error!("Transaction parse worker error: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                }
+            }
+        }
+    });
+}
+
+async fn process_next_parse_item(state: &AppState) -> Result<bool, String> {
+    // Claim a pending item
+    let item: Option<(i32, i64)> = sqlx::query_as(r#"
+        UPDATE transaction_parse_queue
+        SET status = 'processing', started_at = NOW()
+        WHERE id = (
+            SELECT id FROM transaction_parse_queue
+            WHERE status = 'pending'
+            ORDER BY created_at ASC
+            LIMIT 1
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING id, round_id
+    "#)
+    .fetch_optional(&state.postgres)
+    .await
+    .map_err(|e| e.to_string())?;
+    
+    let (id, round_id) = match item {
+        Some(i) => i,
+        None => return Ok(false), // No pending items
+    };
+    
+    tracing::info!("Processing transaction parse for round {}", round_id);
+    
+    // Get transactions from ClickHouse
+    let raw_txns = state.clickhouse
+        .get_raw_transactions_for_round(round_id as u64)
+        .await
+        .map_err(|e| e.to_string())?;
+    
+    let txns_found = raw_txns.len() as i32;
+    let mut deploys_queued = 0i32;
+    let mut errors_count = 0i32;
+    
+    // Parse each transaction
     for raw_tx in &raw_txns {
-        let analysis = match analyzer.analyze(&raw_tx.raw_json) {
-            Ok(a) => a,
-            Err(e) => {
-                errors.push(format!("Failed to analyze tx {}: {}", raw_tx.signature, e));
+        let deploys = match extract_deploy_instructions_fast(&raw_tx.raw_json, round_id as u64) {
+            Ok(d) => d,
+            Err(_) => {
+                errors_count += 1;
                 continue;
             }
         };
         
-        // Check if this transaction has ORE deployments
-        if let Some(ore) = &analysis.ore_analysis {
-            for deployment in &ore.deployments {
-                // Only queue if it matches our target round
-                if !deployment.round_matches {
+        for deploy in deploys {
+            let authority = match Pubkey::try_from(deploy.authority.as_str()) {
+                Ok(pk) => pk,
+                Err(_) => {
+                    errors_count += 1;
                     continue;
                 }
-                
-                // Derive automation PDA
-                let authority = match Pubkey::try_from(deployment.authority.as_str()) {
-                    Ok(pk) => pk,
-                    Err(_) => {
-                        errors.push(format!("Invalid authority: {}", deployment.authority));
-                        continue;
-                    }
-                };
-                let (automation_pda, _) = ore_api::automation_pda(authority);
-                
-                // Add to queue
-                let result = sqlx::query(r#"
-                    INSERT INTO automation_state_queue 
-                    (round_id, miner_pubkey, authority_pubkey, automation_pda, deploy_signature, 
-                     deploy_ix_index, deploy_slot, priority)
-                    VALUES ($1, $2, $3, $4, $5, $6, $7, 1000)
-                    ON CONFLICT (round_id, deploy_signature, deploy_ix_index) DO NOTHING
-                "#)
-                .bind(round_id as i64)
-                .bind(&deployment.miner)
-                .bind(&deployment.authority)
-                .bind(automation_pda.to_string())
-                .bind(&analysis.signature)
-                .bind(deployment.instruction_index as i16)
-                .bind(analysis.slot as i64)
-                .execute(&state.postgres)
-                .await;
-                
-                match result {
-                    Ok(r) if r.rows_affected() > 0 => queued += 1,
-                    Ok(_) => already_exists += 1,
-                    Err(e) => errors.push(format!("DB insert error: {}", e)),
-                }
+            };
+            
+            // Add to automation state queue
+            let result = sqlx::query(r#"
+                INSERT INTO automation_state_queue 
+                (round_id, miner_pubkey, authority_pubkey, deploy_signature, 
+                 deploy_ix_index, deploy_slot, priority)
+                VALUES ($1, $2, $3, $4, $5, $6, 1000)
+                ON CONFLICT (deploy_signature, deploy_ix_index) DO NOTHING
+            "#)
+            .bind(round_id)
+            .bind(&deploy.miner)
+            .bind(&deploy.authority)
+            .bind(&raw_tx.signature)
+            .bind(deploy.ix_index as i16)
+            .bind(raw_tx.slot as i64)
+            .execute(&state.postgres)
+            .await;
+            
+            match result {
+                Ok(r) if r.rows_affected() > 0 => deploys_queued += 1,
+                Ok(_) => {} // Already exists
+                Err(_) => errors_count += 1,
             }
         }
     }
     
+    // Mark as completed
+    sqlx::query(r#"
+        UPDATE transaction_parse_queue
+        SET status = 'completed', completed_at = NOW(),
+            txns_found = $2, deploys_queued = $3, errors_count = $4
+        WHERE id = $1
+    "#)
+    .bind(id)
+    .bind(txns_found)
+    .bind(deploys_queued)
+    .bind(errors_count)
+    .execute(&state.postgres)
+    .await
+    .map_err(|e| e.to_string())?;
+    
     tracing::info!(
-        "Queued {} automation state fetches for round {} ({} already existed, {} errors)",
-        queued, round_id, already_exists, errors.len()
+        "Completed parsing round {}: {} txns, {} deploys queued, {} errors",
+        round_id, txns_found, deploys_queued, errors_count
     );
     
-    Ok(Json(AddToQueueResponse {
-        queued,
-        already_exists,
-        errors,
-    }))
+    Ok(true)
 }
 
+/// Lightweight deploy instruction extraction (much faster than full analysis)
+struct FastDeployInfo {
+    authority: String,
+    miner: String,
+    ix_index: u8,
+}
+
+fn extract_deploy_instructions_fast(raw_json: &str, _expected_round: u64) -> Result<Vec<FastDeployInfo>, String> {
+    use serde_json::Value;
+    use evore::ore_api::{OreInstruction, Deploy, PROGRAM_ID};
+    
+    let tx: Value = serde_json::from_str(raw_json)
+        .map_err(|e| format!("JSON parse error: {}", e))?;
+    
+    let message = tx.get("transaction")
+        .and_then(|t| t.get("message"))
+        .ok_or("Missing message")?;
+    
+    let account_keys: Vec<Pubkey> = message.get("accountKeys")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter()
+            .filter_map(|k| k.as_str())
+            .filter_map(|s| Pubkey::try_from(s).ok())
+            .collect())
+        .unwrap_or_default();
+    
+    let instructions = message.get("instructions")
+        .and_then(Value::as_array)
+        .ok_or("Missing instructions")?;
+    
+    let mut deploys = Vec::new();
+    
+    for (ix_idx, ix) in instructions.iter().enumerate() {
+        // Check program
+        let prog_idx = ix.get("programIdIndex")
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX) as usize;
+        
+        let program_id = account_keys.get(prog_idx).copied().unwrap_or_default();
+        if program_id != PROGRAM_ID {
+            continue;
+        }
+        
+        // Decode data
+        let data = ix.get("data")
+            .and_then(Value::as_str)
+            .and_then(|s| bs58::decode(s).into_vec().ok())
+            .unwrap_or_default();
+        
+        if data.is_empty() {
+            continue;
+        }
+        
+        // Check if it's a Deploy instruction
+        let tag = data[0];
+        if let Ok(OreInstruction::Deploy) = OreInstruction::try_from(tag) {
+            // Parse Deploy struct
+            const DEPLOY_SIZE: usize = std::mem::size_of::<Deploy>();
+            if data.len() < 1 + DEPLOY_SIZE {
+                continue;
+            }
+            
+            // Get accounts: [signer, automation_info, miner_info, round_info, treasury, system_program]
+            let accounts = ix.get("accounts")
+                .and_then(Value::as_array);
+            
+            if accounts.is_none() {
+                continue;
+            }
+            let accounts = accounts.unwrap();
+            
+            let get_key = |idx: usize| -> Option<Pubkey> {
+                let acc_idx = accounts.get(idx)?.as_u64()? as usize;
+                account_keys.get(acc_idx).copied()
+            };
+            
+            let signer = get_key(0);
+            let miner = get_key(2);
+            
+            if let (Some(authority), Some(miner_pk)) = (signer, miner) {
+                deploys.push(FastDeployInfo {
+                    authority: authority.to_string(),
+                    miner: miner_pk.to_string(),
+                    ix_index: ix_idx as u8,
+                });
+            }
+        }
+    }
+    
+    Ok(deploys)
+}
+
+// Keep old function for backwards compatibility but have it use the queue
+pub async fn queue_from_round_transactions(
+    State(state): State<Arc<AppState>>,
+    Path(round_id): Path<u64>,
+) -> Result<Json<AddToQueueResponse>, (StatusCode, Json<AuthError>)> {
+    // Just add to the parse queue, don't process inline
+    let result = queue_round_for_parsing(State(state), Path(round_id)).await?;
+    let inner = result.0;
+    
+    Ok(Json(AddToQueueResponse {
+        queued: if inner.success { 1 } else { 0 },
+        already_exists: if inner.success { 0 } else { 1 },
+        errors: if inner.success { vec![] } else { vec![inner.message] },
+    }))
+}

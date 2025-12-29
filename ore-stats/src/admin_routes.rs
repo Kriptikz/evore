@@ -1057,6 +1057,10 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/automation/queue/retry", post(crate::automation_states::retry_failed))
         .route("/automation/queue/round/{round_id}", post(crate::automation_states::queue_missing_for_round))
         .route("/automation/queue/from-txns/{round_id}", post(crate::automation_states::queue_from_round_transactions))
+        // Transaction parse queue (new queue-based system)
+        .route("/automation/parse-queue", get(crate::automation_states::get_parse_queue_stats))
+        .route("/automation/parse-queue/items", get(crate::automation_states::get_parse_queue_items))
+        .route("/automation/queue-round/{round_id}", post(crate::automation_states::queue_round_for_parsing))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth::require_admin_auth,

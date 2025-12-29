@@ -655,7 +655,7 @@ function TransactionsPageContent() {
   const [error, setError] = useState<string | null>(null);
   const [selectedTx, setSelectedTx] = useState<FullTransactionAnalysis | null>(null);
   const [offset, setOffset] = useState(0);
-  const limit = 25;
+  const limit = 500;
   const [downloading, setDownloading] = useState(false);
   
   // Available rounds
@@ -953,6 +953,33 @@ function TransactionsPageContent() {
                   </div>
                   <div className="text-lg text-white">
                     Total: <span className="font-bold text-amber-400">{data.round_summary.ore_summary.total_deployed_sol.toFixed(6)} SOL</span>
+                  </div>
+                </div>
+              )}
+              
+              {/* Missing Automation States */}
+              {data.missing_automation_states && data.missing_automation_states.length > 0 && (
+                <div className="p-3 bg-orange-500/10 rounded-lg border border-orange-500/30">
+                  <h3 className="text-sm font-semibold text-orange-400 mb-2">
+                    ⚠ Missing Automation States ({data.missing_automation_states.length})
+                  </h3>
+                  <div className="text-xs text-slate-400 mb-2">
+                    These deployments need automation state data for accurate reconstruction:
+                  </div>
+                  <div className="space-y-1 max-h-32 overflow-y-auto">
+                    {data.missing_automation_states.slice(0, 10).map((m, i) => (
+                      <div key={i} className="flex items-center gap-2 text-xs">
+                        <Pubkey address={m.signature} short />
+                        <span className="text-slate-500">ix #{m.ix_index}</span>
+                        <span className="text-slate-500">-</span>
+                        <Pubkey address={m.miner} short />
+                      </div>
+                    ))}
+                    {data.missing_automation_states.length > 10 && (
+                      <div className="text-xs text-slate-500">
+                        ... and {data.missing_automation_states.length - 10} more
+                      </div>
+                    )}
                   </div>
                 </div>
               )}

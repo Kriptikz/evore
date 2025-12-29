@@ -409,8 +409,13 @@ export default function BackfillPage() {
           setMessage(`Round ${roundId}: finalized with ${finRes.deployments_stored} deployments`);
           break;
         case "queue_automation":
-          const autoRes = await api.queueAutomationFromTransactions(roundId);
-          setMessage(`Round ${roundId}: queued ${autoRes.queued} automation state fetches (${autoRes.already_exists} already existed)`);
+          // Use new queue-based system - instant, no timeout
+          const autoRes = await api.queueRoundForParsing(roundId);
+          if (autoRes.success) {
+            setMessage(`Round ${roundId}: added to parse queue (background worker will process)`);
+          } else {
+            setMessage(`Round ${roundId}: ${autoRes.message}`);
+          }
           break;
         default:
           break;

@@ -1174,6 +1174,23 @@ class ApiClient {
   async queueAutomationFromTransactions(roundId: number): Promise<AutomationAddToQueueResponse> {
     return this.request("POST", `/admin/automation/queue/from-txns/${roundId}`, { requireAuth: true });
   }
+  
+  // New queue-based system
+  async queueRoundForParsing(roundId: number): Promise<QueueRoundResponse> {
+    return this.request("POST", `/admin/automation/queue-round/${roundId}`, { requireAuth: true });
+  }
+  
+  async getParseQueueStats(): Promise<ParseQueueStats> {
+    return this.request("GET", "/admin/automation/parse-queue", { requireAuth: true });
+  }
+  
+  async getParseQueueItems(options?: { status?: string; limit?: number }): Promise<ParseQueueItem[]> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set("status", options.status);
+    if (options?.limit) params.set("limit", options.limit.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/admin/automation/parse-queue/items${query}`, { requireAuth: true });
+  }
 }
 
 // Transaction Viewer Types
@@ -1249,6 +1266,14 @@ export interface FullAnalysisResponse {
   analyzed_count: number;
   transactions: FullTransactionAnalysis[];
   round_summary: RoundAnalysisSummary;
+  missing_automation_states: MissingAutomationState[];
+}
+
+export interface MissingAutomationState {
+  signature: string;
+  ix_index: number;
+  miner: string;
+  authority: string;
 }
 
 export interface FullTransactionAnalysis {
@@ -1476,6 +1501,34 @@ export interface AutomationLiveStats {
   items_succeeded_this_session: number;
   items_failed_this_session: number;
   last_updated: string;
+}
+
+// Queue-based transaction parsing
+export interface QueueRoundResponse {
+  success: boolean;
+  round_id: number;
+  status: string;
+  message: string;
+}
+
+export interface ParseQueueStats {
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+}
+
+export interface ParseQueueItem {
+  id: number;
+  round_id: number;
+  status: string;
+  txns_found: number | null;
+  deploys_queued: number | null;
+  errors_count: number | null;
+  created_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  last_error: string | null;
 }
 
 export interface AutomationQueueItem {
