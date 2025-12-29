@@ -99,6 +99,25 @@ pub struct AppState {
     
     // Round finalization: Snapshot captured when round ends, used after reset
     pub round_snapshot: Arc<RwLock<Option<RoundSnapshot>>>,
+    
+    // Automation state reconstruction task live stats
+    pub automation_task_stats: Arc<RwLock<AutomationTaskStats>>,
+}
+
+/// Live statistics for the automation state reconstruction background task
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct AutomationTaskStats {
+    pub is_running: bool,
+    pub current_item_id: Option<i32>,
+    pub current_signature: Option<String>,
+    pub current_authority: Option<String>,
+    pub txns_searched_so_far: u32,
+    pub pages_fetched_so_far: u32,
+    pub elapsed_ms: u64,
+    pub items_processed_this_session: u64,
+    pub items_succeeded_this_session: u64,
+    pub items_failed_this_session: u64,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
 }
 
 /// Snapshot of round state captured when round ends (slots_left <= 0)
@@ -167,6 +186,7 @@ impl AppState {
             round_snapshot: Arc::new(RwLock::new(None)),
             deployments_cache: Arc::new(RwLock::new(HashMap::new())),
             deployments_cache_round_id: Arc::new(RwLock::new(0)),
+            automation_task_stats: Arc::new(RwLock::new(AutomationTaskStats::default())),
         }
     }
     

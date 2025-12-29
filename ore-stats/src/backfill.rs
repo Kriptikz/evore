@@ -2133,3 +2133,61 @@ pub async fn get_single_transaction(
     }
 }
 
+// ============================================================================
+// Rounds with Transactions List
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct RoundsWithTransactionsResponse {
+    pub rounds: Vec<crate::clickhouse::RoundTransactionInfo>,
+    pub total: u64,
+    pub page: u32,
+    pub limit: u32,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RoundsWithTransactionsQuery {
+    pub page: Option<u32>,
+    pub limit: Option<u32>,
+}
+
+/// GET /admin/transactions/rounds
+/// Get list of rounds that have stored transactions
+pub async fn get_rounds_with_transactions(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RoundsWithTransactionsQuery>,
+) -> Result<Json<RoundsWithTransactionsResponse>, (StatusCode, Json<AuthError>)> {
+    let page = query.page.unwrap_or(1);
+    let limit = query.limit.unwrap_or(50).min(200);
+    let offset = (page.saturating_sub(1)) * limit;
+    
+    let rounds = state.clickhouse
+        .get_rounds_with_transactions(limit, offset)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get rounds with transactions: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    let total = state.clickhouse
+        .get_rounds_with_transactions_count()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get count: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    Ok(Json(RoundsWithTransactionsResponse {
+        rounds,
+        total,
+        page,
+        limit,
+    }))
+}
+

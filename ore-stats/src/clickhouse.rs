@@ -24,7 +24,7 @@ pub enum ClickHouseError {
 /// ClickHouse client wrapper with connection pooling and batched inserts.
 #[derive(Clone)]
 pub struct ClickHouseClient {
-    client: Client,
+    pub client: Client,
 }
 
 impl ClickHouseClient {
@@ -1534,6 +1534,36 @@ impl ClickHouseClient {
         Ok(result)
     }
     
+    /// Get list of rounds that have stored transactions, with counts.
+    pub async fn get_rounds_with_transactions(&self, limit: u32, offset: u32) -> Result<Vec<RoundTransactionInfo>, ClickHouseError> {
+        let rows = self.client
+            .query(r#"
+                SELECT 
+                    round_id,
+                    count() as transaction_count,
+                    min(slot) as min_slot,
+                    max(slot) as max_slot
+                FROM raw_transactions FINAL
+                GROUP BY round_id
+                ORDER BY round_id DESC
+                LIMIT ? OFFSET ?
+            "#)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all::<RoundTransactionInfo>()
+            .await?;
+        Ok(rows)
+    }
+    
+    /// Get total count of unique rounds with stored transactions.
+    pub async fn get_rounds_with_transactions_count(&self) -> Result<u64, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count(DISTINCT round_id) FROM raw_transactions FINAL")
+            .fetch_one()
+            .await?;
+        Ok(count)
+    }
+    
     // ========== Automation States ==========
     
     /// Insert an automation state snapshot.
@@ -2545,6 +2575,15 @@ pub struct RawTransaction {
     pub signer: String,
     #[serde(default)]
     pub authority: String,
+}
+
+/// Info about stored transactions for a round.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RoundTransactionInfo {
+    pub round_id: u64,
+    pub transaction_count: u64,
+    pub min_slot: u64,
+    pub max_slot: u64,
 }
 
 /// Automation state snapshot.

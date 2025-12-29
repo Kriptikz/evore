@@ -1042,10 +1042,21 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/verify/{round_id}", post(crate::backfill::verify_round))
         .route("/finalize/{round_id}", post(crate::backfill::finalize_backfill_round))
         // Transaction viewer
+        .route("/transactions/rounds", get(crate::backfill::get_rounds_with_transactions))
         .route("/transactions/{round_id}", get(crate::backfill::get_round_transactions))
         .route("/transactions/{round_id}/raw", get(crate::backfill::get_round_transactions_raw))
         .route("/transactions/{round_id}/full", get(crate::backfill::get_round_transactions_full))
         .route("/transactions/single/{signature}", get(crate::backfill::get_single_transaction))
+        // Automation state reconstruction
+        .route("/automation/stats", get(crate::automation_states::get_queue_stats))
+        .route("/automation/fetch-stats", get(crate::automation_states::get_fetch_stats))
+        .route("/automation/live", get(crate::automation_states::get_live_stats))
+        .route("/automation/queue", get(crate::automation_states::get_queue_items))
+        .route("/automation/queue", post(crate::automation_states::add_to_queue))
+        .route("/automation/queue/process", post(crate::automation_states::process_queue))
+        .route("/automation/queue/retry", post(crate::automation_states::retry_failed))
+        .route("/automation/queue/round/{round_id}", post(crate::automation_states::queue_missing_for_round))
+        .route("/automation/queue/from-txns/{round_id}", post(crate::automation_states::queue_from_round_transactions))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth::require_admin_auth,

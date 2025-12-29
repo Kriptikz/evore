@@ -26,6 +26,7 @@ mod admin_routes;
 mod app_state;
 mod app_error;
 mod app_rpc;
+mod automation_states;
 mod clickhouse;
 mod database;
 mod entropy_api;
@@ -183,6 +184,10 @@ async fn main() -> anyhow::Result<()> {
     // EVORE accounts polling task
     let evore_handle = tasks::spawn_evore_polling(state.clone());
     tracing::info!("EVORE polling started");
+    
+    // Automation state reconstruction background task
+    automation_states::spawn_automation_task(state.clone());
+    tracing::info!("Automation state reconstruction task started");
     
     // ========== Axum Router ==========
     

@@ -183,6 +183,7 @@ pub enum ParsedInstruction {
         board: String,
         miner: String,
         round: String,
+        round_id: Option<u64>, // Derived round ID from PDA
         amount_per_square: u64,
         amount_sol: f64,
         squares_mask: u32,
@@ -190,8 +191,27 @@ pub enum ParsedInstruction {
         total_lamports: u64,
         total_sol: f64,
     },
+    OreCheckpoint {
+        signer: String,
+        authority: String,
+        miner: String,
+        round: String,
+        round_id: Option<u64>, // Previous round being checkpointed
+    },
+    OreClaim {
+        signer: String,
+        authority: String,
+        miner: String,
+        beneficiary: String,
+    },
     OreReset {
         signer: String,
+        board: String,
+    },
+    OreAutomate {
+        signer: String,
+        authority: String,
+        automation_pda: String,
     },
     OreLog {
         // Log instruction - event data
@@ -201,6 +221,7 @@ pub enum ParsedInstruction {
     OreOther {
         instruction_tag: u8,
         instruction_name: String,
+        accounts_count: usize,
     },
     
     // Token Program
@@ -287,6 +308,8 @@ pub struct OreDeploymentInfo {
     pub authority: String,
     pub miner: String,
     pub round: String,
+    pub round_id: Option<u64>,
+    pub expected_round_id: Option<u64>,
     pub round_matches: bool,
     pub amount_per_square: u64,
     pub squares: Vec<u8>,
@@ -309,20 +332,57 @@ pub struct TransactionSummaryInfo {
 // Analyzer Implementation
 // ============================================================================
 
+/// Map of known round PDAs to their round IDs (for reverse lookup)
+static ROUND_PDA_CACHE: std::sync::LazyLock<std::sync::RwLock<HashMap<Pubkey, u64>>> = 
+    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
+
+/// Try to derive round ID from a round PDA by checking cached values or brute-force search
+fn derive_round_id_from_pda(pda: &Pubkey) -> Option<u64> {
+    // Check cache first
+    if let Ok(cache) = ROUND_PDA_CACHE.read() {
+        if let Some(&id) = cache.get(pda) {
+            return Some(id);
+        }
+    }
+    
+    // Try searching around recent round IDs (0 to 200000)
+    // This is a reasonable range for ORE rounds
+    for id in (0..200000u64).rev() {
+        let (derived_pda, _) = ore_api::round_pda(id);
+        if derived_pda == *pda {
+            // Cache it
+            if let Ok(mut cache) = ROUND_PDA_CACHE.write() {
+                cache.insert(*pda, id);
+            }
+            return Some(id);
+        }
+    }
+    
+    None
+}
+
 pub struct TransactionAnalyzer {
     expected_round_pda: Option<Pubkey>,
+    expected_round_id: Option<u64>,
 }
 
 impl TransactionAnalyzer {
     pub fn new() -> Self {
         Self {
             expected_round_pda: None,
+            expected_round_id: None,
         }
     }
     
     pub fn with_expected_round(mut self, round_id: u64) -> Self {
         let (pda, _) = ore_api::round_pda(round_id);
         self.expected_round_pda = Some(pda);
+        self.expected_round_id = Some(round_id);
+        
+        // Cache this PDA mapping
+        if let Ok(mut cache) = ROUND_PDA_CACHE.write() {
+            cache.insert(pda, round_id);
+        }
         self
     }
     
@@ -493,10 +553,14 @@ impl TransactionAnalyzer {
                 // Track ORE specifics
                 if let Some(parsed) = &analysis.parsed {
                     match parsed {
-                        ParsedInstruction::OreDeploy { signer, authority, miner, round, amount_per_square, squares, .. } => {
-                            let matches = self.expected_round_pda
-                                .map(|expected| round == &expected.to_string())
-                                .unwrap_or(true);
+                        ParsedInstruction::OreDeploy { signer, authority, miner, round, round_id, amount_per_square, squares, .. } => {
+                            // Compare using round_id if available, otherwise compare PDAs
+                            let matches = match (*round_id, self.expected_round_id) {
+                                (Some(deploy_round), Some(expected)) => deploy_round == expected,
+                                _ => self.expected_round_pda
+                                    .map(|expected| round == &expected.to_string())
+                                    .unwrap_or(true),
+                            };
                             let total = *amount_per_square * squares.len() as u64;
                             ore_deployments.push(OreDeploymentInfo {
                                 instruction_index: ix_idx,
@@ -505,6 +569,8 @@ impl TransactionAnalyzer {
                                 authority: authority.clone(),
                                 miner: miner.clone(),
                                 round: round.clone(),
+                                round_id: *round_id,
+                                expected_round_id: self.expected_round_id,
                                 round_matches: matches,
                                 amount_per_square: *amount_per_square,
                                 squares: squares.clone(),
@@ -539,10 +605,14 @@ impl TransactionAnalyzer {
                         // Track inner ORE deployments
                         if let Some(parsed) = &analysis.parsed {
                             match parsed {
-                                ParsedInstruction::OreDeploy { signer, authority, miner, round, amount_per_square, squares, .. } => {
-                                    let matches = self.expected_round_pda
-                                        .map(|expected| round == &expected.to_string())
-                                        .unwrap_or(true);
+                                ParsedInstruction::OreDeploy { signer, authority, miner, round, round_id, amount_per_square, squares, .. } => {
+                                    // Compare using round_id if available
+                                    let matches = match (round_id, self.expected_round_id) {
+                                        (Some(deploy_round), Some(expected)) => *deploy_round == expected,
+                                        _ => self.expected_round_pda
+                                            .map(|expected| round == &expected.to_string())
+                                            .unwrap_or(true),
+                                    };
                                     let total = *amount_per_square * squares.len() as u64;
                                     ore_deployments.push(OreDeploymentInfo {
                                         instruction_index: ix_idx,
@@ -551,6 +621,8 @@ impl TransactionAnalyzer {
                                         authority: authority.clone(),
                                         miner: miner.clone(),
                                         round: round.clone(),
+                                        round_id: *round_id,
+                                        expected_round_id: self.expected_round_id,
                                         round_matches: matches,
                                         amount_per_square: *amount_per_square,
                                         squares: squares.clone(),
@@ -684,7 +756,7 @@ impl TransactionAnalyzer {
             accounts.push(InstructionAccount {
                 index: acc_idx,
                 pubkey: pk.to_string(),
-                is_signer: false, // Will be determined by instruction type
+                is_signer: i == 0, // First account is usually the signer
                 is_writable: false,
                 role: None,
             });
@@ -697,6 +769,9 @@ impl TransactionAnalyzer {
         
         let data = bs58::decode(data_str).into_vec()
             .map_err(|e| format!("Base58 decode error: {}", e))?;
+        
+        // Add account roles based on program and instruction type
+        self.add_account_roles(&program_id_str, &data, &mut accounts);
         
         let data_hex = hex::encode(&data);
         
@@ -1111,6 +1186,12 @@ impl TransactionAnalyzer {
                 
                 let total = amount * squares.len() as u64;
                 
+                // Try to derive round ID from round PDA
+                let round_str = accounts.get(5).map(|a| a.pubkey.clone()).unwrap_or_default();
+                let round_id = Pubkey::from_str(&round_str)
+                    .ok()
+                    .and_then(|pk| derive_round_id_from_pda(&pk));
+                
                 (
                     "Deploy".to_string(),
                     Some(ParsedInstruction::OreDeploy {
@@ -1119,7 +1200,8 @@ impl TransactionAnalyzer {
                         automation_pda: accounts.get(2).map(|a| a.pubkey.clone()).unwrap_or_default(),
                         board: accounts.get(3).map(|a| a.pubkey.clone()).unwrap_or_default(),
                         miner: accounts.get(4).map(|a| a.pubkey.clone()).unwrap_or_default(),
-                        round: accounts.get(5).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        round: round_str,
+                        round_id,
                         amount_per_square: amount,
                         amount_sol: amount as f64 / 1e9,
                         squares_mask: mask,
@@ -1130,11 +1212,55 @@ impl TransactionAnalyzer {
                     None,
                 )
             }
+            Ok(OreInstruction::Checkpoint) => {
+                // Checkpoint uses previous round
+                let round_str = accounts.get(3).map(|a| a.pubkey.clone()).unwrap_or_default();
+                let round_id = Pubkey::from_str(&round_str)
+                    .ok()
+                    .and_then(|pk| derive_round_id_from_pda(&pk));
+                
+                (
+                    "Checkpoint".to_string(),
+                    Some(ParsedInstruction::OreCheckpoint {
+                        signer: accounts.get(0).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        authority: accounts.get(1).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        miner: accounts.get(2).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        round: round_str,
+                        round_id,
+                    }),
+                    None,
+                )
+            }
+            Ok(OreInstruction::ClaimSOL) | Ok(OreInstruction::ClaimORE) => {
+                let name = format!("{:?}", OreInstruction::try_from(tag).unwrap());
+                (
+                    name.clone(),
+                    Some(ParsedInstruction::OreClaim {
+                        signer: accounts.get(0).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        authority: accounts.get(1).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        miner: accounts.get(2).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        beneficiary: accounts.get(3).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                    }),
+                    None,
+                )
+            }
+            Ok(OreInstruction::Automate) => {
+                (
+                    "Automate".to_string(),
+                    Some(ParsedInstruction::OreAutomate {
+                        signer: accounts.get(0).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        authority: accounts.get(1).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        automation_pda: accounts.get(2).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                    }),
+                    None,
+                )
+            }
             Ok(OreInstruction::Reset) => {
                 (
                     "Reset".to_string(),
                     Some(ParsedInstruction::OreReset {
                         signer: accounts.get(0).map(|a| a.pubkey.clone()).unwrap_or_default(),
+                        board: accounts.get(1).map(|a| a.pubkey.clone()).unwrap_or_default(),
                     }),
                     None,
                 )
@@ -1161,6 +1287,7 @@ impl TransactionAnalyzer {
                     Some(ParsedInstruction::OreOther {
                         instruction_tag: tag,
                         instruction_name: name,
+                        accounts_count: accounts.len(),
                     }),
                     None,
                 )
@@ -1212,6 +1339,111 @@ impl TransactionAnalyzer {
             instructions.first()
                 .map(|ix| format!("{} - {}", ix.program_name, ix.instruction_type))
                 .unwrap_or_else(|| "Unknown".to_string())
+        }
+    }
+    
+    /// Add account role labels based on program and instruction type
+    fn add_account_roles(
+        &self,
+        program_id: &str,
+        data: &[u8],
+        accounts: &mut [InstructionAccount],
+    ) {
+        // System Program
+        if program_id == SYSTEM_PROGRAM_ID && data.len() >= 4 {
+            let tag = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+            match tag {
+                // Transfer
+                2 => {
+                    if let Some(a) = accounts.get_mut(0) { a.role = Some("Source".into()); a.is_signer = true; }
+                    if let Some(a) = accounts.get_mut(1) { a.role = Some("Destination".into()); }
+                }
+                // CreateAccount
+                0 => {
+                    if let Some(a) = accounts.get_mut(0) { a.role = Some("Funder".into()); a.is_signer = true; }
+                    if let Some(a) = accounts.get_mut(1) { a.role = Some("New Account".into()); }
+                }
+                _ => {}
+            }
+        }
+        
+        // Compute Budget - no accounts typically
+        
+        // ORE Program
+        if program_id == evore::ore_api::PROGRAM_ID.to_string() && !data.is_empty() {
+            let tag = data[0];
+            if let Ok(ore_ix) = OreInstruction::try_from(tag) {
+                match ore_ix {
+                    OreInstruction::Deploy => {
+                        // 0: signer, 1: authority, 2: automation_pda, 3: board, 4: miner, 5: round
+                        if let Some(a) = accounts.get_mut(0) { a.role = Some("Signer".into()); a.is_signer = true; }
+                        if let Some(a) = accounts.get_mut(1) { a.role = Some("Authority".into()); }
+                        if let Some(a) = accounts.get_mut(2) { a.role = Some("Automation PDA".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(3) { a.role = Some("Board".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(4) { a.role = Some("Miner".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(5) { a.role = Some("Round".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(6) { a.role = Some("Treasury".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(7) { a.role = Some("System Program".into()); }
+                    }
+                    OreInstruction::Reset => {
+                        if let Some(a) = accounts.get_mut(0) { a.role = Some("Signer".into()); a.is_signer = true; }
+                        if let Some(a) = accounts.get_mut(1) { a.role = Some("Board".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(2) { a.role = Some("New Round".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(3) { a.role = Some("Treasury".into()); a.is_writable = true; }
+                    }
+                    OreInstruction::Checkpoint => {
+                        if let Some(a) = accounts.get_mut(0) { a.role = Some("Signer".into()); a.is_signer = true; }
+                        if let Some(a) = accounts.get_mut(1) { a.role = Some("Authority".into()); }
+                        if let Some(a) = accounts.get_mut(2) { a.role = Some("Miner".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(3) { a.role = Some("Prev Round".into()); }
+                        if let Some(a) = accounts.get_mut(4) { a.role = Some("Treasury".into()); a.is_writable = true; }
+                    }
+                    OreInstruction::ClaimSOL | OreInstruction::ClaimORE => {
+                        if let Some(a) = accounts.get_mut(0) { a.role = Some("Signer".into()); a.is_signer = true; }
+                        if let Some(a) = accounts.get_mut(1) { a.role = Some("Authority".into()); }
+                        if let Some(a) = accounts.get_mut(2) { a.role = Some("Miner".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(3) { a.role = Some("Beneficiary".into()); a.is_writable = true; }
+                        if let Some(a) = accounts.get_mut(4) { a.role = Some("Treasury".into()); a.is_writable = true; }
+                    }
+                    OreInstruction::Automate => {
+                        if let Some(a) = accounts.get_mut(0) { a.role = Some("Signer".into()); a.is_signer = true; }
+                        if let Some(a) = accounts.get_mut(1) { a.role = Some("Authority".into()); }
+                        if let Some(a) = accounts.get_mut(2) { a.role = Some("Automation PDA".into()); a.is_writable = true; }
+                    }
+                    _ => {
+                        // Generic: first account is signer
+                        if let Some(a) = accounts.get_mut(0) { a.role = Some("Signer".into()); a.is_signer = true; }
+                    }
+                }
+            }
+        }
+        
+        // Token Program
+        if (program_id == TOKEN_PROGRAM_ID || program_id == TOKEN_2022_PROGRAM_ID) && !data.is_empty() {
+            match data[0] {
+                // Transfer
+                3 => {
+                    if let Some(a) = accounts.get_mut(0) { a.role = Some("Source".into()); a.is_writable = true; }
+                    if let Some(a) = accounts.get_mut(1) { a.role = Some("Destination".into()); a.is_writable = true; }
+                    if let Some(a) = accounts.get_mut(2) { a.role = Some("Authority".into()); a.is_signer = true; }
+                }
+                // TransferChecked
+                12 => {
+                    if let Some(a) = accounts.get_mut(0) { a.role = Some("Source".into()); a.is_writable = true; }
+                    if let Some(a) = accounts.get_mut(1) { a.role = Some("Mint".into()); }
+                    if let Some(a) = accounts.get_mut(2) { a.role = Some("Destination".into()); a.is_writable = true; }
+                    if let Some(a) = accounts.get_mut(3) { a.role = Some("Authority".into()); a.is_signer = true; }
+                }
+                _ => {}
+            }
+        }
+        
+        // Associated Token Account Program
+        if program_id == ASSOCIATED_TOKEN_PROGRAM_ID && accounts.len() >= 4 {
+            if let Some(a) = accounts.get_mut(0) { a.role = Some("Payer".into()); a.is_signer = true; }
+            if let Some(a) = accounts.get_mut(1) { a.role = Some("ATA".into()); a.is_writable = true; }
+            if let Some(a) = accounts.get_mut(2) { a.role = Some("Wallet".into()); }
+            if let Some(a) = accounts.get_mut(3) { a.role = Some("Mint".into()); }
         }
     }
 }

@@ -244,6 +244,28 @@ export interface FetchTxnsResponse {
   status: string;
 }
 
+export interface DeployEventCoverageResponse {
+  round_id: number;
+  /** True if all Deploy instructions have corresponding DeployEvents */
+  has_all_events: boolean;
+  /** Number of Deploy instructions found */
+  deploy_count: number;
+  /** Number of DeployEvents found for this round */
+  event_count: number;
+  /** Number of deploys missing events */
+  deploys_without_events: number;
+  /** True if automation states need to be fetched */
+  needs_automation_states: boolean;
+  /** Details of deploys missing events */
+  missing_deploys: DeployWithoutEventInfo[];
+}
+
+export interface DeployWithoutEventInfo {
+  signature: string;
+  authority: string;
+  slot: number;
+}
+
 export interface ReconstructResponse {
   round_id: number;
   deployments_reconstructed: number;
@@ -857,6 +879,14 @@ class ApiClient {
     return this.request("GET", `/admin/rounds/${roundId}/status`, { requireAuth: true });
   }
 
+  /**
+   * Check if all Deploy instructions in a round have corresponding DeployEvents.
+   * If all events exist, automation state fetching can be skipped for reconstruction.
+   */
+  async checkDeployEventCoverage(roundId: number): Promise<DeployEventCoverageResponse> {
+    return this.request("GET", `/admin/deploy-events/${roundId}`, { requireAuth: true });
+  }
+
   async deleteRoundData(roundId: number, deleteRound = false, deleteDeployments = true): Promise<DeleteResponse> {
     const params = new URLSearchParams();
     params.set("delete_round", deleteRound.toString());
@@ -1093,6 +1123,57 @@ class ApiClient {
   async getSingleTransaction(signature: string): Promise<FullTransactionAnalysis> {
     return this.request("GET", `/admin/transactions/single/${signature}`, { requireAuth: true });
   }
+
+  async getRoundsWithTransactions(page = 1, limit = 50): Promise<RoundsWithTransactionsResponse> {
+    return this.request("GET", `/admin/transactions/rounds?page=${page}&limit=${limit}`, { requireAuth: true });
+  }
+
+  // ========== Automation State Reconstruction ==========
+
+  async getAutomationQueueStats(): Promise<AutomationQueueStats> {
+    return this.request("GET", "/admin/automation/stats", { requireAuth: true });
+  }
+
+  async getAutomationFetchStats(): Promise<AutomationFetchStats> {
+    return this.request("GET", "/admin/automation/fetch-stats", { requireAuth: true });
+  }
+
+  async getAutomationLiveStats(): Promise<AutomationLiveStats | null> {
+    return this.request<AutomationLiveStats>("GET", "/admin/automation/live", { requireAuth: true }).catch(() => null);
+  }
+
+  async getAutomationQueue(options?: {
+    status?: string;
+    round_id?: number;
+    authority?: string;
+    page?: number;
+    limit?: number;
+  }): Promise<AutomationQueueResponse> {
+    const params = new URLSearchParams();
+    if (options?.status) params.set("status", options.status);
+    if (options?.round_id) params.set("round_id", options.round_id.toString());
+    if (options?.authority) params.set("authority", options.authority);
+    if (options?.page) params.set("page", options.page.toString());
+    if (options?.limit) params.set("limit", options.limit.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/admin/automation/queue${query}`, { requireAuth: true });
+  }
+
+  async processAutomationQueue(count = 5): Promise<AutomationProcessResult> {
+    return this.request("POST", `/admin/automation/queue/process?count=${count}`, { requireAuth: true });
+  }
+
+  async retryFailedAutomation(): Promise<{ retried: number }> {
+    return this.request("POST", "/admin/automation/queue/retry", { requireAuth: true });
+  }
+
+  async queueAutomationForRound(roundId: number): Promise<AutomationAddToQueueResponse> {
+    return this.request("POST", `/admin/automation/queue/round/${roundId}`, { requireAuth: true });
+  }
+
+  async queueAutomationFromTransactions(roundId: number): Promise<AutomationAddToQueueResponse> {
+    return this.request("POST", `/admin/automation/queue/from-txns/${roundId}`, { requireAuth: true });
+  }
 }
 
 // Transaction Viewer Types
@@ -1254,10 +1335,13 @@ export type ParsedInstruction =
   | { type: "ComputeSetLimit"; units: number }
   | { type: "ComputeSetPrice"; micro_lamports: number }
   | { type: "ComputeRequestHeapFrame"; bytes: number }
-  | { type: "OreDeploy"; signer: string; authority: string; automation_pda: string; board: string; miner: string; round: string; amount_per_square: number; amount_sol: number; squares_mask: number; squares: number[]; total_lamports: number; total_sol: number }
-  | { type: "OreReset"; signer: string }
+  | { type: "OreDeploy"; signer: string; authority: string; automation_pda: string; board: string; miner: string; round: string; round_id: number | null; amount_per_square: number; amount_sol: number; squares_mask: number; squares: number[]; total_lamports: number; total_sol: number }
+  | { type: "OreCheckpoint"; signer: string; authority: string; miner: string; round: string; round_id: number | null }
+  | { type: "OreClaim"; signer: string; authority: string; miner: string; beneficiary: string }
+  | { type: "OreAutomate"; signer: string; authority: string; automation_pda: string }
+  | { type: "OreReset"; signer: string; board: string }
   | { type: "OreLog"; event_type: string; data_hex: string }
-  | { type: "OreOther"; instruction_tag: number; instruction_name: string }
+  | { type: "OreOther"; instruction_tag: number; instruction_name: string; accounts_count: number }
   | { type: "TokenTransfer"; source: string; destination: string; authority: string; amount: number }
   | { type: "TokenTransferChecked"; source: string; destination: string; mint: string; authority: string; amount: number; decimals: number }
   | { type: "TokenInitializeAccount"; account: string; mint: string; owner: string }
@@ -1287,6 +1371,8 @@ export interface OreDeploymentInfo {
   authority: string;
   miner: string;
   round: string;
+  round_id: number | null;
+  expected_round_id: number | null;
   round_matches: boolean;
   amount_per_square: number;
   squares: number[];
@@ -1336,6 +1422,116 @@ export interface SquareDeploymentInfo {
   square: number;
   deployment_count: number;
   total_lamports: number;
+}
+
+export interface RoundTransactionInfo {
+  round_id: number;
+  transaction_count: number;
+  min_slot: number;
+  max_slot: number;
+}
+
+export interface RoundsWithTransactionsResponse {
+  rounds: RoundTransactionInfo[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+// ============================================================================
+// Automation State Reconstruction Types
+// ============================================================================
+
+export interface AutomationQueueStats {
+  pending: number;
+  processing: number;
+  completed: number;
+  failed: number;
+  total: number;
+  avg_fetch_duration_ms: number | null;
+  avg_txns_searched: number | null;
+}
+
+export interface AutomationFetchStats {
+  total_fetched: number;
+  found_count: number;
+  active_count: number;
+  avg_txns_searched: number;
+  avg_duration_ms: number;
+  max_txns_searched: number;
+  max_duration_ms: number;
+  partial_deploy_count: number;
+  total_sol_tracked: number;
+}
+
+export interface AutomationLiveStats {
+  is_running: boolean;
+  current_item_id: number | null;
+  current_signature: string | null;
+  current_authority: string | null;
+  txns_searched_so_far: number;
+  pages_fetched_so_far: number;
+  elapsed_ms: number;
+  items_processed_this_session: number;
+  items_succeeded_this_session: number;
+  items_failed_this_session: number;
+  last_updated: string;
+}
+
+export interface AutomationQueueItem {
+  id: number;
+  round_id: number;
+  miner_pubkey: string;
+  authority_pubkey: string;
+  automation_pda: string;
+  deploy_signature: string;
+  deploy_ix_index: number;
+  deploy_slot: number;
+  status: string;
+  attempts: number;
+  last_error: string | null;
+  txns_searched: number | null;
+  pages_fetched: number | null;
+  fetch_duration_ms: number | null;
+  automation_found: boolean | null;
+  priority: number;
+  created_at: string;
+  updated_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+}
+
+export interface AutomationQueueResponse {
+  items: AutomationQueueItem[];
+  total: number;
+  page: number;
+  limit: number;
+}
+
+export interface AutomationProcessResult {
+  processed: number;
+  success: number;
+  failed: number;
+  details: AutomationProcessDetail[];
+}
+
+export interface AutomationProcessDetail {
+  id: number;
+  deploy_signature: string;
+  success: boolean;
+  automation_found: boolean;
+  automation_active: boolean;
+  txns_searched: number;
+  duration_ms: number;
+  used_cache: boolean;
+  cache_slot: number | null;
+  error: string | null;
+}
+
+export interface AutomationAddToQueueResponse {
+  queued: number;
+  already_exists: number;
+  errors: string[];
 }
 
 // Singleton instance

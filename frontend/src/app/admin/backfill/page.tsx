@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import Link from "next/link";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { useAdmin } from "@/context/AdminContext";
 import { api, RoundStatus, RoundWithData, RoundStatsResponse, FilterMode } from "@/lib/api";
@@ -24,7 +25,7 @@ function StepBadge({ done, active, label }: { done: boolean; active?: boolean; l
   );
 }
 
-type RoundAction = WorkflowStep | "reset_txns";
+type RoundAction = WorkflowStep | "reset_txns" | "queue_automation";
 
 function RoundStatusRow({
   round,
@@ -102,6 +103,23 @@ function RoundStatusRow({
             >
               Reset Txns
             </button>
+          )}
+          {round.transactions_fetched && round.transaction_count > 0 && (
+            <>
+              <Link
+                href={`/admin/transactions?round_id=${round.round_id}`}
+                className="px-3 py-1.5 text-sm rounded-lg bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 transition-colors"
+              >
+                View Txns
+              </Link>
+              <button
+                onClick={() => onAction(round.round_id, "queue_automation")}
+                className="px-3 py-1.5 text-sm rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 text-cyan-400 transition-colors"
+                title="Queue automation state fetching for all deployments"
+              >
+                Queue Auto
+              </button>
+            </>
           )}
           {!nextStep && (
             <span className="text-green-400 text-sm">✓ Complete</span>
@@ -389,6 +407,10 @@ export default function BackfillPage() {
         case "finalize":
           const finRes = await api.finalizeRound(roundId);
           setMessage(`Round ${roundId}: finalized with ${finRes.deployments_stored} deployments`);
+          break;
+        case "queue_automation":
+          const autoRes = await api.queueAutomationFromTransactions(roundId);
+          setMessage(`Round ${roundId}: queued ${autoRes.queued} automation state fetches (${autoRes.already_exists} already existed)`);
           break;
         default:
           break;
