@@ -7,6 +7,8 @@ import { useAdmin } from "@/context/AdminContext";
 
 type TabType = "logs" | "endpoints" | "rate-limits" | "ips";
 
+type StatusFilter = "all" | "success" | "redirect" | "client_error" | "server_error" | "errors";
+
 export default function RequestLogsPage() {
   const { isAuthenticated } = useAdmin();
   const [activeTab, setActiveTab] = useState<TabType>("endpoints");
@@ -15,23 +17,45 @@ export default function RequestLogsPage() {
   const [rateLimits, setRateLimits] = useState<RateLimitEventRow[]>([]);
   const [ipActivity, setIpActivity] = useState<IpActivityRow[]>([]);
   const [hours, setHours] = useState(24);
+  const [limit, setLimit] = useState(500);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   
-  // IP filter for loading logs for a specific IP
+  // Filters for logs
   const [selectedIp, setSelectedIp] = useState<string | null>(null);
+  const [endpointFilter, setEndpointFilter] = useState<string>("");
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>("all");
   const [ipLogsLoading, setIpLogsLoading] = useState(false);
+
+  // Convert status filter to API params
+  const getStatusParams = (filter: StatusFilter): { statusGte?: number; statusLte?: number } => {
+    switch (filter) {
+      case "success": return { statusGte: 200, statusLte: 299 };
+      case "redirect": return { statusGte: 300, statusLte: 399 };
+      case "client_error": return { statusGte: 400, statusLte: 499 };
+      case "server_error": return { statusGte: 500, statusLte: 599 };
+      case "errors": return { statusGte: 400 };
+      default: return {};
+    }
+  };
 
   const fetchData = useCallback(async (ipFilter?: string | null) => {
     if (!isAuthenticated) return;
     
     // Use the provided ipFilter, or fall back to current selectedIp state
     const ipToFilter = ipFilter !== undefined ? ipFilter : selectedIp;
+    const statusParams = getStatusParams(statusFilter);
     
     try {
       setLoading(true);
       const [logsRes, endpointsRes, rateLimitsRes, ipRes] = await Promise.all([
-        api.getRequestLogs(hours, 200, ipToFilter || undefined),
+        api.getRequestLogs({
+          hours,
+          limit,
+          ipHash: ipToFilter || undefined,
+          endpoint: endpointFilter || undefined,
+          ...statusParams,
+        }),
         api.getEndpointSummary(hours),
         api.getRateLimitEvents(hours, 100),
         api.getIpActivity(hours, 50),
@@ -46,7 +70,7 @@ export default function RequestLogsPage() {
     } finally {
       setLoading(false);
     }
-  }, [isAuthenticated, hours, selectedIp]);
+  }, [isAuthenticated, hours, limit, selectedIp, endpointFilter, statusFilter]);
 
   // Fetch logs for a specific IP
   const fetchLogsForIp = useCallback(async (ipHash: string) => {
@@ -57,7 +81,14 @@ export default function RequestLogsPage() {
     setIpLogsLoading(true);
     
     try {
-      const res = await api.getRequestLogs(hours, 200, ipHash);
+      const statusParams = getStatusParams(statusFilter);
+      const res = await api.getRequestLogs({
+        hours,
+        limit,
+        ipHash,
+        endpoint: endpointFilter || undefined,
+        ...statusParams,
+      });
       setLogs(res.logs);
       setError(null);
     } catch (e) {
@@ -65,21 +96,27 @@ export default function RequestLogsPage() {
     } finally {
       setIpLogsLoading(false);
     }
-  }, [isAuthenticated, hours]);
+  }, [isAuthenticated, hours, limit, endpointFilter, statusFilter]);
 
   // Clear IP filter and reload all logs
   const clearIpFilter = useCallback(async () => {
     setSelectedIp(null);
     setIpLogsLoading(true);
     try {
-      const res = await api.getRequestLogs(hours, 200);
+      const statusParams = getStatusParams(statusFilter);
+      const res = await api.getRequestLogs({
+        hours,
+        limit,
+        endpoint: endpointFilter || undefined,
+        ...statusParams,
+      });
       setLogs(res.logs);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to fetch logs");
     } finally {
       setIpLogsLoading(false);
     }
-  }, [hours]);
+  }, [hours, limit, endpointFilter, statusFilter]);
 
   useEffect(() => {
     fetchData();
@@ -104,40 +141,127 @@ export default function RequestLogsPage() {
     <AdminShell title="Request Logs" subtitle="Server request analytics and monitoring">
       <div className="space-y-6">
         {/* Controls Row */}
-        <div className="flex justify-between items-center">
-          <div className="flex items-center gap-4">
-            <select
-              value={hours}
-              onChange={(e) => setHours(parseInt(e.target.value))}
-              className="bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-700 focus:ring-blue-500 focus:border-blue-500"
-            >
-              <option value="1">Last 1 hour</option>
-              <option value="6">Last 6 hours</option>
-              <option value="24">Last 24 hours</option>
-              <option value="48">Last 48 hours</option>
-              <option value="168">Last 7 days</option>
-            </select>
-            {selectedIp && (
-              <div className="flex items-center gap-2 bg-blue-500/20 border border-blue-500/40 text-blue-400 px-3 py-2 rounded-lg">
-                <span className="text-sm">Filtering by IP:</span>
-                <code className="font-mono text-xs bg-blue-500/30 px-2 py-0.5 rounded">{selectedIp}</code>
-                <button
-                  onClick={clearIpFilter}
-                  className="ml-2 text-blue-300 hover:text-white transition-colors"
-                  title="Clear filter"
-                >
-                  ✕
-                </button>
+        <div className="flex flex-col gap-4">
+          <div className="flex flex-wrap justify-between items-center gap-4">
+            <div className="flex flex-wrap items-center gap-3">
+              {/* Time Range */}
+              <select
+                value={hours}
+                onChange={(e) => setHours(parseInt(e.target.value))}
+                className="bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-700 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="1">Last 1 hour</option>
+                <option value="6">Last 6 hours</option>
+                <option value="24">Last 24 hours</option>
+                <option value="48">Last 48 hours</option>
+                <option value="168">Last 7 days</option>
+              </select>
+              
+              {/* Limit */}
+              <select
+                value={limit}
+                onChange={(e) => setLimit(parseInt(e.target.value))}
+                className="bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-700 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="100">100 logs</option>
+                <option value="250">250 logs</option>
+                <option value="500">500 logs</option>
+                <option value="1000">1,000 logs</option>
+                <option value="2000">2,000 logs</option>
+              </select>
+              
+              {/* Status Filter */}
+              <select
+                value={statusFilter}
+                onChange={(e) => setStatusFilter(e.target.value as StatusFilter)}
+                className="bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-700 focus:ring-blue-500 focus:border-blue-500"
+              >
+                <option value="all">All Statuses</option>
+                <option value="success">2xx Success</option>
+                <option value="redirect">3xx Redirect</option>
+                <option value="client_error">4xx Client Error</option>
+                <option value="server_error">5xx Server Error</option>
+                <option value="errors">All Errors (4xx+5xx)</option>
+              </select>
+              
+              {/* Endpoint Filter */}
+              <div className="relative">
+                <input
+                  type="text"
+                  placeholder="Filter endpoint..."
+                  value={endpointFilter}
+                  onChange={(e) => setEndpointFilter(e.target.value)}
+                  className="bg-slate-800 text-white px-3 py-2 rounded-lg border border-slate-700 focus:ring-blue-500 focus:border-blue-500 w-48"
+                />
+                {endpointFilter && (
+                  <button
+                    onClick={() => setEndpointFilter("")}
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-white"
+                  >
+                    ✕
+                  </button>
+                )}
               </div>
-            )}
+            </div>
+            
+            <button
+              onClick={() => fetchData()}
+              disabled={loading}
+              className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors disabled:opacity-50"
+            >
+              {loading ? "Refreshing..." : "Refresh"}
+            </button>
           </div>
-          <button
-            onClick={() => fetchData()}
-            disabled={loading}
-            className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-lg transition-colors disabled:opacity-50"
-          >
-            {loading ? "Refreshing..." : "Refresh"}
-          </button>
+          
+          {/* Active Filters Display */}
+          {(selectedIp || endpointFilter || statusFilter !== "all") && (
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm text-slate-400">Active filters:</span>
+              {selectedIp && (
+                <div className="flex items-center gap-1 bg-blue-500/20 border border-blue-500/40 text-blue-400 px-2 py-1 rounded text-sm">
+                  <span>IP: {selectedIp}</span>
+                  <button
+                    onClick={clearIpFilter}
+                    className="ml-1 text-blue-300 hover:text-white transition-colors"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+              {endpointFilter && (
+                <div className="flex items-center gap-1 bg-purple-500/20 border border-purple-500/40 text-purple-400 px-2 py-1 rounded text-sm">
+                  <span>Endpoint: {endpointFilter}</span>
+                  <button
+                    onClick={() => setEndpointFilter("")}
+                    className="ml-1 text-purple-300 hover:text-white transition-colors"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+              {statusFilter !== "all" && (
+                <div className="flex items-center gap-1 bg-yellow-500/20 border border-yellow-500/40 text-yellow-400 px-2 py-1 rounded text-sm">
+                  <span>Status: {statusFilter.replace("_", " ")}</span>
+                  <button
+                    onClick={() => setStatusFilter("all")}
+                    className="ml-1 text-yellow-300 hover:text-white transition-colors"
+                  >
+                    ✕
+                  </button>
+                </div>
+              )}
+              <button
+                onClick={() => {
+                  setSelectedIp(null);
+                  setEndpointFilter("");
+                  setStatusFilter("all");
+                }}
+                className="text-sm text-slate-400 hover:text-white transition-colors ml-2"
+              >
+                Clear all
+              </button>
+            </div>
+          )}
         </div>
 
         {error && (
@@ -264,6 +388,9 @@ function EndpointsTab({ endpoints }: { endpoints: EndpointSummaryRow[] }) {
   );
 }
 
+type LogSortColumn = "timestamp" | "method" | "endpoint" | "status_code" | "duration_ms" | "ip_hash";
+type SortDirection = "asc" | "desc";
+
 function LogsTab({ 
   logs, 
   loading, 
@@ -275,6 +402,91 @@ function LogsTab({
   selectedIp: string | null;
   onClearFilter: () => void;
 }) {
+  const [sortColumn, setSortColumn] = useState<LogSortColumn>("timestamp");
+  const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+
+  const handleSort = (column: LogSortColumn) => {
+    if (sortColumn === column) {
+      // Toggle direction if same column
+      setSortDirection(sortDirection === "asc" ? "desc" : "asc");
+    } else {
+      // New column, default to desc for duration/timestamp, asc for others
+      setSortColumn(column);
+      setSortDirection(column === "duration_ms" || column === "timestamp" ? "desc" : "asc");
+    }
+  };
+
+  const sortedLogs = [...logs].sort((a, b) => {
+    let aVal: number | string;
+    let bVal: number | string;
+
+    switch (sortColumn) {
+      case "timestamp":
+        aVal = a.timestamp;
+        bVal = b.timestamp;
+        break;
+      case "duration_ms":
+        aVal = a.duration_ms;
+        bVal = b.duration_ms;
+        break;
+      case "status_code":
+        aVal = a.status_code;
+        bVal = b.status_code;
+        break;
+      case "method":
+        aVal = a.method;
+        bVal = b.method;
+        break;
+      case "endpoint":
+        aVal = a.endpoint;
+        bVal = b.endpoint;
+        break;
+      case "ip_hash":
+        aVal = a.ip_hash;
+        bVal = b.ip_hash;
+        break;
+      default:
+        return 0;
+    }
+
+    if (typeof aVal === "string" && typeof bVal === "string") {
+      return sortDirection === "asc" 
+        ? aVal.localeCompare(bVal) 
+        : bVal.localeCompare(aVal);
+    }
+
+    return sortDirection === "asc" 
+      ? (aVal as number) - (bVal as number) 
+      : (bVal as number) - (aVal as number);
+  });
+
+  const SortIcon = ({ column }: { column: LogSortColumn }) => {
+    if (sortColumn !== column) {
+      return <span className="ml-1 text-slate-600">↕</span>;
+    }
+    return <span className="ml-1 text-blue-400">{sortDirection === "asc" ? "↑" : "↓"}</span>;
+  };
+
+  const SortableHeader = ({ 
+    column, 
+    children, 
+    align = "left" 
+  }: { 
+    column: LogSortColumn; 
+    children: React.ReactNode; 
+    align?: "left" | "center" | "right";
+  }) => (
+    <th 
+      className={`px-4 py-3 text-${align} text-slate-400 font-medium cursor-pointer hover:text-white hover:bg-slate-800/50 transition-colors select-none`}
+      onClick={() => handleSort(column)}
+    >
+      <span className="inline-flex items-center">
+        {children}
+        <SortIcon column={column} />
+      </span>
+    </th>
+  );
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-12">
@@ -301,16 +513,16 @@ function LogsTab({
       <table className="w-full text-sm">
         <thead className="bg-slate-900/50 sticky top-0">
           <tr>
-            <th className="px-4 py-3 text-left text-slate-400 font-medium">Time</th>
-            <th className="px-4 py-3 text-left text-slate-400 font-medium">Method</th>
-            <th className="px-4 py-3 text-left text-slate-400 font-medium">Endpoint</th>
-            <th className="px-4 py-3 text-center text-slate-400 font-medium">Status</th>
-            <th className="px-4 py-3 text-right text-slate-400 font-medium">Duration</th>
-            <th className="px-4 py-3 text-left text-slate-400 font-medium">IP</th>
+            <SortableHeader column="timestamp">Time</SortableHeader>
+            <SortableHeader column="method">Method</SortableHeader>
+            <SortableHeader column="endpoint">Endpoint</SortableHeader>
+            <SortableHeader column="status_code" align="center">Status</SortableHeader>
+            <SortableHeader column="duration_ms" align="right">Duration</SortableHeader>
+            <SortableHeader column="ip_hash">IP</SortableHeader>
           </tr>
         </thead>
         <tbody>
-          {logs.map((log, i) => (
+          {sortedLogs.map((log, i) => (
             <tr key={i} className="border-t border-slate-700/50 hover:bg-slate-700/30">
               <td className="px-4 py-2 text-slate-400 font-mono text-xs">
                 {new Date(log.timestamp).toLocaleString()}
@@ -322,11 +534,13 @@ function LogsTab({
                   {log.status_code}
                 </span>
               </td>
-              <td className="px-4 py-2 text-right text-slate-300">{log.duration_ms}ms</td>
+              <td className={`px-4 py-2 text-right font-mono ${getDurationColor(log.duration_ms)}`}>
+                {log.duration_ms}ms
+              </td>
               <td className="px-4 py-2 text-slate-400 font-mono text-xs">{log.ip_hash}</td>
             </tr>
           ))}
-          {logs.length === 0 && (
+          {sortedLogs.length === 0 && (
             <tr>
               <td colSpan={6} className="px-4 py-8 text-center text-slate-500">
                 No request logs available.
@@ -337,6 +551,14 @@ function LogsTab({
       </table>
     </div>
   );
+}
+
+function getDurationColor(ms: number): string {
+  if (ms < 50) return "text-green-400";
+  if (ms < 200) return "text-slate-300";
+  if (ms < 500) return "text-yellow-400";
+  if (ms < 1000) return "text-orange-400";
+  return "text-red-400";
 }
 
 function RateLimitsTab({ events }: { events: RateLimitEventRow[] }) {

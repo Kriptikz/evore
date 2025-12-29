@@ -653,26 +653,47 @@ pub struct IpActivityResponse {
     pub activity: Vec<crate::clickhouse::IpActivityRow>,
 }
 
+fn default_logs_limit() -> u32 {
+    500
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RequestLogsQuery {
     #[serde(default = "default_hours")]
     pub hours: u32,
-    #[serde(default = "default_limit")]
+    #[serde(default = "default_logs_limit")]
     pub limit: u32,
     pub ip_hash: Option<String>,
+    pub endpoint: Option<String>,
+    pub status_code: Option<u16>,
+    pub status_gte: Option<u16>,
+    pub status_lte: Option<u16>,
 }
 
-/// GET /admin/requests/logs?hours=24&limit=100&ip_hash=xyz
-/// Get recent request logs, optionally filtered by IP hash
+/// GET /admin/requests/logs?hours=24&limit=500&ip_hash=xyz&endpoint=/round&status_code=200
+/// Get recent request logs with optional filters:
+/// - ip_hash: Filter by IP hash
+/// - endpoint: Filter by endpoint (partial match)
+/// - status_code: Filter by exact status code
+/// - status_gte: Filter by status >= value (e.g., 400 for all errors)
+/// - status_lte: Filter by status <= value
 pub async fn get_request_logs(
     State(state): State<Arc<AppState>>,
     Query(params): Query<RequestLogsQuery>,
 ) -> Result<Json<RequestLogsResponse>, (StatusCode, Json<AuthError>)> {
     let hours = params.hours;
-    let limit = params.limit;
+    let limit = params.limit.min(2000); // Cap at 2000 to prevent abuse
     
     let logs = state.clickhouse
-        .get_request_logs(hours, limit, params.ip_hash.as_deref())
+        .get_request_logs_filtered(
+            hours, 
+            limit, 
+            params.ip_hash.as_deref(),
+            params.endpoint.as_deref(),
+            params.status_code,
+            params.status_gte,
+            params.status_lte,
+        )
         .await
         .map_err(|e| {
             tracing::error!("Failed to get request logs: {}", e);

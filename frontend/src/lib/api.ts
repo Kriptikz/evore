@@ -826,11 +826,23 @@ class ApiClient {
 
   // ========== Request Logs ==========
 
-  async getRequestLogs(hours = 24, limit = 100, ipHash?: string): Promise<{ hours: number; logs: RequestLogRow[] }> {
+  async getRequestLogs(options?: {
+    hours?: number;
+    limit?: number;
+    ipHash?: string;
+    endpoint?: string;
+    statusCode?: number;
+    statusGte?: number;
+    statusLte?: number;
+  }): Promise<{ hours: number; logs: RequestLogRow[] }> {
     const params = new URLSearchParams();
-    params.set("hours", hours.toString());
-    params.set("limit", limit.toString());
-    if (ipHash) params.set("ip_hash", ipHash);
+    params.set("hours", (options?.hours ?? 24).toString());
+    params.set("limit", (options?.limit ?? 500).toString());
+    if (options?.ipHash) params.set("ip_hash", options.ipHash);
+    if (options?.endpoint) params.set("endpoint", options.endpoint);
+    if (options?.statusCode) params.set("status_code", options.statusCode.toString());
+    if (options?.statusGte) params.set("status_gte", options.statusGte.toString());
+    if (options?.statusLte) params.set("status_lte", options.statusLte.toString());
     return this.request("GET", `/admin/requests/logs?${params.toString()}`, { requireAuth: true });
   }
 

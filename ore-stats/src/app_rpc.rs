@@ -49,56 +49,94 @@ pub struct SignatureStatus {
 }
 
 /// Central RPC gateway with metrics tracking
+/// 
+/// Uses two RPC clients:
+/// - `flux_client` - for getAccountInfo, getMultipleAccounts (GMA), getProgramAccounts (GPA)
+/// - `helius_client` - for getBalance, getSlot, getSignatureStatuses, and as backup
 pub struct AppRpc {
-    client: RpcClient,
-    rpc_url: String,
-    last_request_at: RwLock<Instant>,
+    /// Flux RPC client for account data fetching (GMA, GPA, getAccountInfo)
+    flux_client: RpcClient,
+    flux_url: String,
+    flux_provider_name: String,
+    flux_api_key_id: String,
+    flux_last_request_at: RwLock<Instant>,
+    
+    /// Helius RPC client for other calls (getBalance, getSlot, etc.)
+    helius_client: RpcClient,
+    helius_url: String,
+    helius_provider_name: String,
+    helius_api_key_id: String,
+    helius_last_request_at: RwLock<Instant>,
     
     // Metrics tracking
     clickhouse: Option<Arc<ClickHouseClient>>,
     program_name: String,
-    provider_name: String,
-    api_key_id: String,
 }
 
 impl AppRpc {
-    /// Create a new AppRpc instance.
+    /// Create a new AppRpc instance with both Helius and Flux RPC clients.
     /// 
     /// # Arguments
-    /// * `rpc_url` - The RPC URL (without https:// prefix)
+    /// * `helius_rpc_url` - The Helius RPC URL (with or without https:// prefix)
+    /// * `flux_rpc_url` - The Flux RPC URL (with or without https:// prefix)
     /// * `clickhouse` - Optional ClickHouse client for metrics logging
-    pub fn new(rpc_url: String, clickhouse: Option<Arc<ClickHouseClient>>) -> Self {
-        let full_url = if rpc_url.starts_with("http") {
-            rpc_url.clone()
+    pub fn new(helius_rpc_url: String, flux_rpc_url: String, clickhouse: Option<Arc<ClickHouseClient>>) -> Self {
+        // Normalize Helius URL
+        let helius_url = if helius_rpc_url.starts_with("http") {
+            helius_rpc_url.clone()
         } else {
-            format!("https://{}", rpc_url)
+            format!("https://{}", helius_rpc_url)
         };
         
-        // Extract provider name from URL for metrics
-        let provider_name = extract_provider_name(&full_url);
+        // Normalize Flux URL
+        let flux_url = if flux_rpc_url.starts_with("http") {
+            flux_rpc_url.clone()
+        } else {
+            format!("https://{}", flux_rpc_url)
+        };
         
-        // Extract API key ID if present (for Helius URLs like xxx?api-key=abc)
-        let api_key_id = extract_api_key_id(&full_url);
+        // Extract provider names and API keys for metrics
+        let helius_provider_name = extract_provider_name(&helius_url);
+        let helius_api_key_id = extract_api_key_id(&helius_url);
+        let flux_provider_name = extract_provider_name(&flux_url);
+        let flux_api_key_id = extract_api_key_id(&flux_url);
         
-        let client = RpcClient::new_with_commitment(
-            full_url.clone(),
+        // Create Helius client
+        let helius_client = RpcClient::new_with_commitment(
+            helius_url.clone(),
             CommitmentConfig { commitment: CommitmentLevel::Confirmed },
         );
         
+        // Create Flux client
+        let flux_client = RpcClient::new_with_commitment(
+            flux_url.clone(),
+            CommitmentConfig { commitment: CommitmentLevel::Confirmed },
+        );
+        
+        tracing::info!(
+            "AppRpc initialized: Helius={} ({}), Flux={} ({})",
+            helius_provider_name, helius_url, flux_provider_name, flux_url
+        );
+        
         Self {
-            client,
-            rpc_url: full_url,
-            last_request_at: RwLock::new(Instant::now()),
+            flux_client,
+            flux_url,
+            flux_provider_name,
+            flux_api_key_id,
+            flux_last_request_at: RwLock::new(Instant::now()),
+            helius_client,
+            helius_url,
+            helius_provider_name,
+            helius_api_key_id,
+            helius_last_request_at: RwLock::new(Instant::now()),
             clickhouse,
             program_name: "ore-stats".to_string(),
-            provider_name,
-            api_key_id,
         }
     }
     
-    /// Rate limit: wait if we're calling too fast
-    async fn rate_limit(&self) {
-        let mut last = self.last_request_at.write().await;
+    /// Rate limit for Flux client: wait if we're calling too fast
+    async fn rate_limit_flux(&self) {
+        let mut last = self.flux_last_request_at.write().await;
         let elapsed = last.elapsed().as_millis() as u64;
         if elapsed < MIN_REQUEST_INTERVAL_MS {
             let wait = MIN_REQUEST_INTERVAL_MS - elapsed;
@@ -107,13 +145,34 @@ impl AppRpc {
         *last = Instant::now();
     }
     
-    /// Log successful RPC call to ClickHouse
-    async fn log_success(&self, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
+    /// Rate limit for Helius client: wait if we're calling too fast
+    async fn rate_limit_helius(&self) {
+        let mut last = self.helius_last_request_at.write().await;
+        let elapsed = last.elapsed().as_millis() as u64;
+        if elapsed < MIN_REQUEST_INTERVAL_MS {
+            let wait = MIN_REQUEST_INTERVAL_MS - elapsed;
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+        }
+        *last = Instant::now();
+    }
+    
+    /// Log successful RPC call to ClickHouse for Flux
+    async fn log_flux_success(&self, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
+        self.log_success_internal(&self.flux_provider_name, &self.flux_api_key_id, ctx, duration_ms, result_count, response_size).await;
+    }
+    
+    /// Log successful RPC call to ClickHouse for Helius
+    async fn log_helius_success(&self, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
+        self.log_success_internal(&self.helius_provider_name, &self.helius_api_key_id, ctx, duration_ms, result_count, response_size).await;
+    }
+    
+    /// Internal log success implementation
+    async fn log_success_internal(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
         if let Some(ref ch) = self.clickhouse {
             let insert = RpcRequestInsert::new(
                 &self.program_name,
-                &self.provider_name,
-                &self.api_key_id,
+                provider_name,
+                api_key_id,
                 &ctx.method,
                 &ctx.target_type,
             )
@@ -122,8 +181,8 @@ impl AppRpc {
             .success(duration_ms, result_count, response_size);
             
             tracing::debug!(
-                "Logging RPC metric: method={} target_type={} result_count={} duration_ms={}",
-                ctx.method, ctx.target_type, result_count, duration_ms
+                "Logging RPC metric: provider={} method={} target_type={} result_count={} duration_ms={}",
+                provider_name, ctx.method, ctx.target_type, result_count, duration_ms
             );
             
             // Fire and forget - don't block on metrics logging
@@ -139,13 +198,23 @@ impl AppRpc {
         }
     }
     
-    /// Log error RPC call to ClickHouse
-    async fn log_error(&self, ctx: &RpcContext, duration_ms: u32, error: &str) {
+    /// Log error RPC call to ClickHouse for Flux
+    async fn log_flux_error(&self, ctx: &RpcContext, duration_ms: u32, error: &str) {
+        self.log_error_internal(&self.flux_provider_name, &self.flux_api_key_id, ctx, duration_ms, error).await;
+    }
+    
+    /// Log error RPC call to ClickHouse for Helius
+    async fn log_helius_error(&self, ctx: &RpcContext, duration_ms: u32, error: &str) {
+        self.log_error_internal(&self.helius_provider_name, &self.helius_api_key_id, ctx, duration_ms, error).await;
+    }
+    
+    /// Internal log error implementation
+    async fn log_error_internal(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32, error: &str) {
         if let Some(ref ch) = self.clickhouse {
             let insert = RpcRequestInsert::new(
                 &self.program_name,
-                &self.provider_name,
-                &self.api_key_id,
+                provider_name,
+                api_key_id,
                 &ctx.method,
                 &ctx.target_type,
             )
@@ -162,13 +231,23 @@ impl AppRpc {
         }
     }
     
-    /// Log not found RPC call to ClickHouse
-    async fn log_not_found(&self, ctx: &RpcContext, duration_ms: u32) {
+    /// Log not found RPC call to ClickHouse for Flux
+    async fn log_flux_not_found(&self, ctx: &RpcContext, duration_ms: u32) {
+        self.log_not_found_internal(&self.flux_provider_name, &self.flux_api_key_id, ctx, duration_ms).await;
+    }
+    
+    /// Log not found RPC call to ClickHouse for Helius
+    async fn log_helius_not_found(&self, ctx: &RpcContext, duration_ms: u32) {
+        self.log_not_found_internal(&self.helius_provider_name, &self.helius_api_key_id, ctx, duration_ms).await;
+    }
+    
+    /// Internal log not found implementation
+    async fn log_not_found_internal(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32) {
         if let Some(ref ch) = self.clickhouse {
             let insert = RpcRequestInsert::new(
                 &self.program_name,
-                &self.provider_name,
-                &self.api_key_id,
+                provider_name,
+                api_key_id,
                 &ctx.method,
                 &ctx.target_type,
             )
@@ -185,11 +264,11 @@ impl AppRpc {
         }
     }
     
-    // ========== ORE Account Fetching ==========
+    // ========== ORE Account Fetching (via Flux RPC) ==========
     
-    /// Get the Board account
+    /// Get the Board account (uses Flux RPC)
     pub async fn get_board(&self) -> Result<Board> {
-        self.rate_limit().await;
+        self.rate_limit_flux().await;
         let start = Instant::now();
         
         let address = board_pda().0;
@@ -201,25 +280,25 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.client.get_account_data(&address).await;
+        let result = self.flux_client.get_account_data(&address).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
+                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let board = Board::try_from_bytes(&data)?;
                 Ok(*board)
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
     }
     
-    /// Get a Round account by ID
+    /// Get a Round account by ID (uses Flux RPC)
     pub async fn get_round(&self, round_id: u64) -> Result<Round> {
-        self.rate_limit().await;
+        self.rate_limit_flux().await;
         let start = Instant::now();
         
         let address = round_pda(round_id).0;
@@ -231,25 +310,25 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.client.get_account_data(&address).await;
+        let result = self.flux_client.get_account_data(&address).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
+                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let round = Round::try_from_bytes(&data)?;
                 Ok(*round)
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
     }
     
-    /// Get the Treasury account
+    /// Get the Treasury account (uses Flux RPC)
     pub async fn get_treasury(&self) -> Result<Treasury> {
-        self.rate_limit().await;
+        self.rate_limit_flux().await;
         let start = Instant::now();
         
         let ctx = RpcContext {
@@ -260,25 +339,25 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.client.get_account_data(&TREASURY_ADDRESS).await;
+        let result = self.flux_client.get_account_data(&TREASURY_ADDRESS).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
+                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let treasury = Treasury::try_from_bytes(&data)?;
                 Ok(*treasury)
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
     }
     
-    /// Get a Miner account by authority
+    /// Get a Miner account by authority (uses Flux RPC)
     pub async fn get_miner(&self, authority: &Pubkey) -> Result<Option<Miner>> {
-        self.rate_limit().await;
+        self.rate_limit_flux().await;
         let start = Instant::now();
         
         let address = miner_pda(*authority).0;
@@ -290,31 +369,33 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.client.get_account_data(&address).await;
+        let result = self.flux_client.get_account_data(&address).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_success(&ctx, duration_ms, 1, data.len() as u32).await;
+                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let miner = Miner::try_from_bytes(&data)?;
                 Ok(Some(*miner))
             }
             Err(e) => {
                 // Account not found is not an error for optional miner
                 if e.to_string().contains("AccountNotFound") {
-                    self.log_not_found(&ctx, duration_ms).await;
+                    self.log_flux_not_found(&ctx, duration_ms).await;
                     Ok(None)
                 } else {
-                    self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                    self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
                     Err(e.into())
                 }
             }
         }
     }
     
-    /// Get SOL balance for an account (for frontend RPC proxy)
+    // ========== Other RPC calls (via Helius RPC) ==========
+    
+    /// Get SOL balance for an account (uses Helius RPC)
     pub async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64> {
-        self.rate_limit().await;
+        self.rate_limit_helius().await;
         let start = Instant::now();
         
         let ctx = RpcContext {
@@ -325,24 +406,24 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.client.get_balance(pubkey).await;
+        let result = self.helius_client.get_balance(pubkey).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(balance) => {
-                self.log_success(&ctx, duration_ms, 1, 8).await;
+                self.log_helius_success(&ctx, duration_ms, 1, 8).await;
                 Ok(balance)
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
     }
     
-    /// Get current slot
+    /// Get current slot (uses Helius RPC)
     pub async fn get_slot(&self) -> Result<u64> {
-        self.rate_limit().await;
+        self.rate_limit_helius().await;
         let start = Instant::now();
         
         let ctx = RpcContext {
@@ -353,24 +434,24 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.client.get_slot().await;
+        let result = self.helius_client.get_slot().await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(slot) => {
-                self.log_success(&ctx, duration_ms, 1, 8).await;
+                self.log_helius_success(&ctx, duration_ms, 1, 8).await;
                 Ok(slot)
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
     }
     
-    /// Get multiple accounts at once
+    /// Get multiple accounts at once (uses Flux RPC - GMA)
     pub async fn get_multiple_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<Option<Vec<u8>>>> {
-        self.rate_limit().await;
+        self.rate_limit_flux().await;
         let start = Instant::now();
         
         let ctx = RpcContext {
@@ -381,7 +462,7 @@ impl AppRpc {
             batch_size: pubkeys.len() as u16,
         };
         
-        let result = self.client.get_multiple_accounts(pubkeys).await;
+        let result = self.flux_client.get_multiple_accounts(pubkeys).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
@@ -392,23 +473,23 @@ impl AppRpc {
                     .sum();
                 let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
                     
-                self.log_success(&ctx, duration_ms, found_count, response_size).await;
+                self.log_flux_success(&ctx, duration_ms, found_count, response_size).await;
                 
                 Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect())
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
     }
     
-    /// Get signature statuses for transaction confirmations
+    /// Get signature statuses for transaction confirmations (uses Helius RPC)
     /// Returns Vec<Option<SignatureStatus>> where:
     /// - None = not found yet
     /// - Some(status) = found with confirmation details
     pub async fn get_signature_statuses(&self, signatures: &[String]) -> Result<Vec<Option<SignatureStatus>>> {
-        self.rate_limit().await;
+        self.rate_limit_helius().await;
         let start = Instant::now();
         
         let ctx = RpcContext {
@@ -436,7 +517,7 @@ impl AppRpc {
         
         let client = reqwest::Client::new();
         let response = client
-            .post(&self.rpc_url)
+            .post(&self.helius_url)
             .json(&body)
             .send()
             .await;
@@ -450,7 +531,7 @@ impl AppRpc {
                 
                 if let Some(error) = json.get("error") {
                     let error_msg = error.to_string();
-                    self.log_error(&ctx, duration_ms, &error_msg).await;
+                    self.log_helius_error(&ctx, duration_ms, &error_msg).await;
                     return Err(anyhow::anyhow!("RPC error: {}", error_msg));
                 }
                 
@@ -473,17 +554,17 @@ impl AppRpc {
                     .unwrap_or_default();
                 
                 let confirmed_count = statuses.iter().filter(|s| s.is_some()).count() as u32;
-                self.log_success(&ctx, duration_ms, confirmed_count, 0).await;
+                self.log_helius_success(&ctx, duration_ms, confirmed_count, 0).await;
                 Ok(statuses)
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
     }
     
-    /// Get all ORE Miner accounts using standard getProgramAccounts RPC
+    /// Get all ORE Miner accounts using standard getProgramAccounts RPC (uses Flux RPC - GPA)
     /// This is the source of truth for miner data - more reliable than v2 endpoint
     /// Returns a HashMap keyed by authority pubkey string
     /// If treasury is provided, applies refined_ore calculation immediately
@@ -492,7 +573,7 @@ impl AppRpc {
         use solana_client::rpc_filter::RpcFilterType;
         use solana_account_decoder_client_types::UiAccountEncoding;
         
-        self.rate_limit().await;
+        self.rate_limit_flux().await;
         let start = Instant::now();
         
         let ctx = RpcContext {
@@ -518,7 +599,7 @@ impl AppRpc {
             sort_results: None,
         };
         
-        let result = self.client
+        let result = self.flux_client
             .get_program_accounts_with_config(&evore::ore_api::PROGRAM_ID, config)
             .await;
         
@@ -544,15 +625,15 @@ impl AppRpc {
                 }
                 
                 tracing::info!(
-                    "GPA miners snapshot: {} accounts fetched, {} miners parsed in {}ms",
+                    "GPA miners snapshot (Flux): {} accounts fetched, {} miners parsed in {}ms",
                     accounts.len(), miners.len(), duration_ms
                 );
                 
-                self.log_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
+                self.log_flux_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
                 Ok(miners)
             }
             Err(e) => {
-                self.log_error(&ctx, duration_ms, &e.to_string()).await;
+                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
                 Err(e.into())
             }
         }
@@ -563,6 +644,8 @@ impl AppRpc {
 fn extract_provider_name(url: &str) -> String {
     if url.contains("helius") {
         "helius".to_string()
+    } else if url.contains("flux") {
+        "flux".to_string()
     } else if url.contains("quicknode") {
         "quicknode".to_string()
     } else if url.contains("alchemy") {
@@ -603,6 +686,7 @@ mod tests {
     #[test]
     fn test_extract_provider_name() {
         assert_eq!(extract_provider_name("https://mainnet.helius-rpc.com"), "helius");
+        assert_eq!(extract_provider_name("https://rpc.flux.dev"), "flux");
         assert_eq!(extract_provider_name("https://api.quicknode.com/xxx"), "quicknode");
         assert_eq!(extract_provider_name("http://localhost:8899"), "localhost");
         assert_eq!(extract_provider_name("https://some-random-rpc.com"), "unknown");
@@ -615,4 +699,5 @@ mod tests {
         assert_eq!(extract_api_key_id("https://rpc.helius.xyz?api_key=12345678"), "12345678...");
     }
 }
+
 

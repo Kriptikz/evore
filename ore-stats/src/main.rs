@@ -102,11 +102,12 @@ async fn main() -> anyhow::Result<()> {
         .await?;
     tracing::info!("Connected to PostgreSQL");
     
-    // ========== RPC Client ==========
+    // ========== RPC Clients ==========
 
     let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
-    let rpc = Arc::new(AppRpc::new(rpc_url.clone(), Some(clickhouse.clone())));
-    tracing::info!("RPC client initialized");
+    let flux_rpc_url = env::var("FLUX_RPC_URL").expect("FLUX_RPC_URL must be set");
+    let rpc = Arc::new(AppRpc::new(rpc_url.clone(), flux_rpc_url.clone(), Some(clickhouse.clone())));
+    tracing::info!("RPC clients initialized (Helius + Flux)");
     
     // ========== Helius API for token holders ==========
     

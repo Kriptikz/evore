@@ -1260,6 +1260,78 @@ impl ClickHouseClient {
         Ok(results)
     }
     
+    /// Get recent request logs with multiple filter options.
+    /// Supports filtering by IP hash, endpoint (partial match), and status code range.
+    pub async fn get_request_logs_filtered(
+        &self, 
+        hours: u32, 
+        limit: u32, 
+        ip_hash: Option<&str>,
+        endpoint: Option<&str>,
+        status_code: Option<u16>,
+        status_gte: Option<u16>,
+        status_lte: Option<u16>,
+    ) -> Result<Vec<RequestLogRow>, ClickHouseError> {
+        // Build dynamic WHERE clause
+        let mut conditions = vec!["timestamp > now() - INTERVAL ? HOUR".to_string()];
+        let mut bind_values: Vec<String> = vec![hours.to_string()];
+        
+        if let Some(ip) = ip_hash {
+            conditions.push("ip_hash = ?".to_string());
+            bind_values.push(ip.to_string());
+        }
+        
+        if let Some(ep) = endpoint {
+            // Use LIKE for partial matching
+            conditions.push("endpoint LIKE ?".to_string());
+            bind_values.push(format!("%{}%", ep));
+        }
+        
+        if let Some(status) = status_code {
+            conditions.push("status_code = ?".to_string());
+            bind_values.push(status.to_string());
+        }
+        
+        if let Some(gte) = status_gte {
+            conditions.push("status_code >= ?".to_string());
+            bind_values.push(gte.to_string());
+        }
+        
+        if let Some(lte) = status_lte {
+            conditions.push("status_code <= ?".to_string());
+            bind_values.push(lte.to_string());
+        }
+        
+        let where_clause = conditions.join(" AND ");
+        
+        let query = format!(r#"
+            SELECT 
+                timestamp,
+                endpoint,
+                method,
+                status_code,
+                duration_ms,
+                ip_hash,
+                user_agent
+            FROM request_logs
+            WHERE {}
+            ORDER BY timestamp DESC
+            LIMIT ?
+        "#, where_clause);
+        
+        // Build the query with bindings
+        let mut q = self.client.query(&query);
+        
+        // Bind all values in order
+        for val in &bind_values {
+            q = q.bind(val.as_str());
+        }
+        q = q.bind(limit);
+        
+        let results: Vec<RequestLogRow> = q.fetch_all().await?;
+        Ok(results)
+    }
+    
     /// Get request logs summary by endpoint for the last N hours.
     pub async fn get_endpoint_summary(&self, hours: u32) -> Result<Vec<EndpointSummaryRow>, ClickHouseError> {
         let results = self.client

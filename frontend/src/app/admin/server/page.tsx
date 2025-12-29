@@ -54,10 +54,14 @@ export default function ServerMetricsPage() {
     ? validMetrics.reduce((sum, m) => sum + m.latency_avg, 0) / validMetrics.length 
     : 0;
 
-  // Calculate chart dimensions
+  // Calculate chart dimensions (handle empty/short arrays safely)
   const chartHeight = 150;
-  const maxRequests = Math.max(...timeseries.map(t => t.request_count), 1);
-  const maxLatency = Math.max(...timeseries.map(t => t.avg_latency_ms), 1);
+  const maxRequests = timeseries.length > 0 
+    ? Math.max(...timeseries.map(t => t.request_count), 1) 
+    : 1;
+  const maxLatency = timeseries.length > 0 
+    ? Math.max(...timeseries.map(t => t.avg_latency_ms), 1) 
+    : 1;
 
   return (
     <AdminShell title="Server Metrics" subtitle="Performance and resource monitoring">
@@ -119,8 +123,8 @@ export default function ServerMetricsPage() {
           </div>
         </div>
 
-        {/* Requests Per Minute Chart */}
-        {timeseries.length > 0 && (
+        {/* Requests Per Minute Chart (requires at least 2 data points) */}
+        {timeseries.length >= 2 && (
           <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
             <h2 className="text-lg font-semibold text-white mb-4">Requests Per Minute</h2>
             <RequestsChart 
@@ -128,6 +132,14 @@ export default function ServerMetricsPage() {
               height={chartHeight} 
               maxRequests={maxRequests}
             />
+          </div>
+        )}
+        {timeseries.length === 1 && (
+          <div className="bg-slate-800/50 border border-slate-700 rounded-lg p-4">
+            <h2 className="text-lg font-semibold text-white mb-4">Requests Per Minute</h2>
+            <div className="text-slate-400 text-center py-8">
+              Only 1 data point available. Chart requires at least 2 points.
+            </div>
           </div>
         )}
 
@@ -263,16 +275,17 @@ function RequestsChart({
 }) {
   const [hoveredIndex, setHoveredIndex] = useState<number | null>(null);
   
-  if (data.length === 0) return null;
+  // Need at least 2 points to draw a line
+  if (data.length < 2) return null;
   
   const width = 800; // Will be scaled by viewBox
   const padding = { top: 20, right: 20, bottom: 30, left: 50 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
   
-  // Generate path for the line
-  const getX = (index: number) => padding.left + (index / (data.length - 1)) * chartWidth;
-  const getY = (value: number) => padding.top + chartHeight - (value / maxRequests) * chartHeight;
+  // Generate path for the line (safe division - data.length >= 2 guaranteed above)
+  const getX = (index: number) => padding.left + (index / Math.max(data.length - 1, 1)) * chartWidth;
+  const getY = (value: number) => padding.top + chartHeight - (value / Math.max(maxRequests, 1)) * chartHeight;
   
   // Create line path for total requests
   const linePath = data.map((point, i) => {
@@ -298,8 +311,14 @@ function RequestsChart({
     label: formatNumber(Math.round(v))
   }));
   
-  // X-axis labels (show 5 labels)
-  const xLabelIndices = [0, Math.floor(data.length / 4), Math.floor(data.length / 2), Math.floor(3 * data.length / 4), data.length - 1];
+  // X-axis labels (show up to 5 labels, deduplicated for short datasets)
+  const xLabelIndices = Array.from(new Set([
+    0, 
+    Math.floor(data.length / 4), 
+    Math.floor(data.length / 2), 
+    Math.floor(3 * data.length / 4), 
+    data.length - 1
+  ].filter(idx => idx >= 0 && idx < data.length)));
   
   const hoveredPoint = hoveredIndex !== null ? data[hoveredIndex] : null;
 
