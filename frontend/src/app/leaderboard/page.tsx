@@ -290,9 +290,14 @@ function LeaderboardContent() {
           </div>
           {costPerOre && (
             <div className="bg-gradient-to-br from-cyan-500/10 to-blue-500/10 rounded-xl border border-cyan-500/30 p-4">
-              <div className="text-cyan-400 text-sm flex items-center gap-1">
+              <div className="text-cyan-400 text-sm flex items-center gap-1.5">
                 Cost per ORE
-                <span className="text-xs text-cyan-400/60" title="Average SOL cost to acquire 1 ORE in the selected round range">ⓘ</span>
+                <span 
+                  className="cursor-help opacity-70 hover:opacity-100 transition-opacity"
+                  title="Average SOL cost to acquire 1 ORE in the selected round range. Calculated as total vaulted SOL ÷ total ORE won."
+                >
+                  ⓘ
+                </span>
               </div>
               <div className="text-2xl font-bold text-cyan-300">
                 {formatSol(costPerOre.cost_per_ore_lamports)}
