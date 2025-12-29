@@ -1221,6 +1221,10 @@ function HomePageContent() {
   // Filter state
   const [roundSearch, setRoundSearch] = useState<string>("");
   const [motherlodeOnly, setMotherlodeOnly] = useState(false);
+  const [motherlodeRounds, setMotherlodeRounds] = useState<RoundSummary[]>([]);
+  const [loadingMotherlodes, setLoadingMotherlodes] = useState(false);
+  const [motherlodeHasMore, setMotherlodeHasMore] = useState(false);
+  const [motherlodeCursor, setMotherlodeCursor] = useState<string | null>(null);
   
   // Local state for page-specific data
   const [selectedRoundId, setSelectedRoundId] = useState<number | null>(
@@ -1249,11 +1253,40 @@ function HomePageContent() {
     }
   };
 
-  // Filter rounds by motherlode
-  const filteredRounds = useMemo(() => {
-    if (!motherlodeOnly) return rounds;
-    return rounds.filter(r => r.motherlode_hit || r.motherlode > 0);
-  }, [rounds, motherlodeOnly]);
+  // Fetch motherlode rounds from API when filter is enabled
+  const fetchMotherlodeRounds = useCallback(async (loadMore = false) => {
+    setLoadingMotherlodes(true);
+    try {
+      const cursorParam = loadMore && motherlodeCursor ? `&cursor=${motherlodeCursor}` : '';
+      const response = await fetch(
+        `${API_BASE}/history/rounds?limit=50&motherlode_hit=true&order=desc${cursorParam}`
+      );
+      if (response.ok) {
+        const data = await response.json();
+        if (loadMore) {
+          setMotherlodeRounds(prev => [...prev, ...data.data]);
+        } else {
+          setMotherlodeRounds(data.data);
+        }
+        setMotherlodeHasMore(data.has_more);
+        setMotherlodeCursor(data.cursor);
+      }
+    } catch (err) {
+      console.error("Failed to fetch motherlode rounds:", err);
+    } finally {
+      setLoadingMotherlodes(false);
+    }
+  }, [motherlodeCursor]);
+
+  // Fetch motherlode rounds when filter is enabled
+  useEffect(() => {
+    if (motherlodeOnly && motherlodeRounds.length === 0) {
+      fetchMotherlodeRounds(false);
+    }
+  }, [motherlodeOnly]);
+
+  // Use motherlode rounds when filter is on, otherwise use context rounds
+  const displayRounds = motherlodeOnly ? motherlodeRounds : rounds;
   
   // Clear live deployments when round changes
   useEffect(() => {
@@ -1442,51 +1475,49 @@ function HomePageContent() {
               
               {/* Motherlode Filter */}
               <button
-                onClick={() => setMotherlodeOnly(!motherlodeOnly)}
-                className={`w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg font-medium text-sm transition-all ${
+                onClick={() => {
+                  const newValue = !motherlodeOnly;
+                  setMotherlodeOnly(newValue);
+                  if (newValue && motherlodeRounds.length === 0) {
+                    fetchMotherlodeRounds(false);
+                  }
+                }}
+                className={`w-full flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg font-medium text-sm transition-all ${
                   motherlodeOnly
                     ? "bg-gradient-to-r from-amber-500 via-yellow-400 to-amber-500 text-black shadow-lg shadow-amber-500/20"
                     : "bg-slate-800 text-slate-400 hover:bg-slate-700 hover:text-white border border-slate-700"
                 }`}
               >
-                <svg 
-                  className={`w-4 h-4 ${motherlodeOnly ? "text-black" : "text-amber-400"}`} 
-                  viewBox="0 0 24 24" 
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <polygon points="12,2 22,9 12,22 2,9" fill={motherlodeOnly ? "currentColor" : "none"} />
-                </svg>
+                <span className={motherlodeOnly ? "" : "text-amber-400"}>💎</span>
                 <span>Motherlodes</span>
-                {motherlodeOnly && <span className="text-lg">💎</span>}
+                {loadingMotherlodes && (
+                  <span className="w-3 h-3 border-2 border-current border-t-transparent rounded-full animate-spin" />
+                )}
               </button>
               
-              {motherlodeOnly && (
+              {motherlodeOnly && !loadingMotherlodes && (
                 <div className="text-xs text-amber-400/70 text-center flex items-center justify-center gap-1">
                   <span className="inline-block w-1.5 h-1.5 bg-amber-400 rounded-full animate-pulse" />
-                  {filteredRounds.length} motherlode rounds
+                  {displayRounds.length} motherlode rounds loaded
                 </div>
               )}
             </div>
             
-            {contextLoading && rounds.length === 0 ? (
+            {(contextLoading && rounds.length === 0) || (motherlodeOnly && loadingMotherlodes && motherlodeRounds.length === 0) ? (
               <div className="flex items-center justify-center h-48">
                 <div className="w-8 h-8 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
               </div>
             ) : (
               <RoundsList
-                rounds={filteredRounds}
-                pendingRounds={pendingRounds}
+                rounds={displayRounds}
+                pendingRounds={motherlodeOnly ? [] : pendingRounds}
                 selectedRoundId={selectedRoundId}
                 onSelectRound={setSelectedRoundId}
-                liveRound={liveRound}
+                liveRound={motherlodeOnly ? null : liveRound}
                 currentSlot={currentSlot}
-                hasMore={hasMoreRounds && !motherlodeOnly}
-                loadingMore={loadingMoreRounds}
-                onLoadMore={loadMoreRounds}
+                hasMore={motherlodeOnly ? motherlodeHasMore : hasMoreRounds}
+                loadingMore={motherlodeOnly ? loadingMotherlodes : loadingMoreRounds}
+                onLoadMore={motherlodeOnly ? () => fetchMotherlodeRounds(true) : loadMoreRounds}
               />
             )}
             </div>

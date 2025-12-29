@@ -295,10 +295,10 @@ function LeaderboardContent() {
                 <span className="text-xs text-cyan-400/60" title="Average SOL cost to acquire 1 ORE in the selected round range">ⓘ</span>
               </div>
               <div className="text-2xl font-bold text-cyan-300">
-                {formatSol(costPerOre.cost_per_ore_lamports)} SOL
+                {formatSol(costPerOre.cost_per_ore_lamports)}
               </div>
               <div className="text-xs text-slate-500 mt-1">
-                {costPerOre.total_rounds.toLocaleString()} rounds • {formatOre(costPerOre.total_ore_minted_atomic)} ORE minted
+                {costPerOre.total_rounds.toLocaleString()} rounds • {formatOre(costPerOre.total_ore_minted_atomic)} won
               </div>
             </div>
           )}

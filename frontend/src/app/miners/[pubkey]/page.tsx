@@ -457,7 +457,7 @@ function MinerProfileContent() {
       {/* Stats Grid */}
       {!loadingStats && !error && stats && (
         <>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
+          <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mb-8">
             <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6">
               <div className="text-slate-400 text-sm mb-1">Net SOL</div>
               <div className={`text-2xl font-bold ${stats.net_sol_change >= 0 ? "text-green-400" : "text-red-400"}`}>
@@ -475,6 +475,20 @@ function MinerProfileContent() {
             <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6">
               <div className="text-slate-400 text-sm mb-1">Total Deployed</div>
               <div className="text-2xl font-bold text-white">{formatSol(stats.total_deployed)}</div>
+            </div>
+            <div className="bg-gradient-to-br from-cyan-500/10 to-blue-500/10 rounded-xl border border-cyan-500/30 p-6">
+              <div className="text-cyan-400 text-sm mb-1">Cost per ORE</div>
+              <div className="text-2xl font-bold text-cyan-300">
+                {(() => {
+                  // Cost per ORE = -net_sol / ore_earned (when net is negative and ore > 0)
+                  const oreInFullUnits = stats.total_ore_earned / 1e11; // Convert from atomic units
+                  if (stats.net_sol_change >= 0 || oreInFullUnits <= 0) {
+                    return "0";
+                  }
+                  const costPerOre = (-stats.net_sol_change) / oreInFullUnits;
+                  return formatSol(costPerOre);
+                })()}
+              </div>
             </div>
           </div>
 
