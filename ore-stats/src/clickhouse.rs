@@ -1509,6 +1509,29 @@ impl ClickHouseClient {
         Ok(results)
     }
     
+    /// Get raw transactions for a round with pagination (efficient for large rounds).
+    pub async fn get_raw_transactions_for_round_paginated(
+        &self, 
+        round_id: u64, 
+        limit: usize, 
+        offset: usize
+    ) -> Result<Vec<RawTransaction>, ClickHouseError> {
+        let results = self.client
+            .query(
+                "SELECT signature, slot, block_time, round_id, tx_type, raw_json, signer, authority 
+                 FROM raw_transactions FINAL 
+                 WHERE round_id = ? 
+                 ORDER BY slot ASC
+                 LIMIT ? OFFSET ?"
+            )
+            .bind(round_id)
+            .bind(limit as u64)
+            .bind(offset as u64)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
     /// Get raw transactions count for a round.
     pub async fn get_raw_transaction_count(&self, round_id: u64) -> Result<u32, ClickHouseError> {
         let count: u64 = self.client

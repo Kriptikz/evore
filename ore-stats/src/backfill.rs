@@ -1940,86 +1940,42 @@ pub struct SquareDeploymentInfo {
 
 /// GET /admin/transactions/{round_id}/full
 /// Comprehensive blockchain-explorer-level transaction analysis
-/// Optimized: only analyzes the paginated subset, builds lightweight summary
 pub async fn get_round_transactions_full(
     State(state): State<Arc<AppState>>,
     Path(round_id): Path<u64>,
     Query(query): Query<TransactionViewerQuery>,
 ) -> Result<Json<FullAnalysisResponse>, (StatusCode, Json<AuthError>)> {
-    let limit = query.limit.unwrap_or(500).min(1000); // Cap at 1000
+    let limit = query.limit.unwrap_or(500).min(1000);
     let offset = query.offset.unwrap_or(0);
     
-    // Get raw transactions
+    // Get all raw transactions for this round
     let raw_txns = state.clickhouse
         .get_raw_transactions_for_round(round_id)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get raw transactions: {}", e);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
-            )
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() }))
         })?;
     
     let total_transactions = raw_txns.len();
     let analyzer = crate::tx_analyzer::TransactionAnalyzer::new()
         .with_expected_round(round_id);
     
-    // Only analyze the paginated subset (much faster)
+    // Analyze only the paginated subset
     let mut transactions = Vec::new();
     let mut analyzed_count = 0usize;
     
     for (idx, raw_tx) in raw_txns.iter().enumerate() {
-        // Skip until offset
-        if idx < offset {
-            continue;
-        }
-        // Stop after limit
-        if transactions.len() >= limit {
-            break;
-        }
+        if idx < offset { continue; }
+        if transactions.len() >= limit { break; }
         
-        match analyzer.analyze(&raw_tx.raw_json) {
-            Ok(analysis) => {
-                transactions.push(analysis);
-                analyzed_count += 1;
-            }
-            Err(e) => tracing::warn!("Failed to analyze tx {}: {}", raw_tx.signature, e),
+        if let Ok(analysis) = analyzer.analyze(&raw_tx.raw_json) {
+            transactions.push(analysis);
+            analyzed_count += 1;
         }
     }
     
-    // Build summary from analyzed transactions
     let round_summary = build_round_summary(&transactions);
-    
-    // Collect deployments and check for missing automation states
-    let mut deploy_keys: Vec<(String, u8, String, String)> = Vec::new(); // (sig, ix_index, miner, authority)
-    for tx in &transactions {
-        if let Some(ore) = &tx.ore_analysis {
-            for deploy in &ore.deployments {
-                // Find the instruction index for this deploy by matching miner
-                for ix in tx.instructions.iter() {
-                    if let Some(crate::tx_analyzer::ParsedInstruction::OreDeploy { miner, authority, .. }) = &ix.parsed {
-                        if miner == &deploy.miner {
-                            deploy_keys.push((
-                                tx.signature.clone(),
-                                ix.index as u8,
-                                deploy.miner.clone(),
-                                authority.clone(),
-                            ));
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    // Batch check which automation states exist
-    let missing_automation_states = if !deploy_keys.is_empty() {
-        check_missing_automation_states(&state.clickhouse, round_id, &deploy_keys).await
-    } else {
-        Vec::new()
-    };
     
     Ok(Json(FullAnalysisResponse {
         round_id,
@@ -2027,47 +1983,8 @@ pub async fn get_round_transactions_full(
         analyzed_count,
         transactions,
         round_summary,
-        missing_automation_states,
+        missing_automation_states: Vec::new(), // Skip for now
     }))
-}
-
-/// Check which deployments are missing automation states
-async fn check_missing_automation_states(
-    clickhouse: &crate::clickhouse::ClickHouseClient,
-    round_id: u64,
-    deploy_keys: &[(String, u8, String, String)], // (sig, ix_index, miner, authority)
-) -> Vec<MissingAutomationState> {
-    use std::collections::HashSet;
-    
-    // Get existing automation states for this round
-    let existing: HashSet<(String, u8)> = match clickhouse.client
-        .query(&format!(
-            "SELECT deploy_signature, deploy_ix_index 
-             FROM ore_stats.deployment_automation_states 
-             WHERE round_id = {}", 
-            round_id
-        ))
-        .fetch_all::<(String, u8)>()
-        .await
-    {
-        Ok(rows) => rows.into_iter().collect(),
-        Err(e) => {
-            tracing::warn!("Failed to check automation states: {}", e);
-            // If we can't check, assume all are missing
-            HashSet::new()
-        }
-    };
-    
-    // Find missing ones
-    deploy_keys.iter()
-        .filter(|(sig, ix, _, _)| !existing.contains(&(sig.clone(), *ix)))
-        .map(|(sig, ix, miner, auth)| MissingAutomationState {
-            signature: sig.clone(),
-            ix_index: *ix,
-            miner: miner.clone(),
-            authority: auth.clone(),
-        })
-        .collect()
 }
 
 fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis]) -> RoundAnalysisSummary {
