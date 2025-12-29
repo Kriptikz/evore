@@ -1945,12 +1945,18 @@ pub async fn get_round_transactions_full(
     Path(round_id): Path<u64>,
     Query(query): Query<TransactionViewerQuery>,
 ) -> Result<Json<FullAnalysisResponse>, (StatusCode, Json<AuthError>)> {
+    let request_start = std::time::Instant::now();
     let limit = query.limit.unwrap_or(500).min(1000);
     let offset = query.offset.unwrap_or(0);
 
+    tracing::info!(
+        round_id = round_id,
+        limit = limit,
+        offset = offset,
+        "get_round_transactions_full: START - fetching raw transactions from ClickHouse"
+    );
 
-    tracing::info!("Getting raw transactions for round {}", round_id);
-
+    let fetch_start = std::time::Instant::now();
     // Get all raw transactions for this round
     let raw_txns = state.clickhouse
         .get_raw_transactions_for_round(round_id)
@@ -1961,28 +1967,119 @@ pub async fn get_round_transactions_full(
         })?;
     
     let total_transactions = raw_txns.len();
+    tracing::info!(
+        round_id = round_id,
+        total_transactions = total_transactions,
+        fetch_elapsed_ms = fetch_start.elapsed().as_millis(),
+        "get_round_transactions_full: fetched raw transactions from ClickHouse"
+    );
+    
+    let analyzer_start = std::time::Instant::now();
     let analyzer = crate::tx_analyzer::TransactionAnalyzer::new()
         .with_expected_round(round_id);
     
+    tracing::info!(
+        round_id = round_id,
+        expected_round_id = round_id,
+        "get_round_transactions_full: created analyzer with expected round (PDA cached)"
+    );
+    
     // Analyze only the paginated subset
-    tracing::info!("Analyzing transactions");
+    let analyze_start = std::time::Instant::now();
     let mut transactions = Vec::new();
     let mut analyzed_count = 0usize;
+    let mut error_count = 0usize;
+    let mut slow_count = 0usize;
     
-    for (idx, raw_tx) in raw_txns.iter().enumerate() {
-        if idx < offset { continue; }
-        if transactions.len() >= limit { break; }
+    let to_analyze = raw_txns.iter()
+        .skip(offset)
+        .take(limit);
+    let to_analyze_count = raw_txns.len().saturating_sub(offset).min(limit);
+    
+    tracing::info!(
+        round_id = round_id,
+        total = total_transactions,
+        offset = offset,
+        limit = limit,
+        to_analyze = to_analyze_count,
+        "get_round_transactions_full: starting transaction analysis loop"
+    );
+    
+    for (idx, raw_tx) in to_analyze.enumerate() {
+        let tx_start = std::time::Instant::now();
         
-        if let Ok(analysis) = analyzer.analyze(&raw_tx.raw_json) {
-            transactions.push(analysis);
-            analyzed_count += 1;
+        match analyzer.analyze(&raw_tx.raw_json) {
+            Ok(analysis) => {
+                let elapsed_ms = tx_start.elapsed().as_millis();
+                if elapsed_ms > 100 {
+                    slow_count += 1;
+                    tracing::warn!(
+                        round_id = round_id,
+                        idx = idx + offset,
+                        signature = %analysis.signature,
+                        elapsed_ms = elapsed_ms,
+                        "get_round_transactions_full: SLOW transaction analysis (>100ms)"
+                    );
+                }
+                transactions.push(analysis);
+                analyzed_count += 1;
+            }
+            Err(e) => {
+                error_count += 1;
+                tracing::warn!(
+                    round_id = round_id,
+                    idx = idx + offset,
+                    error = %e,
+                    "get_round_transactions_full: failed to analyze transaction"
+                );
+            }
+        }
+        
+        // Progress log every 50 transactions
+        if (idx + 1) % 50 == 0 {
+            tracing::info!(
+                round_id = round_id,
+                progress = format!("{}/{}", idx + 1, to_analyze_count),
+                elapsed_ms = analyze_start.elapsed().as_millis(),
+                slow_count = slow_count,
+                error_count = error_count,
+                "get_round_transactions_full: analysis progress"
+            );
         }
     }
     
-    tracing::info!("Building round summary");
+    tracing::info!(
+        round_id = round_id,
+        analyzed_count = analyzed_count,
+        error_count = error_count,
+        slow_count = slow_count,
+        analysis_elapsed_ms = analyze_start.elapsed().as_millis(),
+        "get_round_transactions_full: completed transaction analysis"
+    );
+    
+    let summary_start = std::time::Instant::now();
     let round_summary = build_round_summary(&transactions);
     
-    tracing::info!("Sending response");
+    tracing::info!(
+        round_id = round_id,
+        summary_elapsed_ms = summary_start.elapsed().as_millis(),
+        "get_round_transactions_full: built round summary"
+    );
+    
+    let total_elapsed_ms = request_start.elapsed().as_millis();
+    tracing::info!(
+        round_id = round_id,
+        total_transactions = total_transactions,
+        analyzed_count = analyzed_count,
+        slow_count = slow_count,
+        total_elapsed_ms = total_elapsed_ms,
+        fetch_ms = fetch_start.elapsed().as_millis(),
+        analyzer_setup_ms = analyzer_start.elapsed().as_millis() - analyze_start.elapsed().as_millis() as u128,
+        analysis_ms = analyze_start.elapsed().as_millis(),
+        summary_ms = summary_start.elapsed().as_millis(),
+        "get_round_transactions_full: COMPLETE - sending response"
+    );
+    
     Ok(Json(FullAnalysisResponse {
         round_id,
         total_transactions,

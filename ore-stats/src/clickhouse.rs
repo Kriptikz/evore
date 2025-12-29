@@ -1496,7 +1496,6 @@ impl ClickHouseClient {
     
     /// Get all raw transactions for a round (for reconstruction).
     pub async fn get_raw_transactions_for_round(&self, round_id: u64) -> Result<Vec<RawTransaction>, ClickHouseError> {
-        tracing::info!("CLICKHOUSE: Getting raw transactions for round {}", round_id);
         let results = self.client
             .query(
                 "SELECT signature, slot, block_time, round_id, tx_type, raw_json, signer, authority 
@@ -1507,7 +1506,6 @@ impl ClickHouseClient {
             .bind(round_id)
             .fetch_all()
             .await?;
-        tracing::info!("CLICKHOUSE: GOT RAW transactions for round {}", round_id);
         Ok(results)
     }
     

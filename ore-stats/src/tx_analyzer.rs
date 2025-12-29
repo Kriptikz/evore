@@ -12,7 +12,7 @@
 //! - Unknown programs (raw data display)
 
 use evore::ore_api::{self, Deploy, OreInstruction};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value;
 use solana_sdk::{bs58, pubkey::Pubkey};
 use std::collections::HashMap;
@@ -332,34 +332,6 @@ pub struct TransactionSummaryInfo {
 // Analyzer Implementation
 // ============================================================================
 
-/// Map of known round PDAs to their round IDs (for reverse lookup)
-static ROUND_PDA_CACHE: std::sync::LazyLock<std::sync::RwLock<HashMap<Pubkey, u64>>> = 
-    std::sync::LazyLock::new(|| std::sync::RwLock::new(HashMap::new()));
-
-/// Try to derive round ID from a round PDA by checking cached values or brute-force search
-fn derive_round_id_from_pda(pda: &Pubkey) -> Option<u64> {
-    // Check cache first
-    if let Ok(cache) = ROUND_PDA_CACHE.read() {
-        if let Some(&id) = cache.get(pda) {
-            return Some(id);
-        }
-    }
-    
-    // Try searching around recent round IDs (0 to 200000)
-    // This is a reasonable range for ORE rounds
-    for id in (0..200000u64).rev() {
-        let (derived_pda, _) = ore_api::round_pda(id);
-        if derived_pda == *pda {
-            // Cache it
-            if let Ok(mut cache) = ROUND_PDA_CACHE.write() {
-                cache.insert(*pda, id);
-            }
-            return Some(id);
-        }
-    }
-    
-    None
-}
 
 pub struct TransactionAnalyzer {
     expected_round_pda: Option<Pubkey>,
@@ -378,12 +350,17 @@ impl TransactionAnalyzer {
         let (pda, _) = ore_api::round_pda(round_id);
         self.expected_round_pda = Some(pda);
         self.expected_round_id = Some(round_id);
-        
-        // Cache this PDA mapping
-        if let Ok(mut cache) = ROUND_PDA_CACHE.write() {
-            cache.insert(pda, round_id);
-        }
         self
+    }
+    
+    /// Check if a round PDA matches our expected round, returning the round_id if it matches
+    fn check_round_pda(&self, round_pda: &Pubkey) -> Option<u64> {
+        match (&self.expected_round_pda, self.expected_round_id) {
+            (Some(expected_pda), Some(expected_id)) if expected_pda == round_pda => {
+                Some(expected_id)
+            }
+            _ => None,
+        }
     }
     
     pub fn analyze(&self, raw_json: &str) -> Result<FullTransactionAnalysis, String> {
@@ -394,6 +371,8 @@ impl TransactionAnalyzer {
     }
     
     pub fn analyze_value(&self, tx: &Value) -> Result<FullTransactionAnalysis, String> {
+        let analyze_start = std::time::Instant::now();
+        
         // Basic info
         let signature = tx.get("transaction")
             .and_then(|t| t.get("signatures"))
@@ -402,6 +381,11 @@ impl TransactionAnalyzer {
             .and_then(|s| s.as_str())
             .unwrap_or("unknown")
             .to_string();
+        
+        tracing::debug!(
+            signature = %signature,
+            "analyze_value: START"
+        );
         
         let slot = tx.get("slot").and_then(|s| s.as_u64()).unwrap_or(0);
         let block_time = tx.get("blockTime").and_then(|b| b.as_i64()).unwrap_or(0);
@@ -412,6 +396,12 @@ impl TransactionAnalyzer {
         } else {
             "Unknown".to_string()
         };
+        
+        tracing::trace!(
+            signature = %signature,
+            elapsed_us = analyze_start.elapsed().as_micros(),
+            "analyze_value: parsed basic info (slot, block_time)"
+        );
         
         // Meta
         let meta = tx.get("meta").ok_or("Missing meta")?;
@@ -536,7 +526,15 @@ impl TransactionAnalyzer {
             })
             .collect();
         
+        tracing::trace!(
+            signature = %signature,
+            accounts_count = all_accounts.len(),
+            elapsed_us = analyze_start.elapsed().as_micros(),
+            "analyze_value: parsed accounts and balances"
+        );
+        
         // Parse instructions
+        let instruction_parse_start = std::time::Instant::now();
         let mut instructions: Vec<InstructionAnalysis> = Vec::new();
         let mut ore_deployments: Vec<OreDeploymentInfo> = Vec::new();
         let mut ore_reset_count = 0;
@@ -589,7 +587,16 @@ impl TransactionAnalyzer {
             }
         }
         
+        tracing::trace!(
+            signature = %signature,
+            instruction_count = instructions.len(),
+            elapsed_us = instruction_parse_start.elapsed().as_micros(),
+            total_elapsed_us = analyze_start.elapsed().as_micros(),
+            "analyze_value: parsed top-level instructions"
+        );
+        
         // Inner instructions
+        let inner_parse_start = std::time::Instant::now();
         let mut inner_instructions: Vec<InnerInstructionGroup> = Vec::new();
         if let Some(inner_arr) = meta.get("innerInstructions").and_then(|i| i.as_array()) {
             for inner in inner_arr {
@@ -648,6 +655,16 @@ impl TransactionAnalyzer {
             }
         }
         
+        let inner_ix_count: usize = inner_instructions.iter().map(|g| g.instructions.len()).sum();
+        tracing::trace!(
+            signature = %signature,
+            inner_groups = inner_instructions.len(),
+            inner_instruction_count = inner_ix_count,
+            elapsed_us = inner_parse_start.elapsed().as_micros(),
+            total_elapsed_us = analyze_start.elapsed().as_micros(),
+            "analyze_value: parsed inner instructions"
+        );
+        
         // Build programs list
         let programs_invoked: Vec<ProgramInfo> = programs_map.into_iter()
             .map(|(pubkey, count)| ProgramInfo {
@@ -658,13 +675,14 @@ impl TransactionAnalyzer {
             .collect();
         
         // ORE analysis
-        let has_ore = ore_deployments.len() + ore_reset_count + ore_log_count + ore_other_count > 0;
+        let ore_deploy_count = ore_deployments.len();
+        let has_ore = ore_deploy_count + ore_reset_count + ore_log_count + ore_other_count > 0;
         let total_deployed: u64 = ore_deployments.iter().map(|d| d.total_lamports).sum();
         
         let ore_analysis = if has_ore {
             Some(OreTransactionAnalysis {
                 has_ore_instructions: true,
-                deploy_count: ore_deployments.len(),
+                deploy_count: ore_deploy_count,
                 reset_count: ore_reset_count,
                 log_count: ore_log_count,
                 other_count: ore_other_count,
@@ -689,6 +707,27 @@ impl TransactionAnalyzer {
             is_deploy_transaction: ore_analysis.as_ref().map(|a| a.deploy_count > 0).unwrap_or(false),
             primary_action,
         };
+        
+        let total_elapsed_ms = analyze_start.elapsed().as_millis();
+        if total_elapsed_ms > 100 {
+            tracing::warn!(
+                signature = %signature,
+                elapsed_ms = total_elapsed_ms,
+                instructions = instructions.len(),
+                inner_instructions = total_inner,
+                ore_deployments = ore_deploy_count,
+                "analyze_value: SLOW TRANSACTION (>100ms)"
+            );
+        } else {
+            tracing::debug!(
+                signature = %signature,
+                elapsed_ms = total_elapsed_ms,
+                instructions = instructions.len(),
+                inner_instructions = total_inner,
+                ore_deployments = ore_deploy_count,
+                "analyze_value: COMPLETE"
+            );
+        }
         
         Ok(FullTransactionAnalysis {
             signature,
@@ -734,6 +773,8 @@ impl TransactionAnalyzer {
         ix_idx: usize,
         is_inner: bool,
     ) -> Result<InstructionAnalysis, String> {
+        let ix_start = std::time::Instant::now();
+        
         let program_id_index = ix.get("programIdIndex")
             .and_then(|p| p.as_u64())
             .ok_or("Missing programIdIndex")? as usize;
@@ -743,6 +784,13 @@ impl TransactionAnalyzer {
         let program_id_str = program_id.to_string();
         let program_name = self.identify_program(&program_id_str)
             .unwrap_or_else(|| format!("Unknown ({}...)", &program_id_str[..8]));
+        
+        tracing::trace!(
+            ix_idx = ix_idx,
+            is_inner = is_inner,
+            program = %program_name,
+            "analyze_instruction: START"
+        );
         
         // Get accounts for this instruction
         let accounts_arr = ix.get("accounts")
@@ -782,6 +830,27 @@ impl TransactionAnalyzer {
             &accounts,
             account_keys,
         );
+        
+        let ix_elapsed_us = ix_start.elapsed().as_micros();
+        if ix_elapsed_us > 1000 { // > 1ms is slow for a single instruction
+            tracing::debug!(
+                ix_idx = ix_idx,
+                is_inner = is_inner,
+                program = %program_name,
+                instruction_type = %instruction_type,
+                elapsed_us = ix_elapsed_us,
+                "analyze_instruction: SLOW instruction (>1ms)"
+            );
+        } else {
+            tracing::trace!(
+                ix_idx = ix_idx,
+                is_inner = is_inner,
+                program = %program_name,
+                instruction_type = %instruction_type,
+                elapsed_us = ix_elapsed_us,
+                "analyze_instruction: COMPLETE"
+            );
+        }
         
         Ok(InstructionAnalysis {
             index: ix_idx,
@@ -1158,6 +1227,8 @@ impl TransactionAnalyzer {
         accounts: &[InstructionAccount],
         _account_keys: &[Pubkey],
     ) -> (String, Option<ParsedInstruction>, Option<String>) {
+        let parse_start = std::time::Instant::now();
+        
         if data.is_empty() {
             return ("Empty".to_string(), None, Some("Empty data".to_string()));
         }
@@ -1166,6 +1237,8 @@ impl TransactionAnalyzer {
         
         match OreInstruction::try_from(tag) {
             Ok(OreInstruction::Deploy) => {
+                tracing::trace!(tag = tag, "parse_ore_instruction: parsing Deploy");
+                
                 const DEPLOY_SIZE: usize = std::mem::size_of::<Deploy>();
                 if data.len() < 1 + DEPLOY_SIZE {
                     return ("Deploy".to_string(), None, Some("Deploy data too short".to_string()));
@@ -1186,11 +1259,19 @@ impl TransactionAnalyzer {
                 
                 let total = amount * squares.len() as u64;
                 
-                // Try to derive round ID from round PDA
+                // Check if round PDA matches expected round (fast path)
                 let round_str = accounts.get(5).map(|a| a.pubkey.clone()).unwrap_or_default();
                 let round_id = Pubkey::from_str(&round_str)
                     .ok()
-                    .and_then(|pk| derive_round_id_from_pda(&pk));
+                    .and_then(|pk| self.check_round_pda(&pk));
+                
+                tracing::trace!(
+                    round_pda = %round_str,
+                    round_id = ?round_id,
+                    matches_expected = round_id.is_some(),
+                    elapsed_us = parse_start.elapsed().as_micros(),
+                    "parse_ore_instruction: Deploy round check"
+                );
                 
                 (
                     "Deploy".to_string(),
@@ -1213,11 +1294,21 @@ impl TransactionAnalyzer {
                 )
             }
             Ok(OreInstruction::Checkpoint) => {
-                // Checkpoint uses previous round
+                tracing::trace!(tag = tag, "parse_ore_instruction: parsing Checkpoint");
+                
+                // Checkpoint uses previous round - check if it matches expected
                 let round_str = accounts.get(3).map(|a| a.pubkey.clone()).unwrap_or_default();
                 let round_id = Pubkey::from_str(&round_str)
                     .ok()
-                    .and_then(|pk| derive_round_id_from_pda(&pk));
+                    .and_then(|pk| self.check_round_pda(&pk));
+                
+                tracing::trace!(
+                    round_pda = %round_str,
+                    round_id = ?round_id,
+                    matches_expected = round_id.is_some(),
+                    elapsed_us = parse_start.elapsed().as_micros(),
+                    "parse_ore_instruction: Checkpoint round check"
+                );
                 
                 (
                     "Checkpoint".to_string(),
