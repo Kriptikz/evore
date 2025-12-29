@@ -6,33 +6,10 @@ import { useRouter } from "next/navigation";
 import { api, MinerSnapshotsResponse } from "@/lib/api";
 import { Header } from "@/components/Header";
 import { useMultiUrlState } from "@/hooks/useUrlState";
+import { formatSol, formatOre, truncateAddress } from "@/lib/format";
 
 type SortByType = "refined_ore" | "unclaimed_ore" | "lifetime_sol" | "lifetime_ore";
 type OrderType = "desc" | "asc";
-
-const LAMPORTS_PER_SOL = 1_000_000_000;
-const ORE_DECIMALS = 11;
-
-function formatSol(lamports: number): string {
-  const sol = lamports / LAMPORTS_PER_SOL;
-  if (Math.abs(sol) >= 1000) {
-    return sol.toLocaleString(undefined, { maximumFractionDigits: 1 }) + " SOL";
-  }
-  return sol.toFixed(4) + " SOL";
-}
-
-function formatOre(atomic: number): string {
-  const ore = atomic / Math.pow(10, ORE_DECIMALS);
-  if (ore >= 1000) {
-    return ore.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " ORE";
-  }
-  return ore.toFixed(4) + " ORE";
-}
-
-function truncateAddress(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return addr.slice(0, 6) + "..." + addr.slice(-4);
-}
 
 function MinersContent() {
   const router = useRouter();

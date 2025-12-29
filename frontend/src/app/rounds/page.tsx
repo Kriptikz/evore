@@ -6,21 +6,7 @@ import { api, HistoricalRound, CursorResponse } from "@/lib/api";
 import { Header } from "@/components/Header";
 import { RoundRangeFilter } from "@/components/RoundRangeFilter";
 import { useMultiUrlState } from "@/hooks/useUrlState";
-
-const LAMPORTS_PER_SOL = 1_000_000_000;
-
-function formatSol(lamports: number): string {
-  const sol = lamports / LAMPORTS_PER_SOL;
-  if (Math.abs(sol) >= 1000) {
-    return sol.toLocaleString(undefined, { maximumFractionDigits: 1 });
-  }
-  return sol.toFixed(4);
-}
-
-function truncateAddress(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return addr.slice(0, 6) + "..." + addr.slice(-4);
-}
+import { formatSol, truncateAddress } from "@/lib/format";
 
 function RoundsContent() {
   const [rounds, setRounds] = useState<HistoricalRound[]>([]);
@@ -139,13 +125,13 @@ function RoundsContent() {
           <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
             <div className="text-slate-400 text-sm">Total Winnings</div>
             <div className="text-2xl font-bold text-green-400">
-              {formatSol(rounds.reduce((acc, r) => acc + r.total_winnings, 0))} SOL
+              {formatSol(rounds.reduce((acc, r) => acc + r.total_winnings, 0))}
             </div>
           </div>
           <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-4">
             <div className="text-slate-400 text-sm">Total Deployed</div>
             <div className="text-2xl font-bold text-blue-400">
-              {formatSol(rounds.reduce((acc, r) => acc + r.total_deployed, 0))} SOL
+              {formatSol(rounds.reduce((acc, r) => acc + r.total_deployed, 0))}
             </div>
           </div>
         </div>
@@ -216,10 +202,10 @@ function RoundsContent() {
                       </Link>
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-blue-400 text-sm">
-                      {formatSol(round.total_deployed)} SOL
+                      {formatSol(round.total_deployed)}
                     </td>
                     <td className="px-4 py-3 text-right font-mono text-green-400 text-sm">
-                      {formatSol(round.total_winnings)} SOL
+                      {formatSol(round.total_winnings)}
                     </td>
                     <td className="px-4 py-3 text-right text-slate-400 text-sm">
                       {round.unique_miners}
@@ -227,7 +213,7 @@ function RoundsContent() {
                     <td className="px-4 py-3 text-center">
                       {round.motherlode_hit ? (
                         <span className="inline-flex items-center gap-1 px-2 py-1 bg-amber-500/20 text-amber-400 rounded-full text-xs font-medium">
-                          💎 {formatSol(round.motherlode)} SOL
+                          💎 {formatSol(round.motherlode)}
                         </span>
                       ) : (
                         <span className="text-slate-600">—</span>

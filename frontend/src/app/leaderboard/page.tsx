@@ -7,30 +7,10 @@ import { api, LeaderboardEntry, OffsetResponse } from "@/lib/api";
 import { Header } from "@/components/Header";
 import { RoundRangeFilter } from "@/components/RoundRangeFilter";
 import { useMultiUrlState } from "@/hooks/useUrlState";
+import { formatSol, formatOre, truncateAddress } from "@/lib/format";
 
 type MetricType = "net_sol" | "sol_deployed" | "sol_earned" | "ore_earned" | "sol_cost";
 type MinRoundsType = 0 | 100 | 500 | 1000 | 5000;
-
-const LAMPORTS_PER_SOL = 1_000_000_000;
-const ORE_DECIMALS = 11;
-
-function formatSol(lamports: number): string {
-  const sol = lamports / LAMPORTS_PER_SOL;
-  if (Math.abs(sol) >= 1000) {
-    return sol.toLocaleString(undefined, { maximumFractionDigits: 1 }) + " SOL";
-  }
-  return sol.toFixed(4) + " SOL";
-}
-
-function formatOre(atomic: number): string {
-  const ore = atomic / Math.pow(10, ORE_DECIMALS);
-  return ore.toFixed(4) + " ORE";
-}
-
-function truncateAddress(addr: string): string {
-  if (addr.length <= 12) return addr;
-  return addr.slice(0, 6) + "..." + addr.slice(-4);
-}
 
 function LeaderboardContent() {
   const router = useRouter();
@@ -384,7 +364,7 @@ function LeaderboardContent() {
                     {metric === "sol_cost" && (
                       <td className="px-4 py-3 text-right font-mono text-amber-400 text-sm">
                         {entry.sol_cost_per_ore !== null 
-                          ? (entry.sol_cost_per_ore / LAMPORTS_PER_SOL).toFixed(4) + " SOL"
+                          ? formatSol(entry.sol_cost_per_ore)
                           : "N/A"
                         }
                       </td>

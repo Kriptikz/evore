@@ -7,9 +7,7 @@ import { api, MinerStats, HistoricalDeployment, CursorResponse, MinerSquareStats
 import { Header } from "@/components/Header";
 import { RoundRangeFilter } from "@/components/RoundRangeFilter";
 import { useMultiUrlState } from "@/hooks/useUrlState";
-
-const LAMPORTS_PER_SOL = 1_000_000_000;
-const ORE_DECIMALS = 11;
+import { formatSol, formatOre } from "@/lib/format";
 
 // Grouped deployment for a single round
 interface RoundDeploymentGroup {
@@ -22,19 +20,6 @@ interface RoundDeploymentGroup {
   is_top_miner: boolean;
   deployed_slot: number;
   winning_square: number; // The actual winning square from the round
-}
-
-function formatSol(lamports: number): string {
-  const sol = lamports / LAMPORTS_PER_SOL;
-  if (Math.abs(sol) >= 1000) {
-    return sol.toLocaleString(undefined, { maximumFractionDigits: 2 }) + " SOL";
-  }
-  return sol.toFixed(6) + " SOL";
-}
-
-function formatOre(atomic: number): string {
-  const ore = atomic / Math.pow(10, ORE_DECIMALS);
-  return ore.toFixed(4) + " ORE";
 }
 
 type TabType = "overview" | "deployments" | "wins";
