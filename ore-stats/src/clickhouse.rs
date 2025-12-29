@@ -1860,6 +1860,8 @@ impl ClickHouseClient {
         round_id_gte: Option<u64>,
         round_id_lte: Option<u64>,
         winner_only: Option<bool>,
+        base_ore_only: Option<bool>,
+        motherlode_only: Option<bool>,
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<Vec<DeploymentRow>, ClickHouseError> {
@@ -1873,6 +1875,17 @@ impl ClickHouseClient {
         }
         if winner_only == Some(true) {
             conditions.push("d.is_winner = 1".to_string());
+        }
+        // Filter for exactly 1 ORE (100_000_000_000 atomic units = 1e11)
+        // This is the base reward with no motherlode
+        if base_ore_only == Some(true) {
+            conditions.push("d.ore_earned = 100000000000".to_string());
+        }
+        // Filter for motherlode hits: ORE earned is > 0 but != 1.0
+        // Either <1.0 ORE or >1.0 ORE indicates a motherlode hit
+        if motherlode_only == Some(true) {
+            conditions.push("d.ore_earned > 0".to_string());
+            conditions.push("d.ore_earned != 100000000000".to_string());
         }
         if let Some(c) = cursor {
             // Cursor format: "round:square"

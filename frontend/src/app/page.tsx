@@ -439,7 +439,7 @@ function RoundsList({
             </span>
             <div className="flex items-center gap-1.5">
               {round.motherlode > 0 && (
-                <span className="text-purple-400 text-xs">💎 {formatSol(round.motherlode)}</span>
+                <span className="text-purple-400 text-xs">💎 {formatOre(round.motherlode)}</span>
               )}
               {round.motherlode_hit && !round.motherlode && (
                 <span className="text-amber-400 text-xs">💎</span>

@@ -103,6 +103,10 @@ pub struct MinerHistoryQuery {
     pub round_id_lte: Option<u64>,
     // Boolean filters
     pub winner_only: Option<bool>,
+    /// Filter for exactly 1 ORE earned (base reward only, no motherlode)
+    pub base_ore_only: Option<bool>,
+    /// Filter for motherlode hits (ORE earned != 1.0, either <1.0 or >1.0)
+    pub motherlode_only: Option<bool>,
 }
 
 /// Leaderboard query
@@ -498,6 +502,8 @@ async fn get_miner_deployments(
             params.round_id_gte,
             params.round_id_lte,
             params.winner_only,
+            params.base_ore_only,
+            params.motherlode_only,
             params.cursor.as_deref(),
             limit,
         )

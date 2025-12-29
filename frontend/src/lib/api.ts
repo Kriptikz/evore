@@ -1060,6 +1060,8 @@ class ApiClient {
     roundIdGte?: number;
     roundIdLte?: number;
     winnerOnly?: boolean;
+    baseOreOnly?: boolean;
+    motherlodeOnly?: boolean;
   }): Promise<CursorResponse<HistoricalDeployment>> {
     const params = new URLSearchParams();
     if (options?.cursor) params.set("cursor", options.cursor);
@@ -1067,6 +1069,8 @@ class ApiClient {
     if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
     if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
     if (options?.winnerOnly) params.set("winner_only", "true");
+    if (options?.baseOreOnly) params.set("base_ore_only", "true");
+    if (options?.motherlodeOnly) params.set("motherlode_only", "true");
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/history/miner/${pubkey}/deployments${query}`);
   }

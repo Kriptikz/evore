@@ -90,18 +90,24 @@ function SquareHeatmap({
   );
 }
 
+type WinsFilter = "all" | "base_ore" | "motherlode";
+
 function MinerDeploymentsGrouped({
   deployments,
   loadingDeployments,
   hasMore,
   onLoadMore,
   showWinningOnly,
+  winsFilter,
+  onWinsFilterChange,
 }: {
   deployments: HistoricalDeployment[];
   loadingDeployments: boolean;
   hasMore: boolean;
   onLoadMore: () => void;
   showWinningOnly?: boolean;
+  winsFilter?: WinsFilter;
+  onWinsFilterChange?: (filter: WinsFilter) => void;
 }) {
   // Group deployments by round
   const groupedByRound = useMemo(() => {
@@ -147,10 +153,47 @@ function MinerDeploymentsGrouped({
 
   return (
     <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
-      <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center">
+      <div className="px-6 py-4 border-b border-slate-700/50 flex justify-between items-center flex-wrap gap-3">
         <h3 className="text-lg font-semibold text-white">
           {showWinningOnly ? "Winning Rounds" : "Deployment History"} ({groupedByRound.length} rounds)
         </h3>
+        {showWinningOnly && onWinsFilterChange && (
+          <div className="flex items-center gap-2">
+            <button
+              onClick={() => onWinsFilterChange("all")}
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors ${
+                winsFilter === "all"
+                  ? "bg-amber-500 text-black font-medium"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+            >
+              All Wins
+            </button>
+            <button
+              onClick={() => onWinsFilterChange("base_ore")}
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 ${
+                winsFilter === "base_ore"
+                  ? "bg-amber-500 text-black font-medium"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+              title="Filter for exactly +1 ORE wins (no motherlode)"
+            >
+              <span>+1 ORE</span>
+            </button>
+            <button
+              onClick={() => onWinsFilterChange("motherlode")}
+              className={`px-3 py-1.5 text-sm rounded-lg transition-colors flex items-center gap-1.5 ${
+                winsFilter === "motherlode"
+                  ? "bg-cyan-500 text-black font-medium"
+                  : "bg-slate-700 text-slate-300 hover:bg-slate-600"
+              }`}
+              title="Filter for motherlode hits (ORE ≠ 1.0)"
+            >
+              <span className="text-base">💎</span>
+              <span>Motherlodes</span>
+            </button>
+          </div>
+        )}
       </div>
       
       <div className="max-h-[600px] overflow-y-auto divide-y divide-slate-700/30">
@@ -274,11 +317,13 @@ function MinerProfileContent() {
     tab: "overview" as string,
     round_min: undefined as number | undefined,
     round_max: undefined as number | undefined,
+    wins_filter: "all" as string,
   });
 
   const activeTab = urlState.tab as TabType;
   const roundMin = urlState.round_min;
   const roundMax = urlState.round_max;
+  const winsFilter = (urlState.wins_filter as WinsFilter) || "all";
 
   // Fetch current round ID
   useEffect(() => {
@@ -327,13 +372,19 @@ function MinerProfileContent() {
     }
   }, [pubkey, roundMin, roundMax]);
 
-  const fetchDeployments = useCallback(async (cursor?: string, winnerOnly?: boolean) => {
+  const fetchDeployments = useCallback(async (
+    cursor?: string, 
+    winnerOnly?: boolean,
+    filter?: WinsFilter
+  ) => {
     setLoadingDeployments(true);
     try {
       const data = await api.getMinerDeployments(pubkey, {
         cursor,
         limit: 50,
         winnerOnly,
+        baseOreOnly: filter === "base_ore" ? true : undefined,
+        motherlodeOnly: filter === "motherlode" ? true : undefined,
         roundIdGte: roundMin,
         roundIdLte: roundMax,
       });
@@ -360,12 +411,18 @@ function MinerProfileContent() {
     if (activeTab === "deployments") {
       fetchDeployments(undefined, false);
     } else if (activeTab === "wins") {
-      fetchDeployments(undefined, true);
+      fetchDeployments(undefined, true, winsFilter);
     }
-  }, [activeTab, fetchDeployments]);
+  }, [activeTab, winsFilter, fetchDeployments]);
 
   const handleTabChange = (tab: TabType) => {
     setUrlState({ tab });
+    setDeployments([]);
+    setDeploymentsResponse(null);
+  };
+
+  const handleWinsFilterChange = (filter: WinsFilter) => {
+    setUrlState({ wins_filter: filter });
     setDeployments([]);
     setDeploymentsResponse(null);
   };
@@ -382,7 +439,11 @@ function MinerProfileContent() {
 
   const loadMoreDeployments = () => {
     if (deploymentsResponse?.cursor) {
-      fetchDeployments(deploymentsResponse.cursor, activeTab === "wins");
+      fetchDeployments(
+        deploymentsResponse.cursor, 
+        activeTab === "wins",
+        activeTab === "wins" ? winsFilter : undefined
+      );
     }
   };
 
@@ -590,6 +651,8 @@ function MinerProfileContent() {
               hasMore={deploymentsResponse?.has_more || false}
               onLoadMore={loadMoreDeployments}
               showWinningOnly={activeTab === "wins"}
+              winsFilter={winsFilter}
+              onWinsFilterChange={handleWinsFilterChange}
             />
           )}
         </>
