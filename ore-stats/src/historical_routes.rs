@@ -109,9 +109,10 @@ pub struct MinerHistoryQuery {
 #[derive(Debug, Deserialize)]
 pub struct LeaderboardQuery {
     // Which metric to rank by
-    pub metric: Option<String>, // "net_sol", "sol_earned", "ore_earned", "rounds_won"
-    // Time range
-    pub round_range: Option<String>, // "all", "last_60", "last_100", "today"
+    pub metric: Option<String>, // "net_sol", "sol_earned", "ore_earned", "rounds_won", "sol_cost"
+    // Round range filters (use these instead of string-based round_range)
+    pub round_id_gte: Option<u64>,
+    pub round_id_lte: Option<u64>,
     // Pagination
     pub page: Option<u32>,
     pub limit: Option<u32>,
@@ -178,6 +179,7 @@ pub struct HistoricalDeployment {
     pub ore_earned: u64,
     pub is_winner: bool,
     pub is_top_miner: bool,
+    pub winning_square: u8,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +195,19 @@ pub struct MinerStats {
     pub avg_deployment: u64,
     /// Average slots left when deploying (0 = deployed at end of round)
     pub avg_slots_left: f64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MinerSquareStats {
+    pub miner_pubkey: String,
+    /// Number of deployments to each square (25 elements, indexed by square_id)
+    pub square_counts: Vec<u64>,
+    /// Total amount deployed to each square in lamports (25 elements)
+    pub square_amounts: Vec<u64>,
+    /// Number of wins on each square (25 elements)
+    pub square_wins: Vec<u64>,
+    /// Total unique rounds the miner participated in
+    pub total_rounds: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -261,6 +276,7 @@ pub fn historical_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // Miner history
         .route("/miner/{pubkey}/deployments", get(get_miner_deployments))
         .route("/miner/{pubkey}/stats", get(get_miner_stats))
+        .route("/miner/{pubkey}/square-stats", get(get_miner_square_stats))
         
         // Miner snapshots (all miners from latest round snapshot)
         .route("/miners", get(get_miner_snapshots))
@@ -398,6 +414,7 @@ async fn get_round_deployments(
         ore_earned: d.ore_earned,
         is_winner: d.is_winner > 0,
         is_top_miner: d.is_top_miner > 0,
+        winning_square: d.winning_square,
     }).collect();
     
     Ok(Json(CursorResponse {
@@ -450,6 +467,7 @@ async fn get_deployments(
         ore_earned: d.ore_earned,
         is_winner: d.is_winner > 0,
         is_top_miner: d.is_top_miner > 0,
+        winning_square: d.winning_square,
     }).collect();
     
     Ok(Json(CursorResponse {
@@ -499,6 +517,7 @@ async fn get_miner_deployments(
         ore_earned: d.ore_earned,
         is_winner: d.is_winner > 0,
         is_top_miner: d.is_top_miner > 0,
+        winning_square: d.winning_square,
     }).collect();
     
     Ok(Json(CursorResponse {
@@ -508,13 +527,21 @@ async fn get_miner_deployments(
     }))
 }
 
+/// Miner stats query params
+#[derive(Debug, Deserialize)]
+pub struct MinerStatsQuery {
+    pub round_id_gte: Option<u64>,
+    pub round_id_lte: Option<u64>,
+}
+
 /// GET /history/miner/{pubkey}/stats - Aggregated miner statistics
 async fn get_miner_stats(
     State(state): State<Arc<AppState>>,
     Path(pubkey): Path<String>,
+    Query(params): Query<MinerStatsQuery>,
 ) -> Result<Json<MinerStats>, (StatusCode, Json<ErrorResponse>)> {
     let stats = state.clickhouse
-        .get_miner_stats(&pubkey)
+        .get_miner_stats(&pubkey, params.round_id_gte, params.round_id_lte)
         .await
         .map_err(|e| {
             tracing::error!("Failed to get miner stats for {}: {}", pubkey, e);
@@ -522,6 +549,30 @@ async fn get_miner_stats(
         })?
         .ok_or_else(|| {
             (StatusCode::NOT_FOUND, Json(ErrorResponse { error: "Miner not found in historical data".to_string() }))
+        })?;
+    
+    Ok(Json(stats))
+}
+
+/// Square stats query params
+#[derive(Debug, Deserialize)]
+pub struct SquareStatsQuery {
+    pub round_id_gte: Option<u64>,
+    pub round_id_lte: Option<u64>,
+}
+
+/// GET /history/miner/{pubkey}/square-stats - Per-square deployment statistics
+async fn get_miner_square_stats(
+    State(state): State<Arc<AppState>>,
+    Path(pubkey): Path<String>,
+    Query(params): Query<SquareStatsQuery>,
+) -> Result<Json<MinerSquareStats>, (StatusCode, Json<ErrorResponse>)> {
+    let stats = state.clickhouse
+        .get_miner_square_stats(&pubkey, params.round_id_gte, params.round_id_lte)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get square stats for {}: {}", pubkey, e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string() }))
         })?;
     
     Ok(Json(stats))
@@ -631,7 +682,6 @@ async fn get_leaderboard_internal(
     default_metric: &str,
 ) -> Result<Json<OffsetResponse<LeaderboardEntry>>, (StatusCode, Json<ErrorResponse>)> {
     let metric = params.metric.as_deref().unwrap_or(default_metric);
-    let round_range = params.round_range.as_deref().unwrap_or("all");
     let page = params.page.unwrap_or(1).max(1);
     let limit = params.limit.unwrap_or(50).min(100);
     let offset = (page - 1) * limit;
@@ -642,21 +692,21 @@ async fn get_leaderboard_internal(
         if search.trim().is_empty() {
             // Empty search, use normal pagination
             state.clickhouse
-                .get_leaderboard(metric, round_range, offset, limit, min_rounds)
+                .get_leaderboard(metric, params.round_id_gte, params.round_id_lte, offset, limit, min_rounds)
                 .await
         } else {
             // Search filter - keeps rankings intact, no pagination offset
             state.clickhouse
-                .get_leaderboard_filtered(metric, round_range, search.trim(), limit, min_rounds)
+                .get_leaderboard_filtered(metric, params.round_id_gte, params.round_id_lte, search.trim(), limit, min_rounds)
                 .await
         }
     } else {
         state.clickhouse
-            .get_leaderboard(metric, round_range, offset, limit, min_rounds)
+            .get_leaderboard(metric, params.round_id_gte, params.round_id_lte, offset, limit, min_rounds)
             .await
     }.map_err(|e| {
         tracing::error!("Failed to get leaderboard: {}", e);
-        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: "Database error".to_string() }))
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { error: e.to_string() }))
     })?;
     
     let total_pages = ((total_count as f64) / (limit as f64)).ceil() as u32;

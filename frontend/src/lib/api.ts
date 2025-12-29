@@ -509,6 +509,7 @@ export interface HistoricalDeployment {
   ore_earned: number;
   is_winner: boolean;
   is_top_miner: boolean;
+  winning_square: number;
 }
 
 export interface MinerStats {
@@ -522,6 +523,18 @@ export interface MinerStats {
   win_rate: number;
   avg_deployment: number;
   avg_slots_left: number;
+}
+
+export interface MinerSquareStats {
+  miner_pubkey: string;
+  /** Number of deployments to each square (25 elements, indexed by square_id) */
+  square_counts: number[];
+  /** Total amount deployed to each square in lamports (25 elements) */
+  square_amounts: number[];
+  /** Number of wins on each square (25 elements) */
+  square_wins: number[];
+  /** Total unique rounds the miner participated in */
+  total_rounds: number;
 }
 
 export interface LeaderboardEntry {
@@ -1035,13 +1048,32 @@ class ApiClient {
     return this.request("GET", `/history/miner/${pubkey}/deployments${query}`);
   }
 
-  async getMinerStats(pubkey: string): Promise<MinerStats> {
-    return this.request("GET", `/history/miner/${pubkey}/stats`);
+  async getMinerStats(pubkey: string, options?: {
+    roundIdGte?: number;
+    roundIdLte?: number;
+  }): Promise<MinerStats> {
+    const params = new URLSearchParams();
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/miner/${pubkey}/stats${query}`);
+  }
+
+  async getMinerSquareStats(pubkey: string, options?: {
+    roundIdGte?: number;
+    roundIdLte?: number;
+  }): Promise<MinerSquareStats> {
+    const params = new URLSearchParams();
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
+    const query = params.toString() ? `?${params.toString()}` : "";
+    return this.request("GET", `/history/miner/${pubkey}/square-stats${query}`);
   }
 
   async getLeaderboard(options?: {
     metric?: "net_sol" | "sol_deployed" | "sol_earned" | "ore_earned" | "sol_cost";
-    roundRange?: "all" | "last_60" | "last_100" | "today";
+    roundIdGte?: number;
+    roundIdLte?: number;
     page?: number;
     limit?: number;
     search?: string;
@@ -1049,7 +1081,8 @@ class ApiClient {
   }): Promise<OffsetResponse<LeaderboardEntry>> {
     const params = new URLSearchParams();
     if (options?.metric) params.set("metric", options.metric);
-    if (options?.roundRange) params.set("round_range", options.roundRange);
+    if (options?.roundIdGte) params.set("round_id_gte", options.roundIdGte.toString());
+    if (options?.roundIdLte) params.set("round_id_lte", options.roundIdLte.toString());
     if (options?.page) params.set("page", options.page.toString());
     if (options?.limit) params.set("limit", options.limit.toString());
     if (options?.search) params.set("search", options.search);

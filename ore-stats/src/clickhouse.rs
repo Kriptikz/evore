@@ -1678,31 +1678,32 @@ impl ClickHouseClient {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<Vec<DeploymentRow>, ClickHouseError> {
-        let mut conditions = vec![format!("round_id = {}", round_id)];
+        let mut conditions = vec![format!("d.round_id = {}", round_id)];
         
         if let Some(m) = miner {
-            conditions.push(format!("miner_pubkey = '{}'", m));
+            conditions.push(format!("d.miner_pubkey = '{}'", m));
         }
         if winner_only == Some(true) {
-            conditions.push("is_winner = 1".to_string());
+            conditions.push("d.is_winner = 1".to_string());
         }
         if let Some(min) = min_sol_earned {
-            conditions.push(format!("sol_earned >= {}", min));
+            conditions.push(format!("d.sol_earned >= {}", min));
         }
         if let Some(c) = cursor {
             // Cursor format: "miner:square"
             let parts: Vec<&str> = c.split(':').collect();
             if parts.len() >= 2 {
-                conditions.push(format!("(miner_pubkey, square_id) > ('{}', {})", parts[0], parts[1].parse::<u8>().unwrap_or(0)));
+                conditions.push(format!("(d.miner_pubkey, d.square_id) > ('{}', {})", parts[0], parts[1].parse::<u8>().unwrap_or(0)));
             }
         }
         
         let query = format!(
-            r#"SELECT round_id, miner_pubkey, square_id, amount, deployed_slot,
-                      sol_earned, ore_earned, is_winner, is_top_miner
-               FROM deployments
+            r#"SELECT d.round_id, d.miner_pubkey, d.square_id, d.amount, d.deployed_slot,
+                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner, r.winning_square
+               FROM deployments d
+               LEFT JOIN rounds r ON d.round_id = r.round_id
                WHERE {}
-               ORDER BY miner_pubkey, square_id
+               ORDER BY d.miner_pubkey, d.square_id
                LIMIT {}"#,
             conditions.join(" AND "), limit
         );
@@ -1728,28 +1729,28 @@ impl ClickHouseClient {
         let mut conditions = vec!["1=1".to_string()];
         
         if let Some(gte) = round_id_gte {
-            conditions.push(format!("round_id >= {}", gte));
+            conditions.push(format!("d.round_id >= {}", gte));
         }
         if let Some(lte) = round_id_lte {
-            conditions.push(format!("round_id <= {}", lte));
+            conditions.push(format!("d.round_id <= {}", lte));
         }
         if let Some(m) = miner {
-            conditions.push(format!("miner_pubkey = '{}'", m));
+            conditions.push(format!("d.miner_pubkey = '{}'", m));
         }
         if winner_only == Some(true) {
-            conditions.push("is_winner = 1".to_string());
+            conditions.push("d.is_winner = 1".to_string());
         }
         if let Some(min) = min_sol_earned {
-            conditions.push(format!("sol_earned >= {}", min));
+            conditions.push(format!("d.sol_earned >= {}", min));
         }
         if let Some(max) = max_sol_earned {
-            conditions.push(format!("sol_earned <= {}", max));
+            conditions.push(format!("d.sol_earned <= {}", max));
         }
         if let Some(min) = min_ore_earned {
-            conditions.push(format!("ore_earned >= {}", min));
+            conditions.push(format!("d.ore_earned >= {}", min));
         }
         if let Some(max) = max_ore_earned {
-            conditions.push(format!("ore_earned <= {}", max));
+            conditions.push(format!("d.ore_earned <= {}", max));
         }
         if let Some(c) = cursor {
             // Cursor format: "round:miner:square"
@@ -1757,16 +1758,17 @@ impl ClickHouseClient {
             if parts.len() >= 3 {
                 let rid = parts[0].parse::<u64>().unwrap_or(0);
                 let sq = parts[2].parse::<u8>().unwrap_or(0);
-                conditions.push(format!("(round_id, miner_pubkey, square_id) > ({}, '{}', {})", rid, parts[1], sq));
+                conditions.push(format!("(d.round_id, d.miner_pubkey, d.square_id) > ({}, '{}', {})", rid, parts[1], sq));
             }
         }
         
         let query = format!(
-            r#"SELECT round_id, miner_pubkey, square_id, amount, deployed_slot,
-                      sol_earned, ore_earned, is_winner, is_top_miner
-               FROM deployments
+            r#"SELECT d.round_id, d.miner_pubkey, d.square_id, d.amount, d.deployed_slot,
+                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner, r.winning_square
+               FROM deployments d
+               LEFT JOIN rounds r ON d.round_id = r.round_id
                WHERE {}
-               ORDER BY round_id DESC, miner_pubkey, square_id
+               ORDER BY d.round_id DESC, d.miner_pubkey, d.square_id
                LIMIT {}"#,
             conditions.join(" AND "), limit
         );
@@ -1785,16 +1787,16 @@ impl ClickHouseClient {
         cursor: Option<&str>,
         limit: u32,
     ) -> Result<Vec<DeploymentRow>, ClickHouseError> {
-        let mut conditions = vec![format!("miner_pubkey = '{}'", miner)];
+        let mut conditions = vec![format!("d.miner_pubkey = '{}'", miner)];
         
         if let Some(gte) = round_id_gte {
-            conditions.push(format!("round_id >= {}", gte));
+            conditions.push(format!("d.round_id >= {}", gte));
         }
         if let Some(lte) = round_id_lte {
-            conditions.push(format!("round_id <= {}", lte));
+            conditions.push(format!("d.round_id <= {}", lte));
         }
         if winner_only == Some(true) {
-            conditions.push("is_winner = 1".to_string());
+            conditions.push("d.is_winner = 1".to_string());
         }
         if let Some(c) = cursor {
             // Cursor format: "round:square"
@@ -1802,16 +1804,17 @@ impl ClickHouseClient {
             if parts.len() >= 2 {
                 let rid = parts[0].parse::<u64>().unwrap_or(0);
                 let sq = parts[1].parse::<u8>().unwrap_or(0);
-                conditions.push(format!("(round_id, square_id) < ({}, {})", rid, sq));
+                conditions.push(format!("(d.round_id, d.square_id) < ({}, {})", rid, sq));
             }
         }
         
         let query = format!(
-            r#"SELECT round_id, miner_pubkey, square_id, amount, deployed_slot,
-                      sol_earned, ore_earned, is_winner, is_top_miner
-               FROM deployments
+            r#"SELECT d.round_id, d.miner_pubkey, d.square_id, d.amount, d.deployed_slot,
+                      d.sol_earned, d.ore_earned, d.is_winner, d.is_top_miner, r.winning_square
+               FROM deployments d
+               LEFT JOIN rounds r ON d.round_id = r.round_id
                WHERE {}
-               ORDER BY round_id DESC, square_id DESC
+               ORDER BY d.round_id DESC, d.square_id DESC
                LIMIT {}"#,
             conditions.join(" AND "), limit
         );
@@ -1820,9 +1823,94 @@ impl ClickHouseClient {
         Ok(results)
     }
     
-    /// Get aggregated miner stats.
-    pub async fn get_miner_stats(&self, miner: &str) -> Result<Option<crate::historical_routes::MinerStats>, ClickHouseError> {
-        let query = r#"
+    /// Get miner's square statistics (deployment counts, amounts, wins per square).
+    pub async fn get_miner_square_stats(
+        &self,
+        miner: &str,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+    ) -> Result<crate::historical_routes::MinerSquareStats, ClickHouseError> {
+        let mut conditions = vec![format!("d.miner_pubkey = '{}'", miner)];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("d.round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("d.round_id <= {}", lte));
+        }
+        
+        // Get per-square stats with proper winning square from rounds table
+        let query = format!(
+            r#"SELECT 
+                   d.square_id,
+                   count(*) as deploy_count,
+                   sum(d.amount) as total_amount,
+                   countIf(d.is_winner = 1) as win_count
+               FROM deployments d
+               LEFT JOIN rounds r ON d.round_id = r.round_id
+               WHERE {}
+               GROUP BY d.square_id
+               ORDER BY d.square_id"#,
+            conditions.join(" AND ")
+        );
+        
+        #[derive(Debug, Clone, clickhouse::Row, serde::Deserialize)]
+        struct SquareStatsRow {
+            square_id: u8,
+            deploy_count: u64,
+            total_amount: u64,
+            win_count: u64,
+        }
+        
+        let rows: Vec<SquareStatsRow> = self.client.query(&query).fetch_all().await?;
+        
+        // Get total unique rounds for this miner in range
+        let rounds_query = format!(
+            "SELECT count(DISTINCT round_id) FROM deployments WHERE {}",
+            conditions.join(" AND ").replace("d.", "")
+        );
+        let total_rounds: u64 = self.client.query(&rounds_query).fetch_one().await?;
+        
+        // Initialize arrays for all 25 squares
+        let mut square_counts = vec![0u64; 25];
+        let mut square_amounts = vec![0u64; 25];
+        let mut square_wins = vec![0u64; 25];
+        
+        for row in rows {
+            let idx = row.square_id as usize;
+            if idx < 25 {
+                square_counts[idx] = row.deploy_count;
+                square_amounts[idx] = row.total_amount;
+                square_wins[idx] = row.win_count;
+            }
+        }
+        
+        Ok(crate::historical_routes::MinerSquareStats {
+            miner_pubkey: miner.to_string(),
+            square_counts,
+            square_amounts,
+            square_wins,
+            total_rounds,
+        })
+    }
+    
+    /// Get aggregated miner stats with optional round range filtering.
+    pub async fn get_miner_stats(
+        &self,
+        miner: &str,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
+    ) -> Result<Option<crate::historical_routes::MinerStats>, ClickHouseError> {
+        let mut conditions = vec![format!("d.miner_pubkey = '{}'", miner)];
+        
+        if let Some(gte) = round_id_gte {
+            conditions.push(format!("d.round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            conditions.push(format!("d.round_id <= {}", lte));
+        }
+        
+        let query = format!(r#"
             SELECT 
                 d.miner_pubkey as miner_pubkey,
                 sum(d.amount) as total_deployed,
@@ -1838,12 +1926,11 @@ impl ClickHouseClient {
                 END) as avg_slots_left
             FROM deployments d
             LEFT JOIN rounds r ON d.round_id = r.round_id
-            WHERE d.miner_pubkey = ?
+            WHERE {}
             GROUP BY d.miner_pubkey
-        "#;
+        "#, conditions.join(" AND "));
         
-        let row: Option<MinerStatsRow> = self.client.query(query)
-            .bind(miner)
+        let row: Option<MinerStatsRow> = self.client.query(&query)
             .fetch_optional()
             .await?;
         
@@ -1878,17 +1965,24 @@ impl ClickHouseClient {
     pub async fn get_leaderboard(
         &self,
         metric: &str,
-        round_range: &str,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
         offset: u32,
         limit: u32,
         min_rounds: Option<u32>,
     ) -> Result<(Vec<crate::historical_routes::LeaderboardEntry>, u64), ClickHouseError> {
-        // Build round filter
-        let round_filter = match round_range {
-            "last_60" => "round_id >= (SELECT max(round_id) - 60 FROM rounds)".to_string(),
-            "last_100" => "round_id >= (SELECT max(round_id) - 100 FROM rounds)".to_string(),
-            "today" => "deployed_at >= today()".to_string(),
-            _ => "1=1".to_string(), // "all"
+        // Build round filter based on range params
+        let mut round_conditions = Vec::new();
+        if let Some(gte) = round_id_gte {
+            round_conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            round_conditions.push(format!("round_id <= {}", lte));
+        }
+        let round_filter = if round_conditions.is_empty() {
+            "1=1".to_string()
+        } else {
+            round_conditions.join(" AND ")
         };
         
         // Build min_rounds HAVING filter
@@ -2004,17 +2098,24 @@ impl ClickHouseClient {
     pub async fn get_leaderboard_filtered(
         &self,
         metric: &str,
-        round_range: &str,
+        round_id_gte: Option<u64>,
+        round_id_lte: Option<u64>,
         search: &str,
         limit: u32,
         min_rounds: Option<u32>,
     ) -> Result<(Vec<crate::historical_routes::LeaderboardEntry>, u64), ClickHouseError> {
-        // Build round filter
-        let round_filter = match round_range {
-            "last_60" => "round_id >= (SELECT max(round_id) - 60 FROM rounds)".to_string(),
-            "last_100" => "round_id >= (SELECT max(round_id) - 100 FROM rounds)".to_string(),
-            "today" => "deployed_at >= today()".to_string(),
-            _ => "1=1".to_string(), // "all"
+        // Build round filter based on range params
+        let mut round_conditions = Vec::new();
+        if let Some(gte) = round_id_gte {
+            round_conditions.push(format!("round_id >= {}", gte));
+        }
+        if let Some(lte) = round_id_lte {
+            round_conditions.push(format!("round_id <= {}", lte));
+        }
+        let round_filter = if round_conditions.is_empty() {
+            "1=1".to_string()
+        } else {
+            round_conditions.join(" AND ")
         };
         
         // Build min_rounds HAVING filter
@@ -2383,6 +2484,7 @@ pub struct DeploymentRow {
     pub ore_earned: u64,
     pub is_winner: u8,
     pub is_top_miner: u8,
+    pub winning_square: u8,
 }
 
 /// Treasury snapshot.
