@@ -46,12 +46,12 @@ function MinersContent() {
     order: "desc" as string,
     page: 1 as number,
     search: "" as string,
-  }, { replace: true });
+  });
 
   const sortBy = urlState.sort as SortByType;
   const order = urlState.order as OrderType;
   const page = urlState.page;
-  const searchFromUrl = urlState.search;
+  const searchFromUrl = (urlState.search as string) || "";
 
   const [localSearch, setLocalSearch] = useState(searchFromUrl);
   const [debouncedSearch, setDebouncedSearch] = useState(searchFromUrl);

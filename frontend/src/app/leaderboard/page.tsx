@@ -47,14 +47,14 @@ function LeaderboardContent() {
     min_rounds: 0 as number,
     page: 1 as number,
     search: "" as string,
-  }, { replace: true });
+  });
 
   const metric = urlState.metric as MetricType;
   const roundMin = urlState.round_min;
   const roundMax = urlState.round_max;
   const minRounds = urlState.min_rounds as MinRoundsType;
   const page = urlState.page;
-  const searchQuery = urlState.search;
+  const searchQuery = (urlState.search as string) || "";
 
   const [localSearch, setLocalSearch] = useState(searchQuery);
   const [debouncedSearch, setDebouncedSearch] = useState(searchQuery);

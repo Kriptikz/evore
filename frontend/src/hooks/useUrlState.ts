@@ -128,7 +128,19 @@ export function useMultiUrlState<T extends Record<string, string | number | bool
 
   // Update multiple URL params at once
   const updateValues = useCallback((updates: Partial<T>) => {
-    setValues(prev => ({ ...prev, ...updates }));
+    // When setting values, use the default if the new value is undefined
+    setValues(prev => {
+      const next = { ...prev };
+      for (const [key, newValue] of Object.entries(updates)) {
+        if (newValue === undefined) {
+          // Use the default value instead of undefined
+          (next as Record<string, unknown>)[key] = defaultsRef.current[key];
+        } else {
+          (next as Record<string, unknown>)[key] = newValue;
+        }
+      }
+      return next;
+    });
 
     const params = new URLSearchParams(searchParams.toString());
     

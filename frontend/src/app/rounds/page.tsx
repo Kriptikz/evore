@@ -35,7 +35,7 @@ function RoundsContent() {
     round_min: undefined as number | undefined,
     round_max: undefined as number | undefined,
     motherlode: false as boolean,
-  }, { replace: true });
+  });
 
   const roundMin = urlState.round_min;
   const roundMax = urlState.round_max;

@@ -289,7 +289,7 @@ function MinerProfileContent() {
     tab: "overview" as string,
     round_min: undefined as number | undefined,
     round_max: undefined as number | undefined,
-  }, { replace: true });
+  });
 
   const activeTab = urlState.tab as TabType;
   const roundMin = urlState.round_min;
