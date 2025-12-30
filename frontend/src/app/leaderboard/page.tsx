@@ -305,7 +305,7 @@ function LeaderboardContent() {
                 {formatSol(costPerOre.cost_per_ore_lamports)}
               </div>
               <div className="text-xs text-slate-500 mt-1">
-                {costPerOre.total_rounds.toLocaleString()} rounds • {formatOre(costPerOre.total_ore_minted_atomic)} won
+                {costPerOre.total_rounds.toLocaleString()} rounds • {formatSol(costPerOre.total_vaulted_lamports)} vaulted • {(Math.floor(costPerOre.total_ore_minted_atomic / 1e11 * 100) / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ORE won
               </div>
             </div>
           )}
