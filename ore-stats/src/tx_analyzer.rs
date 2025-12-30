@@ -12,11 +12,57 @@
 //! - Unknown programs (raw data display)
 
 use evore::ore_api::{self, Deploy, OreInstruction};
+use regex::Regex;
 use serde::Serialize;
 use serde_json::Value;
 use solana_sdk::{bs58, pubkey::Pubkey};
 use std::collections::HashMap;
 use std::str::FromStr;
+use std::sync::LazyLock;
+
+// ============================================================================
+// Logged Deployment Parsing (from text logs)
+// ============================================================================
+
+/// Compiled regex for parsing deploy log messages
+/// Format: "Round #101833: deploying 0.000024 SOL to 19 squares"
+static DEPLOY_LOG_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"Round #(\d+): deploying ([\d.]+) SOL to (\d+) squares")
+        .expect("Invalid deploy log regex")
+});
+
+/// A deployment parsed from a text log message
+#[derive(Debug, Clone, Serialize)]
+pub struct LoggedDeployment {
+    pub round_id: u64,
+    pub amount_per_square_sol: f64,
+    pub squares_count: u32,
+    pub total_sol: f64,
+    pub total_lamports: u64,
+}
+
+/// Parse "Round #X: deploying Y SOL to Z squares" from logs
+pub fn parse_deploy_logs(logs: &[String]) -> Vec<LoggedDeployment> {
+    logs.iter()
+        .filter_map(|log| {
+            DEPLOY_LOG_REGEX.captures(log).and_then(|cap| {
+                let round_id: u64 = cap.get(1)?.as_str().parse().ok()?;
+                let amount_sol: f64 = cap.get(2)?.as_str().parse().ok()?;
+                let squares: u32 = cap.get(3)?.as_str().parse().ok()?;
+                let total_sol = amount_sol * squares as f64;
+                let total_lamports = (total_sol * 1e9) as u64;
+                
+                Some(LoggedDeployment {
+                    round_id,
+                    amount_per_square_sol: amount_sol,
+                    squares_count: squares,
+                    total_sol,
+                    total_lamports,
+                })
+            })
+        })
+        .collect()
+}
 
 // ============================================================================
 // Known Program IDs
@@ -318,6 +364,12 @@ pub struct OreTransactionAnalysis {
     pub deployments: Vec<OreDeploymentInfo>,
     pub total_deployed_lamports: u64,
     pub total_deployed_sol: f64,
+    
+    // Logged totals from text logs (parsed from "Round #X: deploying Y SOL to Z squares")
+    pub logged_deployments: Vec<LoggedDeployment>,
+    pub logged_deploy_count: usize,
+    pub logged_deployed_lamports: u64,
+    pub logged_deployed_sol: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -699,9 +751,15 @@ impl TransactionAnalyzer {
         let has_ore = ore_deploy_count + ore_reset_count + ore_log_count + ore_other_count > 0;
         let total_deployed: u64 = ore_deployments.iter().map(|d| d.total_lamports).sum();
         
-        let ore_analysis = if has_ore {
+        // Parse logged deployments from text logs
+        let logged_deployments = parse_deploy_logs(&logs);
+        let logged_deploy_count = logged_deployments.len();
+        let logged_deployed_lamports: u64 = logged_deployments.iter().map(|d| d.total_lamports).sum();
+        let logged_deployed_sol = logged_deployed_lamports as f64 / 1e9;
+        
+        let ore_analysis = if has_ore || logged_deploy_count > 0 {
             Some(OreTransactionAnalysis {
-                has_ore_instructions: true,
+                has_ore_instructions: has_ore,
                 deploy_count: ore_deploy_count,
                 reset_count: ore_reset_count,
                 log_count: ore_log_count,
@@ -709,6 +767,10 @@ impl TransactionAnalyzer {
                 deployments: ore_deployments,
                 total_deployed_lamports: total_deployed,
                 total_deployed_sol: total_deployed as f64 / 1e9,
+                logged_deployments,
+                logged_deploy_count,
+                logged_deployed_lamports,
+                logged_deployed_sol,
             })
         } else {
             None

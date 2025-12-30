@@ -2105,6 +2105,15 @@ pub struct OreRoundSummary {
     pub total_deployed_lamports: u64,
     pub total_deployed_sol: f64,
     pub squares_deployed: Vec<SquareDeploymentInfo>,
+    
+    // Logged totals from text logs ("Round #X: deploying Y SOL to Z squares")
+    pub logged_deploy_count: usize,
+    pub logged_deployed_lamports: u64,
+    pub logged_deployed_sol: f64,
+    
+    // Comparison: logged - parsed (positive = logged has more than parsed)
+    pub logged_vs_parsed_diff_lamports: i64,
+    pub logged_vs_parsed_diff_sol: f64,
 }
 
 #[derive(Debug, Serialize)]

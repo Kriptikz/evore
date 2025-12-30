@@ -519,6 +519,7 @@ export interface HistoricalRound {
   winning_square: number;
   top_miner: string;
   total_deployed: number;
+  total_vaulted: number;
   total_winnings: number;
   unique_miners: number;
   motherlode: number;
