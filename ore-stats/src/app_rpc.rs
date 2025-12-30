@@ -569,11 +569,24 @@ impl AppRpc {
     /// Returns a HashMap keyed by authority pubkey string
     /// If treasury is provided, applies refined_ore calculation immediately
     pub async fn get_all_miners_gpa(&self, treasury: Option<&Treasury>) -> Result<std::collections::HashMap<String, Miner>> {
+        self.get_all_miners_gpa_with_client(treasury, false).await
+    }
+    
+    /// Get all ORE Miner accounts using either Flux or Helius RPC
+    /// `use_helius` - if true, uses Helius client; if false, uses Flux client
+    pub async fn get_all_miners_gpa_with_client(&self, treasury: Option<&Treasury>, use_helius: bool) -> Result<std::collections::HashMap<String, Miner>> {
         use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
         use solana_client::rpc_filter::RpcFilterType;
         use solana_account_decoder_client_types::UiAccountEncoding;
         
-        self.rate_limit_flux().await;
+        let (client, provider_name) = if use_helius {
+            self.rate_limit_helius().await;
+            (&self.helius_client, "Helius")
+        } else {
+            self.rate_limit_flux().await;
+            (&self.flux_client, "Flux")
+        };
+        
         let start = Instant::now();
         
         let ctx = RpcContext {
@@ -599,7 +612,7 @@ impl AppRpc {
             sort_results: None,
         };
         
-        let result = self.flux_client
+        let result = client
             .get_program_accounts_with_config(&evore::ore_api::PROGRAM_ID, config)
             .await;
         
@@ -610,7 +623,7 @@ impl AppRpc {
                 let mut miners = std::collections::HashMap::new();
                 let mut total_size = 0u32;
                 
-                for (pubkey, account) in &accounts {
+                for (_pubkey, account) in &accounts {
                     total_size += account.data.len() as u32;
                     
                     if let Ok(miner) = Miner::try_from_bytes(&account.data) {
@@ -625,15 +638,23 @@ impl AppRpc {
                 }
                 
                 tracing::info!(
-                    "GPA miners snapshot (Flux): {} accounts fetched, {} miners parsed in {}ms",
-                    accounts.len(), miners.len(), duration_ms
+                    "GPA miners snapshot ({}): {} accounts fetched, {} miners parsed in {}ms",
+                    provider_name, accounts.len(), miners.len(), duration_ms
                 );
                 
-                self.log_flux_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
+                if use_helius {
+                    self.log_helius_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
+                } else {
+                    self.log_flux_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
+                }
                 Ok(miners)
             }
             Err(e) => {
-                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
+                if use_helius {
+                    self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
+                } else {
+                    self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
+                }
                 Err(e.into())
             }
         }

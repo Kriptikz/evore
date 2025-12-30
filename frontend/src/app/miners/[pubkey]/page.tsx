@@ -143,13 +143,7 @@ function MinerDeploymentsGrouped({
     return Array.from(groups.values()).sort((a, b) => b.round_id - a.round_id);
   }, [deployments]);
 
-  if (deployments.length === 0 && !loadingDeployments) {
-    return (
-      <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-8 text-center text-slate-400">
-        {showWinningOnly ? "No winning rounds found" : "No deployment history found"}
-      </div>
-    );
-  }
+  const isEmpty = deployments.length === 0 && !loadingDeployments;
 
   return (
     <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 overflow-hidden">
@@ -176,7 +170,7 @@ function MinerDeploymentsGrouped({
                   ? "bg-amber-500 text-black font-medium"
                   : "bg-slate-700 text-slate-300 hover:bg-slate-600"
               }`}
-              title="Filter for exactly +1 ORE wins (no motherlode)"
+              title="Filter for +1 ORE wins (top miner)"
             >
               <span>+1 ORE</span>
             </button>
@@ -187,7 +181,7 @@ function MinerDeploymentsGrouped({
                   ? "bg-cyan-500 text-black font-medium"
                   : "bg-slate-700 text-slate-300 hover:bg-slate-600"
               }`}
-              title="Filter for motherlode hits (ORE ≠ 1.0)"
+              title="Filter for motherlode hit wins"
             >
               <span className="text-base">💎</span>
               <span>Motherlodes</span>
@@ -195,6 +189,13 @@ function MinerDeploymentsGrouped({
           </div>
         )}
       </div>
+      
+      {isEmpty ? (
+        <div className="p-8 text-center text-slate-400">
+          {showWinningOnly ? "No winning rounds found" : "No deployment history found"}
+        </div>
+      ) : (
+        <>
       
       <div className="max-h-[600px] overflow-y-auto divide-y divide-slate-700/30">
         {groupedByRound.map((group) => {
@@ -293,6 +294,8 @@ function MinerDeploymentsGrouped({
         <div className="flex items-center justify-center p-8">
           <div className="w-6 h-6 border-4 border-amber-500 border-t-transparent rounded-full animate-spin" />
         </div>
+      )}
+      </>
       )}
     </div>
   );

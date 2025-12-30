@@ -54,35 +54,53 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     
     // Store ALL miners from GPA (for full historical tracking ~1/min)
     // and also filter for round deployers for deployment processing
+    // 
+    // Retry strategy:
+    // 1. Try Flux first (3 attempts)
+    // 2. If Flux fails 3 times, switch to Helius
+    // 3. Round robin between Flux and Helius until success or time runs out
+    // We have ~15 seconds during intermission to get the snapshot
     let mut gpa_result: Option<HashMap<String, Miner>> = None;
-    let max_retries = 7;
+    let max_total_attempts = 10;
+    let flux_first_attempts = 3;
     
-    for attempt in 1..=max_retries {
-        match state.rpc.get_all_miners_gpa(treasury_for_gpa.as_ref()).await {
+    for attempt in 1..=max_total_attempts {
+        // Use Flux for first 3 attempts, then round robin
+        let use_helius = if attempt <= flux_first_attempts {
+            false // Use Flux for first 3 attempts
+        } else {
+            // Round robin: attempts 4,6,8,10 use Helius; 5,7,9 use Flux
+            (attempt - flux_first_attempts) % 2 == 1
+        };
+        
+        let provider = if use_helius { "Helius" } else { "Flux" };
+        
+        match state.rpc.get_all_miners_gpa_with_client(treasury_for_gpa.as_ref(), use_helius).await {
             Ok(miners) => {
                 tracing::info!(
-                    "GPA snapshot attempt {}/{}: fetched {} miners",
-                    attempt, max_retries, miners.len()
+                    "GPA snapshot attempt {}/{} ({}): fetched {} miners",
+                    attempt, max_total_attempts, provider, miners.len()
                 );
                 gpa_result = Some(miners);
                 break;
             }
             Err(e) => {
                 tracing::error!(
-                    "GPA snapshot attempt {}/{} failed: {}",
-                    attempt, max_retries, e
+                    "GPA snapshot attempt {}/{} ({}) failed: {}",
+                    attempt, max_total_attempts, provider, e
                 );
                 
-                if attempt < max_retries {
-                    // Use the full ~15 second window with 7 attempts
-                    // Delays: 1s, 1.5s, 2s, 2s, 2s, 2s = ~10.5s total between retries
-                    // Plus ~0.5s per attempt overhead = fits in ~15s window
-                    let delay = if attempt <= 2 {
-                        Duration::from_millis(500 + 500 * attempt as u64) // 1s, 1.5s
+                if attempt < max_total_attempts {
+                    // Short delays to maximize attempts within ~15 second window
+                    // First 3 Flux attempts: 500ms delay
+                    // After that: 1s delay for round robin
+                    let delay = if attempt < flux_first_attempts {
+                        Duration::from_millis(500)
                     } else {
-                        Duration::from_secs(2) // 2s for remaining attempts
+                        Duration::from_secs(1)
                     };
-                    tracing::info!("Retrying GPA snapshot in {:?}...", delay);
+                    tracing::info!("Retrying GPA snapshot with {} in {:?}...", 
+                        if use_helius { "Flux" } else { "Helius" }, delay);
                     tokio::time::sleep(delay).await;
                 }
             }
@@ -108,8 +126,9 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         None => {
             tracing::error!(
                 "CRITICAL: All {} GPA snapshot attempts failed for round {}! \
+                 (tried Flux {} times, then round robin with Helius) \
                  Will still store round/treasury snapshots. Deployments need backfill via admin.",
-                max_retries, round_id
+                max_total_attempts, round_id, flux_first_attempts
             );
             // Continue with empty miners - we'll still store round and treasury
             (HashMap::new(), HashMap::new(), true)
