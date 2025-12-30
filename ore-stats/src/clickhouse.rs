@@ -1729,7 +1729,7 @@ impl ClickHouseClient {
         let order = if order_desc { "DESC" } else { "ASC" };
         let query = format!(
             r#"SELECT round_id, start_slot, end_slot, winning_square, top_miner, 
-                      total_deployed, total_winnings, unique_miners, motherlode, 
+                      total_deployed, total_vaulted, total_winnings, unique_miners, motherlode, 
                       motherlode_hit, created_at
                FROM rounds FINAL
                WHERE {} 
@@ -3226,6 +3226,7 @@ pub struct RoundRowWithTimestamp {
     pub winning_square: u8,
     pub top_miner: String,
     pub total_deployed: u64,
+    pub total_vaulted: u64,
     pub total_winnings: u64,
     pub unique_miners: u32,
     pub motherlode: u64,

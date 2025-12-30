@@ -2293,6 +2293,10 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
     let mut miners_set: HashSet<String> = HashSet::new();
     let mut squares_map: HashMap<u8, (usize, u64)> = HashMap::new();
     
+    // Logged deployment tracking (from text logs)
+    let mut logged_deploy_count = 0usize;
+    let mut logged_deployed_lamports = 0u64;
+    
     for analysis in analyses {
         total_fee += analysis.fee;
         total_compute += analysis.compute_units_consumed.unwrap_or(0);
@@ -2334,6 +2338,10 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
                         .or_insert((1, deployment.amount_per_square));
                 }
             }
+            
+            // Aggregate logged deployment totals from text logs
+            logged_deploy_count += ore.logged_deploy_count;
+            logged_deployed_lamports += ore.logged_deployed_lamports;
         }
     }
     
@@ -2345,7 +2353,12 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
         })
         .collect();
     
-    let ore_summary = if !ore_deployments.is_empty() {
+    // Calculate logged vs parsed difference
+    let logged_deployed_sol = logged_deployed_lamports as f64 / 1e9;
+    let logged_vs_parsed_diff_lamports = logged_deployed_lamports as i64 - total_deployed as i64;
+    let logged_vs_parsed_diff_sol = logged_deployed_sol - (total_deployed as f64 / 1e9);
+    
+    let ore_summary = if !ore_deployments.is_empty() || logged_deploy_count > 0 {
         let mut squares_deployed: Vec<SquareDeploymentInfo> = squares_map.into_iter()
             .map(|(square, (count, lamps))| SquareDeploymentInfo {
                 square,
@@ -2363,6 +2376,11 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
             total_deployed_lamports: total_deployed,
             total_deployed_sol: total_deployed as f64 / 1e9,
             squares_deployed,
+            logged_deploy_count,
+            logged_deployed_lamports,
+            logged_deployed_sol,
+            logged_vs_parsed_diff_lamports,
+            logged_vs_parsed_diff_sol,
         })
     } else {
         None
