@@ -476,48 +476,90 @@ function TransactionDetailModal({
               {tx.ore_analysis && (
                 <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
                   <h3 className="text-sm font-semibold text-amber-400 mb-3">ORE Deployment Analysis</h3>
-                  <div className="grid grid-cols-3 gap-4 mb-4">
+                  <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                     <div>
                       <div className="text-2xl font-bold text-amber-400">{tx.ore_analysis.deploy_count}</div>
-                      <div className="text-xs text-slate-500">Deployments</div>
+                      <div className="text-xs text-slate-500">Parsed Deployments</div>
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold text-cyan-400">{tx.ore_analysis.logged_deploy_count}</div>
+                      <div className="text-xs text-slate-500">Logged Deployments</div>
                     </div>
                     <div>
                       <div className="text-2xl font-bold text-amber-400">{tx.ore_analysis.total_deployed_sol.toFixed(6)}</div>
-                      <div className="text-xs text-slate-500">Total SOL</div>
+                      <div className="text-xs text-slate-500">Parsed SOL</div>
                     </div>
                     <div>
-                      <div className="text-2xl font-bold text-amber-400">
-                        {tx.ore_analysis.deployments.reduce((sum, d) => sum + d.squares.length, 0)}
-                      </div>
-                      <div className="text-xs text-slate-500">Squares</div>
+                      <div className="text-2xl font-bold text-cyan-400">{tx.ore_analysis.logged_deployed_sol.toFixed(6)}</div>
+                      <div className="text-xs text-slate-500">Logged SOL</div>
                     </div>
                   </div>
-                  {tx.ore_analysis.deployments.map((d, i) => (
-                    <div key={i} className="p-3 bg-slate-900/50 rounded-lg mt-2">
-                      <div className="flex justify-between items-start">
-                        <div>
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className={d.round_matches ? "text-green-400" : "text-red-400"}>
-                              {d.round_matches ? "✓ Matches" : "✗ Wrong Round"}
-                            </span>
-                            <span className="text-slate-500">|</span>
-                            <span className="text-slate-400">
-                              Round {d.round_id ?? "?"} 
-                              {d.expected_round_id && d.round_id !== d.expected_round_id && (
-                                <span className="text-slate-500"> (expected {d.expected_round_id})</span>
-                              )}
-                            </span>
-                            <span className="text-slate-500">|</span>
-                            <span className="text-amber-400">{d.total_sol.toFixed(6)} SOL</span>
-                          </div>
-                          <div className="text-xs text-slate-500 mt-1">
-                            Miner: <Pubkey address={d.miner} short />
+                  
+                  {/* Parsed Deployments */}
+                  {tx.ore_analysis.deployments.length > 0 && (
+                    <div className="mb-4">
+                      <h4 className="text-xs font-semibold text-amber-400 mb-2">Parsed Deployments</h4>
+                      {tx.ore_analysis.deployments.map((d, i) => (
+                        <div key={i} className="p-3 bg-slate-900/50 rounded-lg mt-2">
+                          <div className="flex justify-between items-start">
+                            <div>
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className={d.round_matches ? "text-green-400" : "text-red-400"}>
+                                  {d.round_matches ? "✓ Matches" : "✗ Wrong Round"}
+                                </span>
+                                <span className="text-slate-500">|</span>
+                                <span className="text-slate-400">
+                                  Round {d.round_id ?? "?"} 
+                                  {d.expected_round_id && d.round_id !== d.expected_round_id && (
+                                    <span className="text-slate-500"> (expected {d.expected_round_id})</span>
+                                  )}
+                                </span>
+                                <span className="text-slate-500">|</span>
+                                <span className="text-amber-400">{d.total_sol.toFixed(6)} SOL</span>
+                              </div>
+                              <div className="text-xs text-slate-500 mt-1">
+                                Authority: <Pubkey address={d.authority} short />
+                              </div>
+                            </div>
+                            <SquaresGrid squares={d.squares} />
                           </div>
                         </div>
-                        <SquaresGrid squares={d.squares} />
-                      </div>
+                      ))}
                     </div>
-                  ))}
+                  )}
+                  
+                  {/* Logged Deployments */}
+                  {tx.ore_analysis.logged_deployments.length > 0 && (
+                    <div>
+                      <h4 className="text-xs font-semibold text-cyan-400 mb-2">Logged Deployments (from tx logs)</h4>
+                      {tx.ore_analysis.logged_deployments.map((d, i) => (
+                        <div key={i} className={`p-3 rounded-lg mt-2 ${d.matched_parsed ? "bg-slate-900/50" : "bg-orange-900/30 border border-orange-500/30"}`}>
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className={d.round_matches ? "text-green-400" : "text-slate-400"}>
+                              {d.round_matches ? "✓ Round Match" : "Other Round"}
+                            </span>
+                            <span className="text-slate-500">|</span>
+                            <span className="text-slate-400">Round {d.round_id}</span>
+                            <span className="text-slate-500">|</span>
+                            <span className="text-cyan-400">{d.total_sol.toFixed(6)} SOL</span>
+                            <span className="text-slate-500">|</span>
+                            <span className="text-slate-400">{d.squares_count} squares × {d.amount_per_square_sol} SOL</span>
+                            {!d.matched_parsed && (
+                              <>
+                                <span className="text-slate-500">|</span>
+                                <span className="text-orange-400">⚠ No matching parsed deploy</span>
+                              </>
+                            )}
+                          </div>
+                          {d.authority && (
+                            <div className="text-xs text-slate-500 mt-1">
+                              Authority: <Pubkey address={d.authority} short />
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
               
@@ -967,8 +1009,14 @@ function TransactionsPageContent() {
                       </div>
                     </div>
                   </div>
-                  <div className="text-xs text-slate-500">
-                    Unique Miners: {data.round_summary.ore_summary.unique_miners}
+                  <div className="text-xs text-slate-500 space-y-1">
+                    <div>Unique Miners (Parsed): {data.round_summary.ore_summary.unique_miners}</div>
+                    <div>Unique Miners (Logged): {data.round_summary.ore_summary.logged_unique_miners}</div>
+                    {data.round_summary.ore_summary.logged_unmatched_count > 0 && (
+                      <div className="text-orange-400">
+                        ⚠ Unmatched Logged Deploys: {data.round_summary.ore_summary.logged_unmatched_count} (parsing issue)
+                      </div>
+                    )}
                   </div>
                 </div>
               )}
