@@ -144,19 +144,19 @@ function RoundBackfillingSection({
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
             <div>
               <span className="text-slate-400">Page: </span>
-              <span className="text-white">{taskState.current_page.toLocaleString()}</span>
+              <span className="text-white">{(taskState.current_page ?? 0).toLocaleString()}</span>
             </div>
             <div>
               <span className="text-slate-400">Fetched: </span>
-              <span className="text-green-400">{taskState.rounds_fetched.toLocaleString()}</span>
+              <span className="text-green-400">{(taskState.rounds_fetched ?? 0).toLocaleString()}</span>
             </div>
             <div>
               <span className="text-slate-400">Skipped: </span>
-              <span className="text-slate-300">{taskState.rounds_skipped.toLocaleString()}</span>
+              <span className="text-slate-300">{(taskState.rounds_skipped ?? 0).toLocaleString()}</span>
             </div>
             <div>
-              <span className="text-slate-400">Missing Deps: </span>
-              <span className="text-yellow-400">{taskState.rounds_missing_deployments.toLocaleString()}</span>
+              <span className="text-slate-400">Per Page: </span>
+              <span className="text-slate-300">{(taskState.per_page ?? 0).toLocaleString()}</span>
             </div>
           </div>
           
@@ -165,8 +165,8 @@ function RoundBackfillingSection({
             {taskState.estimated_remaining_ms && taskState.estimated_remaining_ms > 0 && (
               <span className="text-slate-400">ETA: <span className="text-white font-mono">{formatDuration(taskState.estimated_remaining_ms)}</span></span>
             )}
-            {(taskState as any).pages_jumped > 0 && (
-              <span className="text-slate-400">Pages Jumped: <span className="text-cyan-400 font-mono">{(taskState as any).pages_jumped.toLocaleString()}</span></span>
+            {taskState.pages_jumped > 0 && (
+              <span className="text-slate-400">Pages Jumped: <span className="text-cyan-400 font-mono">{taskState.pages_jumped.toLocaleString()}</span></span>
             )}
             {taskState.estimated_total_rounds && (
               <span className="text-slate-400">Est. Total: <span className="text-slate-300 font-mono">{taskState.estimated_total_rounds.toLocaleString()}</span></span>

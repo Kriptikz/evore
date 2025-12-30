@@ -1549,7 +1549,7 @@ pub async fn get_memory_usage(
     };
     
     let queue_cache_items = {
-        let cache = state.backfill_queue_cache.blocking_read();
+        let cache = state.backfill_queue_cache.read().await;
         cache.recent_completed.len() as u64 + cache.recent_failed.len() as u64
     };
     

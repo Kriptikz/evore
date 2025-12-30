@@ -182,9 +182,9 @@ export interface BackfillRoundsTaskState {
   stop_at_round: number;
   max_pages: number;
   current_page: number;
+  per_page: number;
   rounds_fetched: number;
   rounds_skipped: number;
-  rounds_missing_deployments: number;
   last_round_id_processed: number | null;
   first_round_id_seen: number | null;
   estimated_total_rounds: number | null;
@@ -192,6 +192,7 @@ export interface BackfillRoundsTaskState {
   elapsed_ms: number;
   estimated_remaining_ms: number | null;
   last_updated: string;
+  pages_jumped: number;
 }
 
 // Legacy response type (kept for backward compat)
