@@ -1396,7 +1396,11 @@ function TransactionsPageContent() {
                   <tbody className="divide-y divide-slate-700/50">
                     {data.transactions.map((tx) => {
                       const signer = tx.signers[0] || "";
-                      const authority = tx.ore_analysis?.deployments[0]?.authority || "";
+                      const deployments = tx.ore_analysis?.deployments || [];
+                      const uniqueAuthorities = [...new Set(deployments.map(d => d.authority).filter(Boolean))];
+                      const authorityCount = uniqueAuthorities.length;
+                      const firstAuthority = uniqueAuthorities[0] || "";
+                      
                       return (
                         <tr key={tx.signature} className="hover:bg-slate-800/30 transition-colors">
                           <td className="px-4 py-3">
@@ -1423,16 +1427,23 @@ function TransactionsPageContent() {
                             )}
                           </td>
                           <td className="px-4 py-3">
-                            {authority && (
+                            {authorityCount === 0 ? null : authorityCount === 1 ? (
                               <a
-                                href={`https://solscan.io/account/${authority}`}
+                                href={`https://solscan.io/account/${firstAuthority}`}
                                 target="_blank"
                                 rel="noopener noreferrer"
                                 className="font-mono text-xs text-amber-400 hover:text-amber-300"
-                                title={authority}
+                                title={firstAuthority}
                               >
-                                {authority.slice(0, 4)}...{authority.slice(-4)}
+                                {firstAuthority.slice(0, 4)}...{firstAuthority.slice(-4)}
                               </a>
+                            ) : (
+                              <span 
+                                className="text-xs text-amber-400 cursor-help"
+                                title={uniqueAuthorities.join('\n')}
+                              >
+                                {authorityCount} miners
+                              </span>
                             )}
                           </td>
                           <td className="px-4 py-3 text-center">
