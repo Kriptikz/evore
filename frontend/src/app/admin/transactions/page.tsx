@@ -684,6 +684,182 @@ function TransactionDetailModal({
 }
 
 // ============================================================================
+// Miner Comparison Modal
+// ============================================================================
+
+interface MinerComparisonData {
+  authority: string;
+  parsed_lamports: number;
+  logged_lamports: number;
+  external_lamports: number;
+}
+
+function MinerComparisonModal({
+  data,
+  externalData,
+  onClose,
+}: {
+  data: FullAnalysisResponse;
+  externalData: ExternalComparisonSummary;
+  onClose: () => void;
+}) {
+  // Build a map of all miners with their totals from each source
+  const minerMap = new Map<string, MinerComparisonData>();
+  
+  // Add parsed deployments
+  if (data.round_summary.ore_summary) {
+    for (const tx of data.transactions) {
+      if (tx.ore_analysis) {
+        for (const d of tx.ore_analysis.deployments) {
+          if (d.round_matches && d.authority) {
+            const existing = minerMap.get(d.authority) || {
+              authority: d.authority,
+              parsed_lamports: 0,
+              logged_lamports: 0,
+              external_lamports: 0,
+            };
+            existing.parsed_lamports += d.total_lamports;
+            minerMap.set(d.authority, existing);
+          }
+        }
+      }
+    }
+  }
+  
+  // Add logged deployments
+  for (const tx of data.transactions) {
+    if (tx.ore_analysis) {
+      for (const d of tx.ore_analysis.logged_deployments) {
+        if (d.round_matches && d.authority) {
+          const existing = minerMap.get(d.authority) || {
+            authority: d.authority,
+            parsed_lamports: 0,
+            logged_lamports: 0,
+            external_lamports: 0,
+          };
+          existing.logged_lamports += d.total_lamports;
+          minerMap.set(d.authority, existing);
+        }
+      }
+    }
+  }
+  
+  // Add external deployments
+  for (const d of externalData.deployments) {
+    const existing = minerMap.get(d.pubkey) || {
+      authority: d.pubkey,
+      parsed_lamports: 0,
+      logged_lamports: 0,
+      external_lamports: 0,
+    };
+    existing.external_lamports += d.sol_deployed;
+    minerMap.set(d.pubkey, existing);
+  }
+  
+  // Convert to array and sort by external amount (descending)
+  const miners = Array.from(minerMap.values()).sort(
+    (a, b) => b.external_lamports - a.external_lamports
+  );
+  
+  // Calculate totals
+  const totals = miners.reduce(
+    (acc, m) => ({
+      parsed: acc.parsed + m.parsed_lamports,
+      logged: acc.logged + m.logged_lamports,
+      external: acc.external + m.external_lamports,
+    }),
+    { parsed: 0, logged: 0, external: 0 }
+  );
+  
+  return (
+    <div className="fixed inset-0 bg-black/80 flex items-center justify-center z-50 p-4" onClick={onClose}>
+      <div 
+        className="bg-slate-900 border border-slate-700 rounded-xl w-full max-w-4xl max-h-[90vh] overflow-hidden flex flex-col"
+        onClick={e => e.stopPropagation()}
+      >
+        <div className="p-4 border-b border-slate-700 flex justify-between items-center shrink-0">
+          <div>
+            <h2 className="text-lg font-semibold text-white">Miner Deployment Comparison</h2>
+            <div className="text-xs text-slate-400">Round {data.round_id} • {miners.length} unique miners</div>
+          </div>
+          <button onClick={onClose} className="text-slate-400 hover:text-white p-1">
+            ✕
+          </button>
+        </div>
+        
+        <div className="flex-1 overflow-auto p-4">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-800/50 text-slate-400 text-xs uppercase sticky top-0">
+              <tr>
+                <th className="px-3 py-2 text-left">Authority</th>
+                <th className="px-3 py-2 text-right">Parsed (SOL)</th>
+                <th className="px-3 py-2 text-right">Logged (SOL)</th>
+                <th className="px-3 py-2 text-right">External (SOL)</th>
+                <th className="px-3 py-2 text-right">Diff (Ext - Parsed)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-700/50">
+              {miners.map((m) => {
+                const parsedSol = m.parsed_lamports / 1e9;
+                const loggedSol = m.logged_lamports / 1e9;
+                const externalSol = m.external_lamports / 1e9;
+                const diff = externalSol - parsedSol;
+                const hasDiff = Math.abs(diff) > 0.000001;
+                
+                return (
+                  <tr key={m.authority} className={`hover:bg-slate-800/30 ${hasDiff ? "bg-yellow-900/10" : ""}`}>
+                    <td className="px-3 py-2">
+                      <a
+                        href={`https://solscan.io/account/${m.authority}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="font-mono text-xs text-blue-400 hover:text-blue-300"
+                        title={m.authority}
+                      >
+                        {m.authority.slice(0, 4)}...{m.authority.slice(-4)}
+                      </a>
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-amber-400">
+                      {parsedSol.toFixed(6)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-cyan-400">
+                      {loggedSol.toFixed(6)}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-xs text-purple-400">
+                      {externalSol.toFixed(6)}
+                    </td>
+                    <td className={`px-3 py-2 text-right font-mono text-xs ${hasDiff ? (diff > 0 ? "text-yellow-400" : "text-red-400") : "text-green-400"}`}>
+                      {diff >= 0 ? "+" : ""}{diff.toFixed(6)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+            <tfoot className="bg-slate-800/50 text-slate-300 text-xs font-semibold sticky bottom-0">
+              <tr>
+                <td className="px-3 py-2">TOTAL</td>
+                <td className="px-3 py-2 text-right font-mono text-amber-400">
+                  {(totals.parsed / 1e9).toFixed(6)}
+                </td>
+                <td className="px-3 py-2 text-right font-mono text-cyan-400">
+                  {(totals.logged / 1e9).toFixed(6)}
+                </td>
+                <td className="px-3 py-2 text-right font-mono text-purple-400">
+                  {(totals.external / 1e9).toFixed(6)}
+                </td>
+                <td className={`px-3 py-2 text-right font-mono ${Math.abs(totals.external - totals.parsed) > 1 ? "text-yellow-400" : "text-green-400"}`}>
+                  {(totals.external - totals.parsed) / 1e9 >= 0 ? "+" : ""}{((totals.external - totals.parsed) / 1e9).toFixed(6)}
+                </td>
+              </tr>
+            </tfoot>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
 // Main Page Content
 // ============================================================================
 
@@ -713,6 +889,7 @@ function TransactionsPageContent() {
   const [externalData, setExternalData] = useState<ExternalComparisonSummary | null>(null);
   const [externalLoading, setExternalLoading] = useState(false);
   const [externalError, setExternalError] = useState<string | null>(null);
+  const [showMinerComparison, setShowMinerComparison] = useState(false);
 
   // Load available rounds on mount
   useEffect(() => {
@@ -1124,6 +1301,13 @@ function TransactionsPageContent() {
                             </tbody>
                           </table>
                         </div>
+                        
+                        <button
+                          onClick={() => setShowMinerComparison(true)}
+                          className="mt-3 px-3 py-1.5 text-xs bg-purple-600 hover:bg-purple-500 rounded-lg transition-colors w-full"
+                        >
+                          View All Miners Comparison
+                        </button>
                       </div>
                     )}
                   </div>
@@ -1199,6 +1383,8 @@ function TransactionsPageContent() {
                   <thead className="bg-slate-800/50 text-slate-400 text-xs uppercase">
                     <tr>
                       <th className="px-4 py-3 text-left">Signature</th>
+                      <th className="px-4 py-3 text-left">Signer</th>
+                      <th className="px-4 py-3 text-left">Authority</th>
                       <th className="px-4 py-3 text-center">Status</th>
                       <th className="px-4 py-3 text-right">Slot</th>
                       <th className="px-4 py-3 text-left">Action</th>
@@ -1208,45 +1394,75 @@ function TransactionsPageContent() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700/50">
-                    {data.transactions.map((tx) => (
-                      <tr key={tx.signature} className="hover:bg-slate-800/30 transition-colors">
-                        <td className="px-4 py-3">
-                          <a
-                            href={`https://solscan.io/tx/${tx.signature}`}
-                            target="_blank"
-                            rel="noopener noreferrer"
-                            className="font-mono text-xs text-blue-400 hover:text-blue-300"
-                          >
-                            {tx.signature.slice(0, 8)}...{tx.signature.slice(-8)}
-                          </a>
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <StatusBadge success={tx.success} />
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs text-white">
-                          {tx.slot.toLocaleString()}
-                        </td>
-                        <td className="px-4 py-3">
-                          <span className={`text-xs ${tx.ore_analysis ? "text-amber-400" : "text-slate-400"}`}>
-                            {tx.summary.primary_action}
-                          </span>
-                        </td>
-                        <td className="px-4 py-3 text-center text-xs text-slate-400">
-                          {tx.summary.total_instructions}+{tx.summary.total_inner_instructions}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">
-                          {(tx.fee / 1e9).toFixed(6)}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <button
-                            onClick={() => setSelectedTx(tx)}
-                            className="px-2 py-1 bg-slate-700 text-xs rounded hover:bg-slate-600 text-white"
-                          >
-                            View
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
+                    {data.transactions.map((tx) => {
+                      const signer = tx.signers[0] || "";
+                      const authority = tx.ore_analysis?.deployments[0]?.authority || "";
+                      return (
+                        <tr key={tx.signature} className="hover:bg-slate-800/30 transition-colors">
+                          <td className="px-4 py-3">
+                            <a
+                              href={`https://solscan.io/tx/${tx.signature}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-xs text-blue-400 hover:text-blue-300"
+                            >
+                              {tx.signature.slice(0, 4)}...{tx.signature.slice(-4)}
+                            </a>
+                          </td>
+                          <td className="px-4 py-3">
+                            {signer && (
+                              <a
+                                href={`https://solscan.io/account/${signer}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono text-xs text-slate-400 hover:text-slate-300"
+                                title={signer}
+                              >
+                                {signer.slice(0, 4)}...{signer.slice(-4)}
+                              </a>
+                            )}
+                          </td>
+                          <td className="px-4 py-3">
+                            {authority && (
+                              <a
+                                href={`https://solscan.io/account/${authority}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono text-xs text-amber-400 hover:text-amber-300"
+                                title={authority}
+                              >
+                                {authority.slice(0, 4)}...{authority.slice(-4)}
+                              </a>
+                            )}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <StatusBadge success={tx.success} />
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-xs text-white">
+                            {tx.slot.toLocaleString()}
+                          </td>
+                          <td className="px-4 py-3">
+                            <span className={`text-xs ${tx.ore_analysis ? "text-amber-400" : "text-slate-400"}`}>
+                              {tx.summary.primary_action}
+                            </span>
+                          </td>
+                          <td className="px-4 py-3 text-center text-xs text-slate-400">
+                            {tx.summary.total_instructions}+{tx.summary.total_inner_instructions}
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono text-xs text-slate-400">
+                            {(tx.fee / 1e9).toFixed(6)}
+                          </td>
+                          <td className="px-4 py-3 text-center">
+                            <button
+                              onClick={() => setSelectedTx(tx)}
+                              className="px-2 py-1 bg-slate-700 text-xs rounded hover:bg-slate-600 text-white"
+                            >
+                              View
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
@@ -1268,6 +1484,14 @@ function TransactionsPageContent() {
       
       {selectedTx && (
         <TransactionDetailModal tx={selectedTx} onClose={() => setSelectedTx(null)} />
+      )}
+      
+      {showMinerComparison && data && externalData && (
+        <MinerComparisonModal
+          data={data}
+          externalData={externalData}
+          onClose={() => setShowMinerComparison(false)}
+        />
       )}
     </AdminShell>
   );
