@@ -5,6 +5,7 @@ import Link from "next/link";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { useAdmin } from "@/context/AdminContext";
 import { api, RoundStatus, RoundWithData, RoundStatsResponse, FilterMode, BackfillRoundsTaskState } from "@/lib/api";
+import { API_URL } from "@/lib/constants";
 
 // ============================================================================
 // Types
@@ -509,8 +510,10 @@ function RoundsDataSection({
   onFilterChange,
   onAddToWorkflow,
   onBulkAddToWorkflow,
+  onBulkDeleteDeployments,
   addingRoundId,
   bulkAdding,
+  bulkDeleting,
   hasMore,
   onLoadMore,
 }: {
@@ -520,8 +523,10 @@ function RoundsDataSection({
   onFilterChange: (mode: FilterMode) => void;
   onAddToWorkflow: (roundId: number) => void;
   onBulkAddToWorkflow: (roundIds: number[]) => void;
+  onBulkDeleteDeployments: (roundIds: number[]) => void;
   addingRoundId: number | null;
   bulkAdding: boolean;
+  bulkDeleting: boolean;
   hasMore: boolean;
   onLoadMore: () => void;
 }) {
@@ -539,17 +544,19 @@ function RoundsDataSection({
     });
   };
   
-  // A round needs work if it has 0 deployments OR has a mismatch
-  const needsWork = (r: RoundWithData) => {
-    const isMissing = r.deployment_count === 0;
-    const hasMismatch = r.deployment_count > 0 && (r.deployments_sum ?? 0) !== r.total_deployed;
-    return isMissing || hasMismatch;
+  // Missing = 0 deployments, can be added to workflow
+  const isMissing = (r: RoundWithData) => r.deployment_count === 0;
+  // Invalid = has deployments but sum doesn't match, needs delete first
+  const isInvalid = (r: RoundWithData) => r.deployment_count > 0 && (r.deployments_sum ?? 0) !== r.total_deployed;
+  
+  const selectAllMissing = () => {
+    const missingRounds = rounds.filter(isMissing).map(r => r.round_id);
+    setSelectedRounds(new Set(missingRounds));
   };
   
-  const selectAll = () => {
-    // Select all rounds that need work (missing OR invalid)
-    const selectableRounds = rounds.filter(needsWork).map(r => r.round_id);
-    setSelectedRounds(new Set(selectableRounds));
+  const selectAllInvalid = () => {
+    const invalidRounds = rounds.filter(isInvalid).map(r => r.round_id);
+    setSelectedRounds(new Set(invalidRounds));
   };
   
   const clearSelection = () => {
@@ -557,15 +564,42 @@ function RoundsDataSection({
   };
   
   const handleBulkAdd = () => {
-    const roundIds = Array.from(selectedRounds);
-    onBulkAddToWorkflow(roundIds);
+    // Only add rounds that are missing (0 deployments)
+    const roundIds = Array.from(selectedRounds).filter(id => {
+      const round = rounds.find(r => r.round_id === id);
+      return round && isMissing(round);
+    });
+    if (roundIds.length > 0) {
+      onBulkAddToWorkflow(roundIds);
+    }
     setSelectedRounds(new Set());
   };
   
-  const missingCount = rounds.filter(r => r.deployment_count === 0).length;
-  const invalidCount = rounds.filter(r => r.deployment_count > 0 && (r.deployments_sum ?? 0) !== r.total_deployed).length;
-  const selectableCount = rounds.filter(needsWork).length;
+  const handleBulkDelete = () => {
+    // Only delete deployments for invalid rounds
+    const roundIds = Array.from(selectedRounds).filter(id => {
+      const round = rounds.find(r => r.round_id === id);
+      return round && isInvalid(round);
+    });
+    if (roundIds.length > 0) {
+      onBulkDeleteDeployments(roundIds);
+    }
+    setSelectedRounds(new Set());
+  };
+  
+  const missingCount = rounds.filter(isMissing).length;
+  const invalidCount = rounds.filter(isInvalid).length;
   const selectedCount = selectedRounds.size;
+  
+  // Count selected by type
+  const selectedMissingCount = Array.from(selectedRounds).filter(id => {
+    const round = rounds.find(r => r.round_id === id);
+    return round && isMissing(round);
+  }).length;
+  const selectedInvalidCount = Array.from(selectedRounds).filter(id => {
+    const round = rounds.find(r => r.round_id === id);
+    return round && isInvalid(round);
+  }).length;
 
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
@@ -584,15 +618,25 @@ function RoundsDataSection({
         </div>
         
         {/* Bulk Actions Bar */}
-        {rounds.length > 0 && selectableCount > 0 && (
+        {rounds.length > 0 && (missingCount > 0 || invalidCount > 0) && (
           <div className="flex items-center gap-2 flex-wrap">
             <div className="flex gap-1">
-              <button
-                onClick={selectAll}
-                className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded"
-              >
-                Select All ({selectableCount})
-              </button>
+              {missingCount > 0 && (
+                <button
+                  onClick={selectAllMissing}
+                  className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded"
+                >
+                  Select Missing ({missingCount})
+                </button>
+              )}
+              {invalidCount > 0 && (
+                <button
+                  onClick={selectAllInvalid}
+                  className="px-2 py-1 text-xs bg-orange-500/20 hover:bg-orange-500/30 text-orange-400 rounded"
+                >
+                  Select Invalid ({invalidCount})
+                </button>
+              )}
               <button
                 onClick={clearSelection}
                 disabled={selectedCount === 0}
@@ -607,13 +651,24 @@ function RoundsDataSection({
                 <span className="text-xs text-slate-400">
                   {selectedCount} selected
                 </span>
-                <button
-                  onClick={handleBulkAdd}
-                  disabled={bulkAdding}
-                  className="px-3 py-1 text-xs bg-emerald-500 hover:bg-emerald-600 text-white rounded disabled:opacity-50 font-medium"
-                >
-                  {bulkAdding ? 'Adding...' : `Add ${selectedCount} to Workflow`}
-                </button>
+                {selectedMissingCount > 0 && (
+                  <button
+                    onClick={handleBulkAdd}
+                    disabled={bulkAdding}
+                    className="px-3 py-1 text-xs bg-emerald-500 hover:bg-emerald-600 text-white rounded disabled:opacity-50 font-medium"
+                  >
+                    {bulkAdding ? 'Adding...' : `Add ${selectedMissingCount} to Workflow`}
+                  </button>
+                )}
+                {selectedInvalidCount > 0 && (
+                  <button
+                    onClick={handleBulkDelete}
+                    disabled={bulkDeleting}
+                    className="px-3 py-1 text-xs bg-red-500 hover:bg-red-600 text-white rounded disabled:opacity-50 font-medium"
+                  >
+                    {bulkDeleting ? 'Deleting...' : `Delete ${selectedInvalidCount} Deployments`}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -634,11 +689,19 @@ function RoundsDataSection({
             <thead className="bg-slate-800/50 sticky top-0">
               <tr className="border-b border-slate-700">
                 <th className="text-left px-3 py-2 text-xs font-medium text-slate-400 w-8">
-                  {selectableCount > 0 && (
+                  {(missingCount > 0 || invalidCount > 0) && (
         <input
           type="checkbox"
-                      checked={selectedCount === selectableCount && selectableCount > 0}
-                      onChange={() => selectedCount === selectableCount ? clearSelection() : selectAll()}
+                      checked={selectedCount > 0 && selectedCount === (missingCount + invalidCount)}
+                      onChange={() => {
+                        if (selectedCount === (missingCount + invalidCount)) {
+                          clearSelection();
+                        } else {
+                          // Select all selectable
+                          const all = rounds.filter(r => isMissing(r) || isInvalid(r)).map(r => r.round_id);
+                          setSelectedRounds(new Set(all));
+                        }
+                      }}
                       className="rounded border-slate-600 bg-slate-700 text-emerald-500"
                     />
                   )}
@@ -653,17 +716,17 @@ function RoundsDataSection({
             </thead>
             <tbody>
               {rounds.map((round) => {
-                const isMissing = round.deployment_count === 0;
+                const roundIsMissing = round.deployment_count === 0;
                 const isSelected = selectedRounds.has(round.round_id);
                 const deploymentSum = round.deployments_sum ?? 0;
                 const diff = round.total_deployed - deploymentSum;
-                const hasMismatch = round.deployment_count > 0 && diff !== 0;
-                const isSelectable = isMissing || hasMismatch;
+                const roundIsInvalid = round.deployment_count > 0 && diff !== 0;
+                const isSelectable = roundIsMissing || roundIsInvalid;
                 
                 return (
                   <tr 
                     key={round.round_id} 
-                    className={`border-b border-slate-700/50 hover:bg-slate-700/30 ${isSelected ? 'bg-emerald-500/10' : ''} ${hasMismatch ? 'bg-red-500/5' : ''}`}
+                    className={`border-b border-slate-700/50 hover:bg-slate-700/30 ${isSelected ? 'bg-emerald-500/10' : ''} ${roundIsInvalid ? 'bg-red-500/5' : ''}`}
                   >
                     <td className="px-3 py-2">
                       {isSelectable && (
@@ -677,18 +740,18 @@ function RoundsDataSection({
       </td>
                     <td className="px-3 py-2 font-mono text-white">{round.round_id.toLocaleString()}</td>
                     <td className="px-3 py-2 text-slate-300">{formatSol(round.total_deployed)} SOL</td>
-                    <td className={`px-3 py-2 ${isMissing ? 'text-red-400' : 'text-green-400'}`}>
+                    <td className={`px-3 py-2 ${roundIsMissing ? 'text-red-400' : 'text-green-400'}`}>
           {round.deployment_count}
       </td>
-                    <td className={`px-3 py-2 ${hasMismatch ? 'text-yellow-400' : 'text-slate-400'}`}>
+                    <td className={`px-3 py-2 ${roundIsInvalid ? 'text-yellow-400' : 'text-slate-400'}`}>
                       {round.deployment_count > 0 ? formatSol(deploymentSum) : '-'}
                     </td>
-                    <td className={`px-3 py-2 font-mono ${hasMismatch ? 'text-red-400' : 'text-slate-500'}`}>
-                      {hasMismatch ? formatSol(diff) : '-'}
+                    <td className={`px-3 py-2 font-mono ${roundIsInvalid ? 'text-red-400' : 'text-slate-500'}`}>
+                      {roundIsInvalid ? formatSol(diff) : '-'}
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex gap-1">
-                        {isSelectable && (
+                        {roundIsMissing && (
                           <button
                             onClick={() => onAddToWorkflow(round.round_id)}
                             disabled={addingRoundId === round.round_id || isSelected}
@@ -884,6 +947,7 @@ export default function BackfillCommandCenter() {
   const [roundsDataHasMore, setRoundsDataHasMore] = useState(false);
   const [addingRoundId, setAddingRoundId] = useState<number | null>(null);
   const [bulkAdding, setBulkAdding] = useState(false);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
   const [roundStats, setRoundStats] = useState<RoundStatsResponse | null>(null);
   
   // Active tab
@@ -899,7 +963,7 @@ export default function BackfillCommandCenter() {
   const fetchQueueStatus = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
-      const res = await fetch("/api/admin/backfill/queue/status", {
+      const res = await fetch(`${API_URL}/admin/backfill/queue/status`, {
         headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
       });
       if (res.ok) {
@@ -913,7 +977,7 @@ export default function BackfillCommandCenter() {
   const fetchPipelineStats = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
-      const res = await fetch("/api/admin/backfill/pipeline-stats", {
+      const res = await fetch(`${API_URL}/admin/backfill/pipeline-stats`, {
         headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
       });
       if (res.ok) {
@@ -927,7 +991,7 @@ export default function BackfillCommandCenter() {
   const fetchMemoryUsage = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
-      const res = await fetch("/api/admin/backfill/memory", {
+      const res = await fetch(`${API_URL}/admin/backfill/memory`, {
         headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
       });
       if (res.ok) {
@@ -1054,7 +1118,7 @@ export default function BackfillCommandCenter() {
 
   const handlePauseQueue = async () => {
     try {
-      const res = await fetch("/api/admin/backfill/queue/pause", {
+      const res = await fetch(`${API_URL}/admin/backfill/queue/pause`, {
         method: "POST",
         headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
       });
@@ -1069,7 +1133,7 @@ export default function BackfillCommandCenter() {
 
   const handleResumeQueue = async () => {
     try {
-      const res = await fetch("/api/admin/backfill/queue/resume", {
+      const res = await fetch(`${API_URL}/admin/backfill/queue/resume`, {
         method: "POST",
         headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
       });
@@ -1084,7 +1148,7 @@ export default function BackfillCommandCenter() {
 
   const handleClearQueue = async () => {
     try {
-      const res = await fetch("/api/admin/backfill/queue/clear", {
+      const res = await fetch(`${API_URL}/admin/backfill/queue/clear`, {
         method: "POST",
         headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
       });
@@ -1100,7 +1164,7 @@ export default function BackfillCommandCenter() {
 
   const handleRetryFailed = async () => {
     try {
-      const res = await fetch("/api/admin/backfill/queue/retry-failed", {
+      const res = await fetch(`${API_URL}/admin/backfill/queue/retry-failed`, {
         method: "POST",
         headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
       });
@@ -1116,7 +1180,7 @@ export default function BackfillCommandCenter() {
 
   const handleEnqueue = async (start: number, end: number, action: string, skipDone: boolean, onlyInWorkflow: boolean) => {
     try {
-      const res = await fetch("/api/admin/backfill/queue/enqueue", {
+      const res = await fetch(`${API_URL}/admin/backfill/queue/enqueue`, {
         method: "POST",
         headers: { 
           Authorization: `Bearer ${localStorage.getItem("adminToken")}`,
@@ -1142,7 +1206,7 @@ export default function BackfillCommandCenter() {
 
   const handleAddToWorkflow = async (start: number, end: number) => {
     try {
-      const res = await fetch("/api/admin/backfill/add-range", {
+      const res = await fetch(`${API_URL}/admin/backfill/add-range`, {
         method: "POST",
         headers: { 
           Authorization: `Bearer ${localStorage.getItem("adminToken")}`,
@@ -1163,7 +1227,7 @@ export default function BackfillCommandCenter() {
 
   const handleBulkVerify = async (start: number, end: number) => {
     try {
-      const res = await fetch("/api/admin/backfill/bulk-verify", {
+      const res = await fetch(`${API_URL}/admin/backfill/bulk-verify`, {
         method: "POST",
         headers: { 
           Authorization: `Bearer ${localStorage.getItem("adminToken")}`,
@@ -1208,6 +1272,22 @@ export default function BackfillCommandCenter() {
       setError(err instanceof Error ? err.message : "Failed to add rounds to workflow");
     } finally {
       setBulkAdding(false);
+    }
+  };
+
+  const handleBulkDeleteDeployments = async (roundIds: number[]) => {
+    if (roundIds.length === 0) return;
+    setBulkDeleting(true);
+    try {
+      // Delete deployments for each round
+      await api.bulkDeleteRounds(roundIds, false, true); // delete deployments only, not rounds
+      setMessage(`Deleted deployments for ${roundIds.length} rounds`);
+      fetchRoundsData();
+      fetchRoundStats();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to delete deployments");
+    } finally {
+      setBulkDeleting(false);
     }
   };
 
@@ -1409,8 +1489,10 @@ export default function BackfillCommandCenter() {
               onFilterChange={setRoundsDataFilter}
               onAddToWorkflow={handleAddSingleToWorkflow}
               onBulkAddToWorkflow={handleBulkAddToWorkflow}
+              onBulkDeleteDeployments={handleBulkDeleteDeployments}
               addingRoundId={addingRoundId}
               bulkAdding={bulkAdding}
+              bulkDeleting={bulkDeleting}
               hasMore={roundsDataHasMore}
               onLoadMore={() => fetchRoundsData(true)}
             />
