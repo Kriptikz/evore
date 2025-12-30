@@ -24,6 +24,10 @@ use crate::helius_api::ProgramAccountV2;
 pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut ticker = interval(Duration::from_secs(2));
+        // Skip missed ticks during long operations like GPA snapshots
+        // to avoid burst of RPC calls when the operation completes
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
         let mut last_round_id: u64 = 0;
         let mut round_ending_detected = false;
         let mut initialized = false;
@@ -185,6 +189,9 @@ pub fn spawn_miners_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()>
         tokio::time::sleep(Duration::from_secs(3)).await;
         
         let mut ticker = interval(Duration::from_secs(2));
+        // Skip missed ticks to avoid burst of API calls after long operations
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        
         let mut initial_load_done = false;
         
         loop {
