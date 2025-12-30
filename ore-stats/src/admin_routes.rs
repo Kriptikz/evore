@@ -1048,6 +1048,8 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/database/sizes", get(get_database_sizes))
         // Backfill workflow
         .route("/backfill/rounds", post(crate::backfill::backfill_rounds))
+        .route("/backfill/rounds/status", get(crate::backfill::get_backfill_rounds_status))
+        .route("/backfill/rounds/cancel", post(crate::backfill::cancel_backfill_rounds))
         .route("/backfill/deployments", post(crate::backfill::add_to_backfill_workflow))
         .route("/rounds/pending", get(crate::backfill::get_pending_rounds))
         .route("/rounds/data", get(crate::backfill::get_rounds_with_data))

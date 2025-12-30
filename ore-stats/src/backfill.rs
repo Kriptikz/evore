@@ -229,26 +229,121 @@ pub struct ErrorResponse {
 // Handlers
 // ============================================================================
 
+/// Response for starting a backfill task
+#[derive(Debug, Serialize)]
+pub struct BackfillStartResponse {
+    pub message: String,
+    pub stop_at_round: u64,
+    pub max_pages: u32,
+}
+
 /// POST /admin/backfill/rounds?stop_at_round={id}&max_pages={n}
-/// Fetch round metadata from external API and store to ClickHouse
+/// Start a background task to fetch round metadata from external API
+/// Returns immediately - use GET /admin/backfill/rounds/status to monitor progress
 pub async fn backfill_rounds(
     State(state): State<Arc<AppState>>,
     Query(params): Query<BackfillRoundsQuery>,
-) -> Result<Json<BackfillRoundsResponse>, (StatusCode, Json<ErrorResponse>)> {
+) -> Result<Json<BackfillStartResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::app_state::{BackfillTaskStatus, BackfillRoundsTaskState};
+    
     let stop_at_round = params.stop_at_round.unwrap_or(0);
-    let max_pages = params.max_pages.unwrap_or(100);
+    let max_pages = params.max_pages.unwrap_or(10000); // Default to a high number
     
-    let mut rounds_fetched = 0u32;
-    let mut rounds_skipped = 0u32;
-    let mut rounds_missing_deployments = 0u32;
-    let mut stopped_at: Option<u64> = None;
+    // Check if task is already running
+    {
+        let task_state = state.backfill_rounds_task_state.read().await;
+        if task_state.status == BackfillTaskStatus::Running {
+            return Err((
+                StatusCode::CONFLICT,
+                Json(ErrorResponse { 
+                    error: "Backfill task is already running. Use GET /admin/backfill/rounds/status to check progress or POST /admin/backfill/rounds/cancel to stop it.".to_string() 
+                }),
+            ));
+        }
+    }
     
-    tracing::info!("Starting backfill, stop_at_round={}, max_pages={}", stop_at_round, max_pages);
+    // Reset cancellation flag and initialize task state
+    {
+        let mut cancel = state.backfill_rounds_cancel.write().await;
+        *cancel = false;
+    }
+    {
+        let mut task_state = state.backfill_rounds_task_state.write().await;
+        *task_state = BackfillRoundsTaskState {
+            status: BackfillTaskStatus::Running,
+            started_at_ms: Some(chrono::Utc::now().timestamp_millis() as u64),
+            stop_at_round,
+            max_pages,
+            current_page: 0,
+            rounds_fetched: 0,
+            rounds_skipped: 0,
+            rounds_missing_deployments: 0,
+            last_round_id_processed: None,
+            first_round_id_seen: None,
+            estimated_total_rounds: None,
+            error: None,
+            elapsed_ms: 0,
+            estimated_remaining_ms: None,
+            last_updated: chrono::Utc::now(),
+        };
+    }
+    
+    tracing::info!("Starting backfill background task, stop_at_round={}, max_pages={}", stop_at_round, max_pages);
+    
+    // Spawn the background task
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        run_backfill_rounds_task(state_clone, stop_at_round, max_pages).await;
+    });
+    
+    Ok(Json(BackfillStartResponse {
+        message: "Backfill task started. Use GET /admin/backfill/rounds/status to monitor progress.".to_string(),
+        stop_at_round,
+        max_pages,
+    }))
+}
+
+/// The actual background task that runs the backfill
+async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_pages: u32) {
+    use crate::app_state::BackfillTaskStatus;
+    
+    let start_time = std::time::Instant::now();
     
     for page in 0..max_pages {
+        // Check for cancellation
+        {
+            let cancel = state.backfill_rounds_cancel.read().await;
+            if *cancel {
+                tracing::info!("Backfill task cancelled at page {}", page);
+                let mut task_state = state.backfill_rounds_task_state.write().await;
+                task_state.status = BackfillTaskStatus::Cancelled;
+                task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
+                task_state.last_updated = chrono::Utc::now();
+                return;
+            }
+        }
+        
         // Rate limit: 1 page per second to avoid spamming external API
         if page > 0 {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        
+        // Update current page in state
+        {
+            let mut task_state = state.backfill_rounds_task_state.write().await;
+            task_state.current_page = page;
+            task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
+            task_state.last_updated = chrono::Utc::now();
+            
+            // Calculate estimated time remaining
+            if page > 0 {
+                let elapsed_secs = start_time.elapsed().as_secs_f64();
+                let pages_per_sec = page as f64 / elapsed_secs;
+                if pages_per_sec > 0.0 {
+                    let remaining_pages = max_pages.saturating_sub(page);
+                    task_state.estimated_remaining_ms = Some((remaining_pages as f64 / pages_per_sec * 1000.0) as u64);
+                }
+            }
         }
         
         // Fetch from external API
@@ -259,15 +354,35 @@ pub async fn backfill_rounds(
             break;
         }
         
+        // Track first round seen for estimation
+        if page == 0 {
+            if let Some(first_round) = rounds.first() {
+                let first_id = first_round.round_id as u64;
+                let mut task_state = state.backfill_rounds_task_state.write().await;
+                task_state.first_round_id_seen = Some(first_id);
+                // Estimate total rounds between first_round_id and stop_at_round
+                if first_id > stop_at_round {
+                    task_state.estimated_total_rounds = Some(first_id - stop_at_round);
+                }
+            }
+        }
+        
         let mut batch: Vec<RoundInsert> = Vec::new();
         let mut should_stop = false;
+        let mut page_rounds_skipped = 0u32;
+        let mut page_rounds_missing_deps = 0u32;
         
         for round in rounds {
             let round_id = round.round_id as u64;
             
+            // Update last processed round
+            {
+                let mut task_state = state.backfill_rounds_task_state.write().await;
+                task_state.last_round_id_processed = Some(round_id);
+            }
+            
             // Check if we should stop
             if round_id <= stop_at_round {
-                stopped_at = Some(round_id);
                 should_stop = true;
                 break;
             }
@@ -280,12 +395,11 @@ pub async fn backfill_rounds(
             
             if round_exists && deployment_count > 0 {
                 // Fully complete - skip
-                rounds_skipped += 1;
+                page_rounds_skipped += 1;
                 continue;
             } else if round_exists && deployment_count == 0 {
                 // Round exists but no deployments - mark for backfill
-                rounds_missing_deployments += 1;
-                // Update PostgreSQL to indicate needs deployment backfill
+                page_rounds_missing_deps += 1;
                 update_round_status_meta_fetched(&state.postgres, round_id).await;
                 continue;
             }
@@ -294,21 +408,26 @@ pub async fn backfill_rounds(
             let insert = RoundInsert::from_backfill(
                 round_id,
                 0, // start_slot - not available from external API
-                round.created_at as u64, // Use timestamp as end_slot estimate
+                round.created_at as u64,
                 round.winning_square as u8,
                 round.top_miner.clone(),
                 round.total_deployed as u64,
                 round.total_vaulted as u64,
                 round.total_winnings as u64,
                 round.motherlode as u64,
-                0, // unique_miners - will be updated after reconstruction
+                0, // unique_miners
                 round.created_at as u64,
             );
             
             batch.push(insert);
-            
-            // Update PostgreSQL status
             update_round_status_meta_fetched(&state.postgres, round_id).await;
+        }
+        
+        // Update skipped/missing counts
+        {
+            let mut task_state = state.backfill_rounds_task_state.write().await;
+            task_state.rounds_skipped += page_rounds_skipped;
+            task_state.rounds_missing_deployments += page_rounds_missing_deps;
         }
         
         // Insert batch to ClickHouse
@@ -316,31 +435,83 @@ pub async fn backfill_rounds(
             let count = batch.len() as u32;
             if let Err(e) = state.clickhouse.insert_rounds(batch).await {
                 tracing::error!("Failed to insert rounds batch: {}", e);
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ErrorResponse { error: format!("ClickHouse insert failed: {}", e) }),
-                ));
+                let mut task_state = state.backfill_rounds_task_state.write().await;
+                task_state.status = BackfillTaskStatus::Failed;
+                task_state.error = Some(format!("ClickHouse insert failed: {}", e));
+                task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
+                task_state.last_updated = chrono::Utc::now();
+                return;
             }
-            rounds_fetched += count;
-            tracing::info!("Inserted {} rounds from page {}", count, page);
+            
+            {
+                let mut task_state = state.backfill_rounds_task_state.write().await;
+                task_state.rounds_fetched += count;
+            }
+            tracing::info!("Page {}: inserted {} rounds", page, count);
         }
         
         if should_stop {
+            tracing::info!("Reached stop_at_round={}, stopping", stop_at_round);
             break;
         }
     }
     
-    tracing::info!(
-        "Backfill complete: {} fetched, {} skipped, {} missing deployments, stopped_at={:?}",
-        rounds_fetched, rounds_skipped, rounds_missing_deployments, stopped_at
-    );
+    // Mark as completed
+    let mut task_state = state.backfill_rounds_task_state.write().await;
+    task_state.status = BackfillTaskStatus::Completed;
+    task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
+    task_state.estimated_remaining_ms = Some(0);
+    task_state.last_updated = chrono::Utc::now();
     
-    Ok(Json(BackfillRoundsResponse {
-        rounds_fetched,
-        rounds_skipped,
-        rounds_missing_deployments,
-        stopped_at_round: stopped_at,
-    }))
+    tracing::info!(
+        "Backfill complete: {} fetched, {} skipped, {} missing deployments in {:?}",
+        task_state.rounds_fetched,
+        task_state.rounds_skipped,
+        task_state.rounds_missing_deployments,
+        start_time.elapsed()
+    );
+}
+
+/// GET /admin/backfill/rounds/status
+/// Get the current status of the backfill task
+pub async fn get_backfill_rounds_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<crate::app_state::BackfillRoundsTaskState> {
+    let task_state = state.backfill_rounds_task_state.read().await;
+    Json(task_state.clone())
+}
+
+/// POST /admin/backfill/rounds/cancel
+/// Cancel the running backfill task
+pub async fn cancel_backfill_rounds(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::app_state::BackfillTaskStatus;
+    
+    // Check if task is running
+    {
+        let task_state = state.backfill_rounds_task_state.read().await;
+        if task_state.status != BackfillTaskStatus::Running {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse { 
+                    error: format!("No backfill task is running. Current status: {:?}", task_state.status)
+                }),
+            ));
+        }
+    }
+    
+    // Set cancellation flag
+    {
+        let mut cancel = state.backfill_rounds_cancel.write().await;
+        *cancel = true;
+    }
+    
+    tracing::info!("Backfill cancellation requested");
+    
+    Ok(Json(serde_json::json!({
+        "message": "Cancellation requested. The task will stop after the current page completes."
+    })))
 }
 
 /// GET /admin/rounds/pending?status={filter}

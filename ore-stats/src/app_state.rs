@@ -102,6 +102,10 @@ pub struct AppState {
     
     // Automation state reconstruction task live stats
     pub automation_task_stats: Arc<RwLock<AutomationTaskStats>>,
+    
+    // Rounds backfill task state and cancellation flag
+    pub backfill_rounds_task_state: Arc<RwLock<BackfillRoundsTaskState>>,
+    pub backfill_rounds_cancel: Arc<RwLock<bool>>,
 }
 
 /// Live statistics for the automation state reconstruction background task
@@ -117,6 +121,58 @@ pub struct AutomationTaskStats {
     pub items_processed_this_session: u64,
     pub items_succeeded_this_session: u64,
     pub items_failed_this_session: u64,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+/// Status of the rounds backfill background task
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum BackfillTaskStatus {
+    Idle,
+    Running,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+impl Default for BackfillTaskStatus {
+    fn default() -> Self {
+        Self::Idle
+    }
+}
+
+/// Live statistics for the rounds backfill background task
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct BackfillRoundsTaskState {
+    /// Current task status
+    pub status: BackfillTaskStatus,
+    /// When the task started (Unix timestamp ms)
+    pub started_at_ms: Option<u64>,
+    /// The stop_at_round parameter passed to the task
+    pub stop_at_round: u64,
+    /// Max pages to fetch
+    pub max_pages: u32,
+    /// Current page being processed
+    pub current_page: u32,
+    /// Total rounds fetched and stored
+    pub rounds_fetched: u32,
+    /// Rounds skipped (already exist with deployments)
+    pub rounds_skipped: u32,
+    /// Rounds that exist but are missing deployments
+    pub rounds_missing_deployments: u32,
+    /// Last round ID that was processed
+    pub last_round_id_processed: Option<u64>,
+    /// First round ID seen (highest round from first page)
+    pub first_round_id_seen: Option<u64>,
+    /// Estimated total rounds to process (based on first page)
+    pub estimated_total_rounds: Option<u64>,
+    /// Error message if task failed
+    pub error: Option<String>,
+    /// Elapsed time in milliseconds
+    pub elapsed_ms: u64,
+    /// Estimated time remaining in milliseconds
+    pub estimated_remaining_ms: Option<u64>,
+    /// Last updated timestamp
     pub last_updated: chrono::DateTime<chrono::Utc>,
 }
 
@@ -187,6 +243,8 @@ impl AppState {
             deployments_cache: Arc::new(RwLock::new(HashMap::new())),
             deployments_cache_round_id: Arc::new(RwLock::new(0)),
             automation_task_stats: Arc::new(RwLock::new(AutomationTaskStats::default())),
+            backfill_rounds_task_state: Arc::new(RwLock::new(BackfillRoundsTaskState::default())),
+            backfill_rounds_cancel: Arc::new(RwLock::new(false)),
         }
     }
     
