@@ -40,10 +40,16 @@ pub struct LoggedDeployment {
     pub total_sol: f64,
     pub total_lamports: u64,
     pub round_matches: bool,
+    /// Authority (miner identity) from the corresponding parsed deploy instruction
+    pub authority: Option<String>,
+    /// Whether this logged deployment was matched to a parsed deploy instruction
+    /// If false, indicates a parsing failure that needs investigation
+    pub matched_parsed: bool,
 }
 
 /// Parse "Round #X: deploying Y SOL to Z squares" from logs
 /// If expected_round_id is provided, sets round_matches to true only for matching rounds
+/// Authority and matched_parsed are initially None/false - must be correlated with parsed deployments afterwards
 pub fn parse_deploy_logs(logs: &[String], expected_round_id: Option<u64>) -> Vec<LoggedDeployment> {
     logs.iter()
         .filter_map(|log| {
@@ -62,6 +68,8 @@ pub fn parse_deploy_logs(logs: &[String], expected_round_id: Option<u64>) -> Vec
                     total_sol,
                     total_lamports,
                     round_matches,
+                    authority: None,       // Will be correlated with parsed deployments
+                    matched_parsed: false, // Will be set true if matched
                 })
             })
         })
@@ -756,7 +764,33 @@ impl TransactionAnalyzer {
         let total_deployed: u64 = ore_deployments.iter().map(|d| d.total_lamports).sum();
         
         // Parse logged deployments from text logs, filtering by expected round
-        let logged_deployments = parse_deploy_logs(&logs, self.expected_round_id);
+        let mut logged_deployments = parse_deploy_logs(&logs, self.expected_round_id);
+        
+        // Correlate logged deployments with parsed deployments to get authority info
+        // Match by round_id - find a parsed deployment with matching round for each logged one
+        // Track which parsed deployments have been matched to avoid double-matching
+        let mut parsed_used: Vec<bool> = vec![false; ore_deployments.len()];
+        
+        for logged in logged_deployments.iter_mut() {
+            // Find a parsed deployment with matching round_id that hasn't been matched yet
+            for (idx, parsed) in ore_deployments.iter().enumerate() {
+                if !parsed_used[idx] {
+                    // Match by round_id if available
+                    let rounds_match = match parsed.round_id {
+                        Some(parsed_round) => parsed_round == logged.round_id,
+                        None => false, // Can't match without round_id
+                    };
+                    
+                    if rounds_match {
+                        logged.authority = Some(parsed.authority.clone());
+                        logged.matched_parsed = true;
+                        parsed_used[idx] = true;
+                        break;
+                    }
+                }
+            }
+        }
+        
         let logged_deploy_count = logged_deployments.iter().filter(|d| d.round_matches).count();
         let logged_deployed_lamports: u64 = logged_deployments
             .iter()

@@ -1509,6 +1509,8 @@ export interface LoggedDeployment {
   total_sol: number;
   total_lamports: number;
   round_matches: boolean;
+  authority: string | null;
+  matched_parsed: boolean;
 }
 
 export interface OreDeploymentInfo {
@@ -1568,6 +1570,9 @@ export interface OreRoundSummary {
   logged_deploy_count: number;
   logged_deployed_lamports: number;
   logged_deployed_sol: number;
+  logged_unique_miners: number;
+  // Logged deployments that couldn't be matched to a parsed instruction (indicates parsing issue)
+  logged_unmatched_count: number;
   
   // Comparison: logged - parsed (positive = logged has more than parsed)
   logged_vs_parsed_diff_lamports: number;

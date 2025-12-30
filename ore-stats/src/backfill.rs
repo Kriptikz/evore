@@ -2110,6 +2110,9 @@ pub struct OreRoundSummary {
     pub logged_deploy_count: usize,
     pub logged_deployed_lamports: u64,
     pub logged_deployed_sol: f64,
+    pub logged_unique_miners: usize,
+    /// Logged deployments that couldn't be matched to a parsed instruction (indicates parsing issue)
+    pub logged_unmatched_count: usize,
     
     // Comparison: logged - parsed (positive = logged has more than parsed)
     pub logged_vs_parsed_diff_lamports: i64,
@@ -2296,6 +2299,8 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
     // Logged deployment tracking (from text logs)
     let mut logged_deploy_count = 0usize;
     let mut logged_deployed_lamports = 0u64;
+    let mut logged_miners_set: HashSet<String> = HashSet::new();
+    let mut logged_unmatched_count = 0usize;
     
     for analysis in analyses {
         total_fee += analysis.fee;
@@ -2321,7 +2326,7 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
             for deployment in &ore.deployments {
                 ore_deployments.push(deployment);
                 total_deployed += deployment.total_lamports;
-                miners_set.insert(deployment.miner.clone());
+                miners_set.insert(deployment.authority.clone());
                 
                 if deployment.round_matches {
                     matching_round += 1;
@@ -2342,6 +2347,19 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
             // Aggregate logged deployment totals from text logs
             logged_deploy_count += ore.logged_deploy_count;
             logged_deployed_lamports += ore.logged_deployed_lamports;
+            
+            // Track unique miners and unmatched count from logged deployments
+            for logged in &ore.logged_deployments {
+                if logged.round_matches {
+                    if let Some(authority) = &logged.authority {
+                        logged_miners_set.insert(authority.clone());
+                    }
+                    // Count unmatched logged deployments (indicates parsing issue)
+                    if !logged.matched_parsed {
+                        logged_unmatched_count += 1;
+                    }
+                }
+            }
         }
     }
     
@@ -2379,6 +2397,8 @@ fn build_round_summary(analyses: &[crate::tx_analyzer::FullTransactionAnalysis])
             logged_deploy_count,
             logged_deployed_lamports,
             logged_deployed_sol,
+            logged_unique_miners: logged_miners_set.len(),
+            logged_unmatched_count,
             logged_vs_parsed_diff_lamports,
             logged_vs_parsed_diff_sol,
         })
