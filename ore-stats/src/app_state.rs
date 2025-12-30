@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Instant;
 
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 use evore::ore_api::{AutomationStrategy, Board, Miner, Round, Treasury};
 use serde::{Deserialize, Serialize};
 use steel::{Numeric, Pubkey};
@@ -106,6 +106,12 @@ pub struct AppState {
     // Rounds backfill task state and cancellation flag
     pub backfill_rounds_task_state: Arc<RwLock<BackfillRoundsTaskState>>,
     pub backfill_rounds_cancel: Arc<RwLock<bool>>,
+    
+    // Backfill action queue cache (synced with PostgreSQL)
+    pub backfill_queue_cache: Arc<RwLock<BackfillQueueCache>>,
+    
+    // Backfill reconstructed rounds cache (IN-MEMORY ONLY - lost on restart)
+    pub backfill_reconstructed_cache: Arc<RwLock<BackfillReconstructedCache>>,
 }
 
 /// Live statistics for the automation state reconstruction background task
@@ -174,6 +180,166 @@ pub struct BackfillRoundsTaskState {
     pub estimated_remaining_ms: Option<u64>,
     /// Last updated timestamp
     pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+// ============================================================================
+// Backfill Action Queue Types
+// ============================================================================
+
+/// A queued backfill action stored in PostgreSQL
+#[derive(Debug, Clone, Serialize, sqlx::FromRow)]
+pub struct QueuedAction {
+    pub id: i64,
+    pub round_id: i64,
+    pub action: String,
+    pub status: String,
+    pub queued_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub completed_at: Option<DateTime<Utc>>,
+    pub error: Option<String>,
+}
+
+/// In-memory cache for fast queue status access (synced with PostgreSQL)
+#[derive(Debug, Default)]
+pub struct BackfillQueueCache {
+    /// Number of pending items in queue
+    pub pending_count: u64,
+    /// Currently processing item
+    pub processing: Option<QueuedAction>,
+    /// Recent completed items (rolling window, max 50)
+    pub recent_completed: VecDeque<QueuedAction>,
+    /// Recent failed items (rolling window, max 50)
+    pub recent_failed: VecDeque<QueuedAction>,
+    /// Whether queue processing is paused
+    pub paused: bool,
+    /// Total items processed since startup
+    pub total_processed: u64,
+    /// Total items failed since startup
+    pub total_failed: u64,
+    /// Processing rate (items per minute)
+    pub processing_rate: f64,
+    /// Recent completion timestamps for rate calculation
+    pub recent_completion_times: VecDeque<DateTime<Utc>>,
+    /// Last time cache was synced from DB
+    pub last_sync: Option<DateTime<Utc>>,
+}
+
+impl BackfillQueueCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Add a completed item to recent list (max 50)
+    pub fn add_completed(&mut self, item: QueuedAction) {
+        self.recent_completed.push_front(item);
+        if self.recent_completed.len() > 50 {
+            self.recent_completed.pop_back();
+        }
+        self.total_processed += 1;
+        
+        // Track completion time for rate calculation
+        self.recent_completion_times.push_front(Utc::now());
+        if self.recent_completion_times.len() > 60 {
+            self.recent_completion_times.pop_back();
+        }
+        self.update_rate();
+    }
+    
+    /// Add a failed item to recent list (max 50)
+    pub fn add_failed(&mut self, item: QueuedAction) {
+        self.recent_failed.push_front(item);
+        if self.recent_failed.len() > 50 {
+            self.recent_failed.pop_back();
+        }
+        self.total_failed += 1;
+    }
+    
+    /// Update processing rate based on recent completions
+    fn update_rate(&mut self) {
+        if self.recent_completion_times.len() < 2 {
+            self.processing_rate = 0.0;
+            return;
+        }
+        
+        let now = Utc::now();
+        let one_minute_ago = now - chrono::Duration::minutes(1);
+        
+        // Count completions in last minute
+        let recent_count = self.recent_completion_times
+            .iter()
+            .filter(|t| **t > one_minute_ago)
+            .count();
+        
+        self.processing_rate = recent_count as f64;
+    }
+}
+
+// ============================================================================
+// Backfill Reconstructed Rounds Cache (in-memory only, NOT persisted)
+// ============================================================================
+
+/// A single deployment parsed from transactions for backfill (in-memory)
+#[derive(Debug, Clone, Serialize)]
+pub struct BackfillDeployment {
+    pub miner_pubkey: String,
+    pub square_id: u8,
+    pub amount: u64,
+    pub deployed_slot: u64,
+}
+
+/// Backfill reconstructed round data stored in memory awaiting finalization
+#[derive(Debug, Clone, Serialize)]
+pub struct BackfillReconstructedRound {
+    pub round_id: u64,
+    pub deployments: Vec<BackfillDeployment>,
+    pub winning_square: u8,
+    pub top_miner: String,
+    pub reconstructed_at: DateTime<Utc>,
+    pub transaction_count: usize,
+}
+
+/// Cache of backfill reconstructed rounds awaiting finalization
+/// This is IN-MEMORY ONLY - lost on restart, must be rebuilt
+#[derive(Debug, Default)]
+pub struct BackfillReconstructedCache {
+    /// Map of round_id -> reconstructed data
+    pub rounds: HashMap<u64, BackfillReconstructedRound>,
+}
+
+impl BackfillReconstructedCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    
+    /// Insert a reconstructed round
+    pub fn insert(&mut self, round: BackfillReconstructedRound) {
+        self.rounds.insert(round.round_id, round);
+    }
+    
+    /// Get a reconstructed round
+    pub fn get(&self, round_id: u64) -> Option<&BackfillReconstructedRound> {
+        self.rounds.get(&round_id)
+    }
+    
+    /// Remove a reconstructed round (after finalization)
+    pub fn remove(&mut self, round_id: u64) -> Option<BackfillReconstructedRound> {
+        self.rounds.remove(&round_id)
+    }
+    
+    /// Check if a round is reconstructed
+    pub fn contains(&self, round_id: u64) -> bool {
+        self.rounds.contains_key(&round_id)
+    }
+    
+    /// Get count of reconstructed rounds
+    pub fn len(&self) -> usize {
+        self.rounds.len()
+    }
+    
+    /// Get all round IDs
+    pub fn round_ids(&self) -> Vec<u64> {
+        self.rounds.keys().copied().collect()
+    }
 }
 
 /// Snapshot of round state captured when round ends (slots_left <= 0)
@@ -245,6 +411,8 @@ impl AppState {
             automation_task_stats: Arc::new(RwLock::new(AutomationTaskStats::default())),
             backfill_rounds_task_state: Arc::new(RwLock::new(BackfillRoundsTaskState::default())),
             backfill_rounds_cancel: Arc::new(RwLock::new(false)),
+            backfill_queue_cache: Arc::new(RwLock::new(BackfillQueueCache::new())),
+            backfill_reconstructed_cache: Arc::new(RwLock::new(BackfillReconstructedCache::new())),
         }
     }
     

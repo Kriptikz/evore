@@ -839,16 +839,35 @@ pub async fn backfill_round_deployments(
     
     let deployments_count = deployments.len() as u32;
     
-    // Store to ClickHouse
-    state.clickhouse.insert_deployments(deployments).await
-        .map_err(|e| format!("Failed to insert deployments: {}", e))?;
+    // Store IN MEMORY - NOT in PostgreSQL, NOT in ClickHouse
+    use crate::app_state::{BackfillReconstructedRound, BackfillDeployment};
     
-    // Update PostgreSQL status
-    update_round_status_reconstructed(&state.postgres, round_id, deployments_count as i32).await;
-    update_round_status_finalized(&state.postgres, round_id).await;
+    let reconstructed_deployments: Vec<BackfillDeployment> = deployments
+        .into_iter()
+        .map(|d| BackfillDeployment {
+            miner_pubkey: d.miner_pubkey,
+            square_id: d.square_id,
+            amount: d.amount,
+            deployed_slot: d.deployed_slot,
+        })
+        .collect();
+    
+    let reconstructed = BackfillReconstructedRound {
+        round_id,
+        deployments: reconstructed_deployments,
+        winning_square,
+        top_miner,
+        reconstructed_at: chrono::Utc::now(),
+        transaction_count: all_transactions.len(),
+    };
+    
+    {
+        let mut cache = state.backfill_reconstructed_cache.write().await;
+        cache.insert(reconstructed);
+    }
     
     tracing::info!(
-        "Round {} backfill complete: {} transactions -> {} deployments stored",
+        "Round {} reconstruct complete: {} transactions -> {} deployments (stored IN MEMORY - awaiting finalize)",
         round_id, all_transactions.len(), deployments_count
     );
     
@@ -856,8 +875,8 @@ pub async fn backfill_round_deployments(
         round_id,
         transactions_fetched: all_transactions.len() as u32,
         deployments_found: parsed_deployments.len() as u32,
-        deployments_stored: deployments_count,
-        status: "success".to_string(),
+        deployments_stored: 0, // Not stored to ClickHouse yet!
+        status: "reconstructed_in_memory".to_string(),
         error: None,
     })
 }
@@ -955,19 +974,69 @@ pub async fn finalize_backfill_round(
     State(state): State<Arc<AppState>>,
     Path(round_id): Path<u64>,
 ) -> Result<Json<FinalizeResponse>, (StatusCode, Json<ErrorResponse>)> {
+    use crate::clickhouse::DeploymentInsert;
+    
     tracing::info!("Finalizing backfill round {}", round_id);
     
-    // TODO: Implement finalization
-    // 1. Load reconstructed deployments
-    // 2. Store to ClickHouse deployments table
-    // 3. Update status
+    // Get reconstructed data from IN-MEMORY cache
+    let reconstructed = {
+        let mut cache = state.backfill_reconstructed_cache.write().await;
+        cache.remove(round_id)
+    };
     
+    let reconstructed = reconstructed.ok_or_else(|| {
+        (StatusCode::BAD_REQUEST, Json(ErrorResponse { 
+            error: format!("Round {} not found in memory. Run reconstruct first.", round_id) 
+        }))
+    })?;
+    
+    if reconstructed.deployments.is_empty() {
+        return Err((StatusCode::BAD_REQUEST, Json(ErrorResponse { 
+            error: "No deployments in reconstructed data".to_string() 
+        })));
+    }
+    
+    // Build deployment inserts from in-memory data
+    let deployments: Vec<DeploymentInsert> = reconstructed.deployments
+        .into_iter()
+        .map(|d| {
+            let is_winner = d.square_id == reconstructed.winning_square;
+            let is_top = d.miner_pubkey == reconstructed.top_miner;
+            
+            DeploymentInsert {
+                round_id,
+                miner_pubkey: d.miner_pubkey,
+                square_id: d.square_id,
+                amount: d.amount,
+                deployed_slot: d.deployed_slot,
+                ore_earned: 0,
+                sol_earned: 0,
+                is_winner: if is_winner { 1 } else { 0 },
+                is_top_miner: if is_top { 1 } else { 0 },
+            }
+        })
+        .collect();
+    
+    let deployments_count = deployments.len() as u32;
+    
+    // Store to ClickHouse
+    state.clickhouse.insert_deployments(deployments).await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { 
+            error: format!("Failed to insert deployments: {}", e) 
+        })))?;
+    
+    // Update status to finalized
     update_round_status_finalized(&state.postgres, round_id).await;
+    
+    tracing::info!(
+        "Round {} finalize complete: stored {} deployments to ClickHouse (removed from memory)",
+        round_id, deployments_count
+    );
     
     Ok(Json(FinalizeResponse {
         round_id,
-        deployments_stored: 0,
-        message: "Round finalized".to_string(),
+        deployments_stored: deployments_count,
+        message: format!("Stored {} deployments to ClickHouse", deployments_count),
     }))
 }
 
@@ -2530,5 +2599,504 @@ pub async fn get_rounds_with_transactions(
         page,
         limit,
     }))
+}
+
+// ============================================================================
+// Backfill Action Queue Worker
+// ============================================================================
+
+use crate::app_state::QueuedAction;
+
+/// Initialize the queue worker on startup
+/// - Resets any 'processing' items back to 'pending' (crashed mid-process)
+/// - Loads initial cache state from DB
+pub async fn init_queue_worker(state: Arc<AppState>) -> Result<(), sqlx::Error> {
+    let pool = &state.postgres;
+    
+    // Reset any items that were processing when server crashed
+    let reset_count = sqlx::query(
+        r#"
+        UPDATE backfill_action_queue 
+        SET status = 'pending', started_at = NULL 
+        WHERE status = 'processing'
+        "#
+    )
+    .execute(pool)
+    .await?
+    .rows_affected();
+    
+    if reset_count > 0 {
+        tracing::info!("Reset {} queue items from 'processing' to 'pending'", reset_count);
+    }
+    
+    // Load paused state
+    let paused: bool = sqlx::query_scalar(
+        "SELECT paused FROM backfill_queue_control WHERE id = 1"
+    )
+    .fetch_optional(pool)
+    .await?
+    .unwrap_or(false);
+    
+    // Load pending count
+    let pending_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM backfill_action_queue WHERE status = 'pending'"
+    )
+    .fetch_one(pool)
+    .await?;
+    
+    // Load recent completed
+    let recent_completed: Vec<QueuedAction> = sqlx::query_as(
+        r#"
+        SELECT id, round_id, action, status, queued_at, started_at, completed_at, error
+        FROM backfill_action_queue 
+        WHERE status = 'completed'
+        ORDER BY completed_at DESC
+        LIMIT 50
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+    
+    // Load recent failed
+    let recent_failed: Vec<QueuedAction> = sqlx::query_as(
+        r#"
+        SELECT id, round_id, action, status, queued_at, started_at, completed_at, error
+        FROM backfill_action_queue 
+        WHERE status = 'failed'
+        ORDER BY completed_at DESC
+        LIMIT 50
+        "#
+    )
+    .fetch_all(pool)
+    .await?;
+    
+    // Update cache
+    {
+        let mut cache = state.backfill_queue_cache.write().await;
+        cache.paused = paused;
+        cache.pending_count = pending_count as u64;
+        cache.recent_completed = recent_completed.into_iter().collect();
+        cache.recent_failed = recent_failed.into_iter().collect();
+        cache.last_sync = Some(chrono::Utc::now());
+    }
+    
+    tracing::info!(
+        "Queue worker initialized: {} pending, paused={}",
+        pending_count, paused
+    );
+    
+    Ok(())
+}
+
+/// Background task that processes the queue
+pub async fn run_queue_worker(state: Arc<AppState>) {
+    tracing::info!("Starting backfill action queue worker");
+    
+    loop {
+        // Check if paused
+        let paused = {
+            let cache = state.backfill_queue_cache.read().await;
+            cache.paused
+        };
+        
+        if paused {
+            tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            continue;
+        }
+        
+        // Try to fetch and process next item
+        match process_next_queue_item(&state).await {
+            Ok(true) => {
+                // Processed an item, continue immediately
+            }
+            Ok(false) => {
+                // No items to process, wait a bit
+                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+            }
+            Err(e) => {
+                tracing::error!("Queue worker error: {}", e);
+                tokio::time::sleep(tokio::time::Duration::from_millis(1000)).await;
+            }
+        }
+    }
+}
+
+/// Process the next item in the queue
+/// Returns Ok(true) if an item was processed, Ok(false) if queue is empty
+async fn process_next_queue_item(state: &Arc<AppState>) -> Result<bool, String> {
+    let pool = &state.postgres;
+    
+    // Fetch next pending item with row lock
+    let item: Option<QueuedAction> = sqlx::query_as(
+        r#"
+        SELECT id, round_id, action, status, queued_at, started_at, completed_at, error
+        FROM backfill_action_queue 
+        WHERE status = 'pending'
+        ORDER BY queued_at ASC
+        LIMIT 1
+        FOR UPDATE SKIP LOCKED
+        "#
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| format!("Failed to fetch queue item: {}", e))?;
+    
+    let item = match item {
+        Some(i) => i,
+        None => return Ok(false),
+    };
+    
+    tracing::info!(
+        "Processing queue item {}: round {} action {}",
+        item.id, item.round_id, item.action
+    );
+    
+    // Mark as processing
+    sqlx::query(
+        "UPDATE backfill_action_queue SET status = 'processing', started_at = NOW() WHERE id = $1"
+    )
+    .bind(item.id)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to mark item as processing: {}", e))?;
+    
+    // Update cache
+    {
+        let mut cache = state.backfill_queue_cache.write().await;
+        cache.processing = Some(item.clone());
+        cache.pending_count = cache.pending_count.saturating_sub(1);
+    }
+    
+    // Execute the action
+    let result = execute_queue_action(state, &item).await;
+    
+    // Update status based on result
+    match result {
+        Ok(()) => {
+            sqlx::query(
+                "UPDATE backfill_action_queue SET status = 'completed', completed_at = NOW() WHERE id = $1"
+            )
+            .bind(item.id)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to mark item as completed: {}", e))?;
+            
+            // Update cache
+            let mut completed_item = item.clone();
+            completed_item.status = "completed".to_string();
+            completed_item.completed_at = Some(chrono::Utc::now());
+            
+            {
+                let mut cache = state.backfill_queue_cache.write().await;
+                cache.processing = None;
+                cache.add_completed(completed_item);
+            }
+            
+            tracing::info!(
+                "Queue item {} completed: round {} action {}",
+                item.id, item.round_id, item.action
+            );
+        }
+        Err(error) => {
+            sqlx::query(
+                "UPDATE backfill_action_queue SET status = 'failed', completed_at = NOW(), error = $2 WHERE id = $1"
+            )
+            .bind(item.id)
+            .bind(&error)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("Failed to mark item as failed: {}", e))?;
+            
+            // Update cache
+            let mut failed_item = item.clone();
+            failed_item.status = "failed".to_string();
+            failed_item.completed_at = Some(chrono::Utc::now());
+            failed_item.error = Some(error.clone());
+            
+            {
+                let mut cache = state.backfill_queue_cache.write().await;
+                cache.processing = None;
+                cache.add_failed(failed_item);
+            }
+            
+            tracing::error!(
+                "Queue item {} failed: round {} action {} - {}",
+                item.id, item.round_id, item.action, error
+            );
+        }
+    }
+    
+    Ok(true)
+}
+
+/// Execute a single queue action
+async fn execute_queue_action(state: &Arc<AppState>, item: &QueuedAction) -> Result<(), String> {
+    let round_id = item.round_id as u64;
+    
+    match item.action.as_str() {
+        "fetch_txns" => {
+            execute_fetch_txns(state, round_id).await
+        }
+        "reconstruct" => {
+            execute_reconstruct(state, round_id).await
+        }
+        "finalize" => {
+            execute_finalize(state, round_id).await
+        }
+        _ => {
+            Err(format!("Unknown action: {}", item.action))
+        }
+    }
+}
+
+/// Execute fetch_txns action (reuses existing logic from fetch_round_transactions)
+async fn execute_fetch_txns(state: &Arc<AppState>, round_id: u64) -> Result<(), String> {
+    use crate::clickhouse::RawTransaction;
+    
+    // Fetch all pages of transactions from Helius
+    let mut all_transactions = Vec::new();
+    let mut pagination_token: Option<String> = None;
+    let mut page_count = 0u32;
+    
+    loop {
+        let mut helius = state.helius.write().await;
+        let result = helius.get_transactions_for_round(round_id, pagination_token.clone()).await;
+        
+        match result {
+            Ok(page) => {
+                let tx_count = page.transactions.len();
+                all_transactions.extend(page.transactions);
+                page_count += 1;
+                
+                tracing::debug!(
+                    "Queue: Round {} fetch page {} with {} txns (total: {})",
+                    round_id, page_count, tx_count, all_transactions.len()
+                );
+                
+                if page.pagination_token.is_none() {
+                    break;
+                }
+                pagination_token = page.pagination_token;
+                
+                if page_count > 100 {
+                    tracing::warn!("Queue: Round {} hit page limit", round_id);
+                    break;
+                }
+            }
+            Err(e) => {
+                return Err(format!("Helius error: {}", e));
+            }
+        }
+    }
+    
+    if all_transactions.is_empty() {
+        return Err("No transactions found".to_string());
+    }
+    
+    // Convert to RawTransaction for storage
+    let mut raw_txs: Vec<RawTransaction> = Vec::new();
+    
+    for tx in &all_transactions {
+        let signature = tx
+            .get("transaction")
+            .and_then(|t| t.get("signatures"))
+            .and_then(|s| s.as_array())
+            .and_then(|sigs| sigs.get(0))
+            .and_then(|s| s.as_str())
+            .unwrap_or_default()
+            .to_string();
+        
+        let slot = tx.get("slot").and_then(|s| s.as_u64()).unwrap_or(0);
+        let block_time = tx.get("blockTime").and_then(|t| t.as_i64()).unwrap_or(0);
+        
+        let signer = tx
+            .get("transaction")
+            .and_then(|t| t.get("message"))
+            .and_then(|m| m.get("accountKeys"))
+            .and_then(|a| a.as_array())
+            .and_then(|keys| keys.get(0))
+            .and_then(|k| k.as_str())
+            .unwrap_or_default()
+            .to_string();
+        
+        raw_txs.push(RawTransaction {
+            signature,
+            slot,
+            block_time,
+            round_id,
+            tx_type: "deploy".to_string(),
+            raw_json: tx.to_string(),
+            signer,
+            authority: String::new(),
+        });
+    }
+    
+    // Store in ClickHouse
+    state.clickhouse.insert_raw_transactions(raw_txs).await
+        .map_err(|e| format!("ClickHouse insert error: {}", e))?;
+    
+    // Update round_reconstruction_status
+    update_round_status_txns_fetched(&state.postgres, round_id, all_transactions.len() as i32).await;
+    
+    tracing::info!(
+        "Queue: Stored {} transactions for round {}",
+        all_transactions.len(), round_id
+    );
+    
+    Ok(())
+}
+
+/// Execute reconstruct action - PARSE and store IN MEMORY ONLY
+/// Deployments are stored to ClickHouse during finalize step after verification
+async fn execute_reconstruct(state: &Arc<AppState>, round_id: u64) -> Result<(), String> {
+    use crate::app_state::{BackfillReconstructedRound, BackfillDeployment};
+    use std::collections::HashMap;
+    
+    // Get stored transactions from ClickHouse
+    let raw_transactions = state.clickhouse.get_raw_transactions_for_round(round_id).await
+        .map_err(|e| format!("Failed to get stored transactions: {}", e))?;
+    
+    if raw_transactions.is_empty() {
+        return Err("No transactions stored. Run fetch_txns first.".to_string());
+    }
+    
+    // Get round info
+    let round_info = state.clickhouse.get_round_by_id(round_id).await
+        .map_err(|e| format!("Failed to get round info: {}", e))?
+        .ok_or_else(|| format!("Round {} not found in ClickHouse", round_id))?;
+    
+    // Parse raw_json back to Value for processing
+    let mut all_transactions: Vec<serde_json::Value> = Vec::new();
+    for raw_tx in &raw_transactions {
+        if let Ok(tx) = serde_json::from_str(&raw_tx.raw_json) {
+            all_transactions.push(tx);
+        }
+    }
+    
+    if all_transactions.is_empty() {
+        return Err("Failed to parse any stored transactions".to_string());
+    }
+    
+    // Derive the round PDA
+    let (round_pda, _) = evore::ore_api::round_pda(round_id);
+    
+    // Parse deployments
+    let helius = state.helius.read().await;
+    let parsed_deployments = helius.parse_deployments_from_round_page(&round_pda, &all_transactions)
+        .map_err(|e| format!("Failed to parse deployments: {}", e))?;
+    
+    // Aggregate deployments per miner per square
+    let mut miner_squares: HashMap<(String, u8), (u64, u64)> = HashMap::new();
+    
+    for pd in &parsed_deployments {
+        let miner_pubkey = pd.authority.to_string();
+        
+        for (square_idx, is_deployed) in pd.squares.iter().enumerate() {
+            if *is_deployed {
+                let square_id = square_idx as u8;
+                let key = (miner_pubkey.clone(), square_id);
+                
+                miner_squares.entry(key)
+                    .and_modify(|(amt, slot)| {
+                        *amt += pd.amount_per_square;
+                        if pd.slot < *slot {
+                            *slot = pd.slot;
+                        }
+                    })
+                    .or_insert((pd.amount_per_square, pd.slot));
+            }
+        }
+    }
+    
+    // Build reconstructed deployments
+    let deployments: Vec<BackfillDeployment> = miner_squares
+        .into_iter()
+        .map(|((miner_pubkey, square_id), (amount, slot))| {
+            BackfillDeployment {
+                miner_pubkey,
+                square_id,
+                amount,
+                deployed_slot: slot,
+            }
+        })
+        .collect();
+    
+    let deployment_count = deployments.len();
+    
+    // Store IN MEMORY - NOT in PostgreSQL, NOT in ClickHouse
+    let reconstructed = BackfillReconstructedRound {
+        round_id,
+        deployments,
+        winning_square: round_info.winning_square,
+        top_miner: round_info.top_miner,
+        reconstructed_at: chrono::Utc::now(),
+        transaction_count: all_transactions.len(),
+    };
+    
+    {
+        let mut cache = state.backfill_reconstructed_cache.write().await;
+        cache.insert(reconstructed);
+    }
+    
+    tracing::info!(
+        "Queue: Reconstructed {} deployments for round {} (stored IN MEMORY - awaiting verification)",
+        deployment_count, round_id
+    );
+    
+    Ok(())
+}
+
+/// Execute finalize action - Read from IN-MEMORY cache and store to ClickHouse
+/// This reads the reconstructed data from memory and stores it
+async fn execute_finalize(state: &Arc<AppState>, round_id: u64) -> Result<(), String> {
+    use crate::clickhouse::DeploymentInsert;
+    
+    // Get reconstructed data from IN-MEMORY cache
+    let reconstructed = {
+        let mut cache = state.backfill_reconstructed_cache.write().await;
+        cache.remove(round_id)
+            .ok_or_else(|| format!("Round {} not found in memory. Run reconstruct first.", round_id))?
+    };
+    
+    if reconstructed.deployments.is_empty() {
+        return Err("No deployments in reconstructed data".to_string());
+    }
+    
+    // Build deployment inserts from in-memory data
+    let deployments: Vec<DeploymentInsert> = reconstructed.deployments
+        .into_iter()
+        .map(|d| {
+            let is_winner = d.square_id == reconstructed.winning_square;
+            let is_top = d.miner_pubkey == reconstructed.top_miner;
+            
+            DeploymentInsert {
+                round_id,
+                miner_pubkey: d.miner_pubkey,
+                square_id: d.square_id,
+                amount: d.amount,
+                deployed_slot: d.deployed_slot,
+                ore_earned: 0,
+                sol_earned: 0,
+                is_winner: if is_winner { 1 } else { 0 },
+                is_top_miner: if is_top { 1 } else { 0 },
+            }
+        })
+        .collect();
+    
+    let deployments_count = deployments.len();
+    
+    // Store to ClickHouse
+    state.clickhouse.insert_deployments(deployments).await
+        .map_err(|e| format!("Failed to insert deployments: {}", e))?;
+    
+    // Update PostgreSQL status to finalized (this is the only PG update for the whole flow)
+    update_round_status_finalized(&state.postgres, round_id).await;
+    
+    tracing::info!(
+        "Queue: Finalized round {} - stored {} deployments to ClickHouse (removed from memory)",
+        round_id, deployments_count
+    );
+    
+    Ok(())
 }
 

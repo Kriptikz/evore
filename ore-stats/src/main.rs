@@ -194,6 +194,17 @@ async fn main() -> anyhow::Result<()> {
     automation_states::spawn_transaction_parse_task(state.clone());
     tracing::info!("Transaction parse queue task started");
     
+    // Backfill action queue worker
+    if let Err(e) = backfill::init_queue_worker(state.clone()).await {
+        tracing::warn!("Failed to initialize queue worker: {}", e);
+    } else {
+        let queue_state = state.clone();
+        tokio::spawn(async move {
+            backfill::run_queue_worker(queue_state).await;
+        });
+        tracing::info!("Backfill action queue worker started");
+    }
+    
     // ========== Axum Router ==========
     
     let app = Router::new()

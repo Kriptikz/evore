@@ -1012,6 +1012,677 @@ pub async fn get_database_sizes(
 }
 
 // ============================================================================
+// Backfill Action Queue Handlers
+// ============================================================================
+
+use crate::app_state::QueuedAction;
+
+#[derive(Debug, Serialize)]
+pub struct QueueStatusResponse {
+    pub paused: bool,
+    pub pending_count: u64,
+    pub processing: Option<QueuedAction>,
+    pub total_processed: u64,
+    pub total_failed: u64,
+    pub processing_rate: f64,
+    pub recent_completed: Vec<QueuedAction>,
+    pub recent_failed: Vec<QueuedAction>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct BulkEnqueueRequest {
+    pub start_round: u64,
+    pub end_round: u64,
+    pub action: String,
+    #[serde(default)]
+    pub skip_if_done: bool,
+    #[serde(default)]
+    pub only_in_workflow: bool,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkEnqueueResponse {
+    pub queued: u64,
+    pub skipped: u64,
+    pub message: String,
+}
+
+/// GET /admin/backfill/queue/status
+/// Get current queue status
+pub async fn get_queue_status(
+    State(state): State<Arc<AppState>>,
+) -> Json<QueueStatusResponse> {
+    let cache = state.backfill_queue_cache.read().await;
+    
+    Json(QueueStatusResponse {
+        paused: cache.paused,
+        pending_count: cache.pending_count,
+        processing: cache.processing.clone(),
+        total_processed: cache.total_processed,
+        total_failed: cache.total_failed,
+        processing_rate: cache.processing_rate,
+        recent_completed: cache.recent_completed.iter().cloned().collect(),
+        recent_failed: cache.recent_failed.iter().cloned().collect(),
+    })
+}
+
+/// POST /admin/backfill/queue/enqueue
+/// Bulk enqueue actions for a range of rounds
+pub async fn enqueue_actions(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkEnqueueRequest>,
+) -> Result<Json<BulkEnqueueResponse>, (StatusCode, Json<AuthError>)> {
+    // Validate action
+    let valid_actions = ["fetch_txns", "reconstruct", "finalize"];
+    if !valid_actions.contains(&req.action.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(AuthError { error: format!("Invalid action: {}. Valid: {:?}", req.action, valid_actions) }),
+        ));
+    }
+    
+    let pool = &state.postgres;
+    let mut queued = 0u64;
+    let mut skipped = 0u64;
+    
+    // Get rounds to process
+    let rounds: Vec<i64> = if req.only_in_workflow {
+        // Only rounds already in the workflow
+        sqlx::query_scalar(
+            r#"
+            SELECT round_id FROM round_reconstruction_status 
+            WHERE round_id >= $1 AND round_id <= $2
+            ORDER BY round_id
+            "#
+        )
+        .bind(req.start_round as i64)
+        .bind(req.end_round as i64)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() }))
+        })?
+    } else {
+        // All rounds in range
+        (req.start_round..=req.end_round).map(|r| r as i64).collect()
+    };
+    
+    for round_id in rounds {
+        // Check if should skip based on existing status
+        if req.skip_if_done {
+            let should_skip: bool = match req.action.as_str() {
+                "fetch_txns" => {
+                    sqlx::query_scalar(
+                        "SELECT transactions_fetched FROM round_reconstruction_status WHERE round_id = $1"
+                    )
+                    .bind(round_id)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+                }
+                "reconstruct" => {
+                    sqlx::query_scalar(
+                        "SELECT reconstructed FROM round_reconstruction_status WHERE round_id = $1"
+                    )
+                    .bind(round_id)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+                }
+                "finalize" => {
+                    sqlx::query_scalar(
+                        "SELECT finalized FROM round_reconstruction_status WHERE round_id = $1"
+                    )
+                    .bind(round_id)
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten()
+                    .unwrap_or(false)
+                }
+                _ => false,
+            };
+            
+            if should_skip {
+                skipped += 1;
+                continue;
+            }
+        }
+        
+        // Insert into queue (ignore duplicates due to unique index)
+        let result = sqlx::query(
+            r#"
+            INSERT INTO backfill_action_queue (round_id, action, status, queued_at)
+            VALUES ($1, $2, 'pending', NOW())
+            ON CONFLICT DO NOTHING
+            "#
+        )
+        .bind(round_id)
+        .bind(&req.action)
+        .execute(pool)
+        .await;
+        
+        match result {
+            Ok(r) if r.rows_affected() > 0 => queued += 1,
+            Ok(_) => skipped += 1, // Already in queue
+            Err(_) => skipped += 1,
+        }
+    }
+    
+    // Update cache pending count
+    {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM backfill_action_queue WHERE status = 'pending'"
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        
+        let mut cache = state.backfill_queue_cache.write().await;
+        cache.pending_count = pending as u64;
+    }
+    
+    Ok(Json(BulkEnqueueResponse {
+        queued,
+        skipped,
+        message: format!("Enqueued {} rounds, skipped {}", queued, skipped),
+    }))
+}
+
+/// POST /admin/backfill/queue/pause
+pub async fn pause_queue(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<AuthError>)> {
+    let pool = &state.postgres;
+    
+    sqlx::query("UPDATE backfill_queue_control SET paused = true, updated_at = NOW() WHERE id = 1")
+        .execute(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?;
+    
+    {
+        let mut cache = state.backfill_queue_cache.write().await;
+        cache.paused = true;
+    }
+    
+    Ok(Json(MessageResponse { message: "Queue paused".to_string() }))
+}
+
+/// POST /admin/backfill/queue/resume
+pub async fn resume_queue(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<AuthError>)> {
+    let pool = &state.postgres;
+    
+    sqlx::query("UPDATE backfill_queue_control SET paused = false, updated_at = NOW() WHERE id = 1")
+        .execute(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?;
+    
+    {
+        let mut cache = state.backfill_queue_cache.write().await;
+        cache.paused = false;
+    }
+    
+    Ok(Json(MessageResponse { message: "Queue resumed".to_string() }))
+}
+
+/// POST /admin/backfill/queue/clear
+pub async fn clear_queue(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<AuthError>)> {
+    let pool = &state.postgres;
+    
+    let deleted = sqlx::query("DELETE FROM backfill_action_queue WHERE status = 'pending'")
+        .execute(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?
+        .rows_affected();
+    
+    {
+        let mut cache = state.backfill_queue_cache.write().await;
+        cache.pending_count = 0;
+    }
+    
+    Ok(Json(MessageResponse { message: format!("Cleared {} pending items", deleted) }))
+}
+
+/// POST /admin/backfill/queue/retry-failed
+pub async fn retry_failed_items(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<MessageResponse>, (StatusCode, Json<AuthError>)> {
+    let pool = &state.postgres;
+    
+    let updated = sqlx::query(
+        r#"
+        UPDATE backfill_action_queue 
+        SET status = 'pending', error = NULL, started_at = NULL, completed_at = NULL, queued_at = NOW()
+        WHERE status = 'failed'
+        "#
+    )
+    .execute(pool)
+    .await
+    .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?
+    .rows_affected();
+    
+    // Update cache
+    {
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM backfill_action_queue WHERE status = 'pending'"
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap_or(0);
+        
+        let mut cache = state.backfill_queue_cache.write().await;
+        cache.pending_count = pending as u64;
+        cache.recent_failed.clear();
+    }
+    
+    Ok(Json(MessageResponse { message: format!("Retrying {} failed items", updated) }))
+}
+
+// ============================================================================
+// Bulk Verify & Range Add Handlers
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct BulkVerifyRequest {
+    /// List of specific round IDs to verify
+    #[serde(default)]
+    pub round_ids: Vec<u64>,
+    /// Or specify a range
+    pub start_round: Option<u64>,
+    pub end_round: Option<u64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct BulkVerifyResponse {
+    pub verified: u64,
+    pub message: String,
+}
+
+/// POST /admin/backfill/bulk-verify
+/// Bulk mark rounds as verified
+pub async fn bulk_verify_rounds(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<BulkVerifyRequest>,
+) -> Result<Json<BulkVerifyResponse>, (StatusCode, Json<AuthError>)> {
+    let pool = &state.postgres;
+    let mut verified = 0u64;
+    
+    if !req.round_ids.is_empty() {
+        // Verify specific round IDs
+        for round_id in &req.round_ids {
+            let result = sqlx::query(
+                r#"
+                UPDATE round_reconstruction_status
+                SET verified = true, verified_at = NOW(), verification_notes = 'Bulk verified via Command Center'
+                WHERE round_id = $1 AND reconstructed = true
+                "#
+            )
+            .bind(*round_id as i64)
+            .execute(pool)
+            .await;
+            
+            if let Ok(r) = result {
+                verified += r.rows_affected();
+            }
+        }
+    } else if let (Some(start), Some(end)) = (req.start_round, req.end_round) {
+        // Verify range
+        let result = sqlx::query(
+            r#"
+            UPDATE round_reconstruction_status
+            SET verified = true, verified_at = NOW(), verification_notes = 'Bulk verified via Command Center'
+            WHERE round_id >= $1 AND round_id <= $2 AND reconstructed = true
+            "#
+        )
+        .bind(start as i64)
+        .bind(end as i64)
+        .execute(pool)
+        .await
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() })))?;
+        
+        verified = result.rows_affected();
+    }
+    
+    Ok(Json(BulkVerifyResponse {
+        verified,
+        message: format!("Marked {} rounds as verified", verified),
+    }))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AddRangeToBackfillRequest {
+    pub start_round: u64,
+    pub end_round: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AddRangeToBackfillResponse {
+    pub added: u64,
+    pub already_in_workflow: u64,
+    pub message: String,
+}
+
+/// POST /admin/backfill/add-range
+/// Add a range of rounds to the backfill workflow
+/// Only adds rounds that aren't already in the workflow
+/// Marks meta_fetched as true since we already have round data
+pub async fn add_range_to_backfill(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<AddRangeToBackfillRequest>,
+) -> Result<Json<AddRangeToBackfillResponse>, (StatusCode, Json<AuthError>)> {
+    let pool = &state.postgres;
+    let mut added = 0u64;
+    let mut already_in_workflow = 0u64;
+    
+    for round_id in req.start_round..=req.end_round {
+        // Check if round exists in workflow
+        let exists: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM round_reconstruction_status WHERE round_id = $1)"
+        )
+        .bind(round_id as i64)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        
+        if exists {
+            already_in_workflow += 1;
+            continue;
+        }
+        
+        // Insert new round with meta_fetched = true
+        let result = sqlx::query(
+            r#"
+            INSERT INTO round_reconstruction_status (round_id, meta_fetched, transactions_fetched, reconstructed, verified, finalized, created_at)
+            VALUES ($1, true, false, false, false, false, NOW())
+            ON CONFLICT (round_id) DO NOTHING
+            "#
+        )
+        .bind(round_id as i64)
+        .execute(pool)
+        .await;
+        
+        if let Ok(r) = result {
+            if r.rows_affected() > 0 {
+                added += 1;
+            } else {
+                already_in_workflow += 1;
+            }
+        }
+    }
+    
+    Ok(Json(AddRangeToBackfillResponse {
+        added,
+        already_in_workflow,
+        message: format!("Added {} rounds to workflow, {} already existed", added, already_in_workflow),
+    }))
+}
+
+// ============================================================================
+// Pipeline Stats & Memory Handlers
+// ============================================================================
+
+#[derive(Debug, Serialize)]
+pub struct PipelineStatsResponse {
+    /// Rounds with invalid deployments, not in workflow
+    pub not_in_workflow: u64,
+    /// In workflow, transactions not fetched
+    pub pending_txns: u64,
+    /// Txns fetched, not reconstructed
+    pub pending_reconstruct: u64,
+    /// Reconstructed, not verified
+    pub pending_verify: u64,
+    /// Verified, not finalized
+    pub pending_finalize: u64,
+    /// Finalized (complete)
+    pub complete: u64,
+}
+
+/// GET /admin/backfill/pipeline-stats
+/// Get counts for each stage of the pipeline
+pub async fn get_pipeline_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<PipelineStatsResponse>, (StatusCode, Json<AuthError>)> {
+    let pool = &state.postgres;
+    
+    // Count rounds not in workflow but with invalid deployments (deployment_count = 0)
+    // We query ClickHouse for rounds with 0 deployments and check if they're in the workflow
+    let not_in_workflow: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM (
+            SELECT round_id FROM round_reconstruction_status WHERE meta_fetched = true
+        ) AS workflow
+        RIGHT JOIN (
+            SELECT generate_series(1, (SELECT MAX(round_id) FROM round_reconstruction_status)) AS round_id
+        ) AS all_rounds ON workflow.round_id = all_rounds.round_id
+        WHERE workflow.round_id IS NULL
+        "#
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    
+    // Pending txns: in workflow, meta fetched, but txns not fetched
+    let pending_txns: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM round_reconstruction_status WHERE meta_fetched = true AND transactions_fetched = false"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    
+    // Pending reconstruct: txns fetched but not finalized AND not in memory
+    // A round needs reconstruct if: txns fetched, not finalized, and not in the in-memory cache
+    let finalized_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM round_reconstruction_status WHERE finalized = true"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    
+    let txns_fetched_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM round_reconstruction_status WHERE transactions_fetched = true"
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(0);
+    
+    // Pending verify = count of rounds IN MEMORY (reconstructed but not finalized)
+    let pending_verify = {
+        let cache = state.backfill_reconstructed_cache.read().await;
+        cache.len() as u64
+    };
+    
+    // Pending reconstruct = txns_fetched - finalized - in_memory
+    let pending_reconstruct = (txns_fetched_count as u64)
+        .saturating_sub(finalized_count as u64)
+        .saturating_sub(pending_verify);
+    
+    // Complete: finalized
+    let complete = finalized_count as u64;
+    
+    // Pending finalize is 0 - finalize happens immediately when called on in-memory data
+    // (the old "verified but not finalized" state doesn't exist anymore)
+    let pending_finalize = 0u64;
+    
+    Ok(Json(PipelineStatsResponse {
+        not_in_workflow: not_in_workflow as u64,
+        pending_txns: pending_txns as u64,
+        pending_reconstruct,
+        pending_verify,
+        pending_finalize,
+        complete,
+    }))
+}
+
+#[derive(Debug, Serialize)]
+pub struct MemoryUsageResponse {
+    /// Process memory usage in bytes
+    pub memory_bytes: u64,
+    /// Process memory in human readable format
+    pub memory_human: String,
+    /// Queue cache size estimate
+    pub queue_cache_items: u64,
+}
+
+/// GET /admin/backfill/memory
+/// Get current memory usage
+pub async fn get_memory_usage(
+    State(state): State<Arc<AppState>>,
+) -> Json<MemoryUsageResponse> {
+    // Try to get memory usage from /proc/self/statm (Linux)
+    // On macOS, fall back to a different method
+    let memory_bytes = get_process_memory();
+    
+    let memory_human = if memory_bytes > 1_073_741_824 {
+        format!("{:.2} GB", memory_bytes as f64 / 1_073_741_824.0)
+    } else if memory_bytes > 1_048_576 {
+        format!("{:.2} MB", memory_bytes as f64 / 1_048_576.0)
+    } else {
+        format!("{} KB", memory_bytes / 1024)
+    };
+    
+    let queue_cache_items = {
+        let cache = state.backfill_queue_cache.blocking_read();
+        cache.recent_completed.len() as u64 + cache.recent_failed.len() as u64
+    };
+    
+    Json(MemoryUsageResponse {
+        memory_bytes,
+        memory_human,
+        queue_cache_items,
+    })
+}
+
+fn get_process_memory() -> u64 {
+    // Try Linux /proc/self/statm
+    if let Ok(content) = std::fs::read_to_string("/proc/self/statm") {
+        let parts: Vec<&str> = content.split_whitespace().collect();
+        if let Some(pages) = parts.get(1) {
+            if let Ok(pages) = pages.parse::<u64>() {
+                return pages * 4096; // Page size is typically 4KB
+            }
+        }
+    }
+    
+    // Fallback: try using sysinfo or return 0
+    0
+}
+
+// ============================================================================
+// Invalid Rounds Query
+// ============================================================================
+
+#[derive(Debug, Deserialize)]
+pub struct InvalidRoundsQuery {
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+    #[serde(default)]
+    pub offset: u32,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InvalidRoundsResponse {
+    pub rounds: Vec<InvalidRound>,
+    pub total: u64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct InvalidRound {
+    pub round_id: u64,
+    pub deployment_count: i64,
+    pub in_workflow: bool,
+}
+
+/// GET /admin/backfill/reconstructed
+/// Get list of rounds currently reconstructed in memory (awaiting finalize)
+pub async fn get_reconstructed_rounds(
+    State(state): State<Arc<AppState>>,
+) -> Json<ReconstructedRoundsResponse> {
+    let cache = state.backfill_reconstructed_cache.read().await;
+    
+    let rounds: Vec<ReconstructedRoundInfo> = cache.rounds
+        .values()
+        .map(|r| ReconstructedRoundInfo {
+            round_id: r.round_id,
+            deployment_count: r.deployments.len(),
+            transaction_count: r.transaction_count,
+            reconstructed_at: r.reconstructed_at.to_rfc3339(),
+        })
+        .collect();
+    
+    Json(ReconstructedRoundsResponse {
+        count: rounds.len(),
+        rounds,
+    })
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReconstructedRoundsResponse {
+    pub count: usize,
+    pub rounds: Vec<ReconstructedRoundInfo>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ReconstructedRoundInfo {
+    pub round_id: u64,
+    pub deployment_count: usize,
+    pub transaction_count: usize,
+    pub reconstructed_at: String,
+}
+
+/// GET /admin/backfill/invalid-rounds
+/// Get rounds with invalid/missing deployments that aren't in the workflow
+pub async fn get_invalid_rounds(
+    State(state): State<Arc<AppState>>,
+    Query(params): Query<InvalidRoundsQuery>,
+) -> Result<Json<InvalidRoundsResponse>, (StatusCode, Json<AuthError>)> {
+    // Query ClickHouse for rounds with 0 deployments
+    let invalid_from_ch = state.clickhouse.get_rounds_with_zero_deployments(params.limit, params.offset)
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get invalid rounds from ClickHouse: {}", e);
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(AuthError { error: e.to_string() }))
+        })?;
+    
+    let pool = &state.postgres;
+    
+    // Check which rounds are in the workflow
+    let mut rounds = Vec::new();
+    for (round_id, deployment_count) in invalid_from_ch {
+        let in_workflow: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM round_reconstruction_status WHERE round_id = $1)"
+        )
+        .bind(round_id as i64)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false);
+        
+        rounds.push(InvalidRound {
+            round_id,
+            deployment_count,
+            in_workflow,
+        });
+    }
+    
+    // Get total count of invalid rounds
+    let total = state.clickhouse.count_rounds_with_zero_deployments()
+        .await
+        .unwrap_or(0);
+    
+    Ok(Json(InvalidRoundsResponse {
+        rounds,
+        total,
+    }))
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 
@@ -1084,6 +1755,19 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/automation/parse-queue", get(crate::automation_states::get_parse_queue_stats))
         .route("/automation/parse-queue/items", get(crate::automation_states::get_parse_queue_items))
         .route("/automation/queue-round/{round_id}", post(crate::automation_states::queue_round_for_parsing))
+        // Backfill action queue (Command Center)
+        .route("/backfill/queue/status", get(get_queue_status))
+        .route("/backfill/queue/enqueue", post(enqueue_actions))
+        .route("/backfill/queue/pause", post(pause_queue))
+        .route("/backfill/queue/resume", post(resume_queue))
+        .route("/backfill/queue/clear", post(clear_queue))
+        .route("/backfill/queue/retry-failed", post(retry_failed_items))
+        .route("/backfill/bulk-verify", post(bulk_verify_rounds))
+        .route("/backfill/add-range", post(add_range_to_backfill))
+        .route("/backfill/pipeline-stats", get(get_pipeline_stats))
+        .route("/backfill/memory", get(get_memory_usage))
+        .route("/backfill/invalid-rounds", get(get_invalid_rounds))
+        .route("/backfill/reconstructed", get(get_reconstructed_rounds))
         .layer(axum::middleware::from_fn_with_state(
             state.clone(),
             admin_auth::require_admin_auth,

@@ -2452,6 +2452,47 @@ impl ClickHouseClient {
                 .unwrap_or_else(|| r.created_at.to_string()),
         }).collect())
     }
+    
+    // ========== Backfill Command Center Queries ==========
+    
+    /// Get rounds with zero deployments (invalid rounds needing backfill)
+    pub async fn get_rounds_with_zero_deployments(&self, limit: u32, offset: u32) -> anyhow::Result<Vec<(u64, i64)>> {
+        let query = format!(
+            r#"
+            SELECT r.round_id, COALESCE(d.cnt, 0) as deployment_count
+            FROM ore_stats.rounds r
+            LEFT JOIN (
+                SELECT round_id, COUNT(*) as cnt
+                FROM ore_stats.deployments
+                GROUP BY round_id
+            ) d ON r.round_id = d.round_id
+            WHERE COALESCE(d.cnt, 0) = 0
+            ORDER BY r.round_id DESC
+            LIMIT {} OFFSET {}
+            "#,
+            limit, offset
+        );
+        
+        let rows: Vec<(u64, i64)> = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Count total rounds with zero deployments
+    pub async fn count_rounds_with_zero_deployments(&self) -> anyhow::Result<u64> {
+        let query = r#"
+            SELECT COUNT(*) as cnt
+            FROM ore_stats.rounds r
+            LEFT JOIN (
+                SELECT round_id, COUNT(*) as cnt
+                FROM ore_stats.deployments
+                GROUP BY round_id
+            ) d ON r.round_id = d.round_id
+            WHERE COALESCE(d.cnt, 0) = 0
+        "#;
+        
+        let count: u64 = self.client.query(query).fetch_one().await?;
+        Ok(count)
+    }
 }
 
 // ========== Row Types ==========
