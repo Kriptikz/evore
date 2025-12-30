@@ -246,6 +246,11 @@ pub async fn backfill_rounds(
     tracing::info!("Starting backfill, stop_at_round={}, max_pages={}", stop_at_round, max_pages);
     
     for page in 0..max_pages {
+        // Rate limit: 1 page per second to avoid spamming external API
+        if page > 0 {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        
         // Fetch from external API
         let rounds = get_ore_supply_rounds(page as u64).await;
         
