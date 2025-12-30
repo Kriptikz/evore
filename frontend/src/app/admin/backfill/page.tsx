@@ -1,10 +1,10 @@
 "use client";
 
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { useAdmin } from "@/context/AdminContext";
-import { api, RoundStatus, RoundWithData, RoundStatsResponse, FilterMode } from "@/lib/api";
+import { api, RoundStatus, RoundWithData, RoundStatsResponse, FilterMode, BackfillRoundsTaskState } from "@/lib/api";
 
 type WorkflowStep = "meta" | "txns" | "reconstruct" | "verify" | "finalize";
 type Tab = "backfill" | "data";
@@ -198,8 +198,10 @@ export default function BackfillPage() {
 
   // Backfill form state
   const [stopAtRound, setStopAtRound] = useState<string>("");
-  const [maxPages, setMaxPages] = useState<string>("10");
+  const [maxPages, setMaxPages] = useState<string>("10000");
   const [backfillLoading, setBackfillLoading] = useState(false);
+  const [backfillTaskState, setBackfillTaskState] = useState<BackfillRoundsTaskState | null>(null);
+  const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   // Data viewer state
   const [roundsData, setRoundsData] = useState<RoundWithData[]>([]);
@@ -234,6 +236,28 @@ export default function BackfillPage() {
       setError(err instanceof Error ? err.message : "Failed to fetch pending rounds");
     } finally {
       setLoading(false);
+    }
+  }, [isAuthenticated]);
+
+  const fetchBackfillStatus = useCallback(async () => {
+    if (!isAuthenticated) return;
+    try {
+      const res = await api.getBackfillRoundsStatus();
+      setBackfillTaskState(res);
+      // If task is running, keep polling
+      if (res.status === "running") {
+        if (!pollIntervalRef.current) {
+          pollIntervalRef.current = setInterval(fetchBackfillStatus, 1000);
+        }
+      } else {
+        // Task finished, stop polling
+        if (pollIntervalRef.current) {
+          clearInterval(pollIntervalRef.current);
+          pollIntervalRef.current = null;
+        }
+      }
+    } catch (err) {
+      console.error("Failed to fetch backfill status:", err);
     }
   }, [isAuthenticated]);
 
@@ -347,7 +371,16 @@ export default function BackfillPage() {
     fetchPendingRounds();
     fetchRoundsData();
     fetchStats();
-  }, [fetchPendingRounds, fetchRoundsData, fetchStats, isAuthenticated]);
+    fetchBackfillStatus();
+    
+    // Cleanup polling on unmount
+    return () => {
+      if (pollIntervalRef.current) {
+        clearInterval(pollIntervalRef.current);
+        pollIntervalRef.current = null;
+      }
+    };
+  }, [fetchPendingRounds, fetchRoundsData, fetchStats, fetchBackfillStatus, isAuthenticated]);
 
   useEffect(() => {
     if (isAuthenticated) {
@@ -369,17 +402,39 @@ export default function BackfillPage() {
         stopAtRound ? parseInt(stopAtRound) : undefined,
         maxPages ? parseInt(maxPages) : undefined
       );
-      setMessage(
-        `Backfill complete: ${res.rounds_fetched} fetched, ${res.rounds_skipped} skipped, ${res.rounds_missing_deployments} missing deployments` +
-          (res.stopped_at_round ? `, stopped at round ${res.stopped_at_round}` : "")
-      );
-      fetchPendingRounds();
-      fetchRoundsData();
+      setMessage(res.message);
+      // Start polling for status
+      fetchBackfillStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Backfill failed");
     } finally {
       setBackfillLoading(false);
     }
+  };
+
+  const handleCancelBackfill = async () => {
+    setMessage(null);
+    setError(null);
+    try {
+      const res = await api.cancelBackfillRounds();
+      setMessage(res.message);
+      // Keep polling to see when it actually cancels
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to cancel backfill");
+    }
+  };
+
+  // Helper to format duration
+  const formatDuration = (ms: number) => {
+    if (ms < 1000) return `${ms}ms`;
+    const secs = Math.floor(ms / 1000);
+    if (secs < 60) return `${secs}s`;
+    const mins = Math.floor(secs / 60);
+    const remainingSecs = secs % 60;
+    if (mins < 60) return `${mins}m ${remainingSecs}s`;
+    const hours = Math.floor(mins / 60);
+    const remainingMins = mins % 60;
+    return `${hours}h ${remainingMins}m`;
   };
 
   const handleAction = async (roundId: number, action: RoundAction) => {
@@ -838,52 +893,169 @@ export default function BackfillPage() {
 
         {activeTab === "backfill" && (
           <>
-            {/* Backfill Form */}
-            <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6">
-              <h2 className="text-lg font-semibold text-white mb-4">Fetch Round Metadata</h2>
-              <p className="text-sm text-slate-400 mb-4">
-                Fetch round metadata from the external API. Also checks for rounds missing deployments.
-              </p>
-              <div className="flex flex-wrap gap-4 items-end">
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Stop at Round</label>
-                  <input
-                    type="number"
-                    value={stopAtRound}
-                    onChange={(e) => setStopAtRound(e.target.value)}
-                    placeholder="Optional"
-                    className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-32"
-                  />
+            {/* Backfill Task Status */}
+            {backfillTaskState && backfillTaskState.status === "running" && (
+              <div className="bg-blue-500/10 rounded-lg border border-blue-500/30 p-6">
+                <div className="flex items-center justify-between mb-4">
+                  <h2 className="text-lg font-semibold text-blue-400 flex items-center gap-2">
+                    <span className="w-3 h-3 bg-blue-500 rounded-full animate-pulse" />
+                    Backfill In Progress
+                  </h2>
+                  <button
+                    onClick={handleCancelBackfill}
+                    className="px-4 py-2 bg-red-500 hover:bg-red-600 text-white rounded-lg transition-colors"
+                  >
+                    Cancel
+                  </button>
                 </div>
-                <div>
-                  <label className="block text-sm text-slate-400 mb-1">Max Pages</label>
-                  <input
-                    type="number"
-                    value={maxPages}
-                    onChange={(e) => setMaxPages(e.target.value)}
-                    className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-24"
-                  />
+                
+                {/* Progress Stats Grid */}
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <p className="text-xs text-slate-400">Current Page</p>
+                    <p className="text-xl font-bold text-white">
+                      {backfillTaskState.current_page.toLocaleString()}
+                      <span className="text-sm text-slate-500"> / {backfillTaskState.max_pages.toLocaleString()}</span>
+                    </p>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <p className="text-xs text-slate-400">Rounds Fetched</p>
+                    <p className="text-xl font-bold text-emerald-400">{backfillTaskState.rounds_fetched.toLocaleString()}</p>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <p className="text-xs text-slate-400">Rounds Skipped</p>
+                    <p className="text-xl font-bold text-slate-300">{backfillTaskState.rounds_skipped.toLocaleString()}</p>
+                  </div>
+                  <div className="bg-slate-800/50 rounded-lg p-3">
+                    <p className="text-xs text-slate-400">Missing Deployments</p>
+                    <p className="text-xl font-bold text-yellow-400">{backfillTaskState.rounds_missing_deployments.toLocaleString()}</p>
+                  </div>
                 </div>
-                <button
-                  onClick={handleBackfill}
-                  disabled={backfillLoading}
-                  className={`px-4 py-2 rounded-lg transition-colors ${
-                    backfillLoading
-                      ? "bg-slate-700 text-slate-400 cursor-not-allowed"
-                      : "bg-emerald-500 hover:bg-emerald-600 text-white"
-                  }`}
-                >
-                  {backfillLoading ? (
-                    <span className="flex items-center gap-2">
-                      <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      Fetching...
-                    </span>
-                  ) : (
-                    "Start Backfill"
+                
+                {/* Progress Bar */}
+                {backfillTaskState.estimated_total_rounds && backfillTaskState.first_round_id_seen && (
+                  <div className="mb-4">
+                    <div className="flex justify-between text-xs text-slate-400 mb-1">
+                      <span>Round {backfillTaskState.first_round_id_seen?.toLocaleString()} → {backfillTaskState.stop_at_round.toLocaleString()}</span>
+                      <span>
+                        {backfillTaskState.last_round_id_processed?.toLocaleString() ?? "..."}
+                        {backfillTaskState.estimated_total_rounds && (
+                          <span className="text-slate-500"> (~{Math.round(((backfillTaskState.first_round_id_seen - (backfillTaskState.last_round_id_processed ?? backfillTaskState.first_round_id_seen)) / backfillTaskState.estimated_total_rounds) * 100)}% done)</span>
+                        )}
+                      </span>
+                    </div>
+                    <div className="w-full bg-slate-700 rounded-full h-2">
+                      <div 
+                        className="bg-blue-500 h-2 rounded-full transition-all duration-500"
+                        style={{ 
+                          width: `${Math.min(100, Math.round(((backfillTaskState.first_round_id_seen - (backfillTaskState.last_round_id_processed ?? backfillTaskState.first_round_id_seen)) / backfillTaskState.estimated_total_rounds) * 100))}%`
+                        }}
+                      />
+                    </div>
+                  </div>
+                )}
+                
+                {/* Time Stats */}
+                <div className="flex items-center gap-6 text-sm">
+                  <div>
+                    <span className="text-slate-400">Elapsed: </span>
+                    <span className="text-white font-mono">{formatDuration(backfillTaskState.elapsed_ms)}</span>
+                  </div>
+                  {backfillTaskState.estimated_remaining_ms && backfillTaskState.estimated_remaining_ms > 0 && (
+                    <div>
+                      <span className="text-slate-400">ETA: </span>
+                      <span className="text-white font-mono">{formatDuration(backfillTaskState.estimated_remaining_ms)}</span>
+                    </div>
                   )}
-                </button>
+                  <div>
+                    <span className="text-slate-400">Last Round: </span>
+                    <span className="text-white font-mono">{backfillTaskState.last_round_id_processed?.toLocaleString() ?? "—"}</span>
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
+
+            {/* Completed/Failed/Cancelled Status */}
+            {backfillTaskState && backfillTaskState.status !== "running" && backfillTaskState.status !== "idle" && (
+              <div className={`rounded-lg border p-4 ${
+                backfillTaskState.status === "completed" 
+                  ? "bg-green-500/10 border-green-500/30" 
+                  : backfillTaskState.status === "cancelled"
+                  ? "bg-yellow-500/10 border-yellow-500/30"
+                  : "bg-red-500/10 border-red-500/30"
+              }`}>
+                <div className="flex items-center justify-between">
+                  <div>
+                    <h3 className={`font-semibold ${
+                      backfillTaskState.status === "completed" ? "text-green-400" :
+                      backfillTaskState.status === "cancelled" ? "text-yellow-400" : "text-red-400"
+                    }`}>
+                      Backfill {backfillTaskState.status.charAt(0).toUpperCase() + backfillTaskState.status.slice(1)}
+                    </h3>
+                    <p className="text-sm text-slate-400 mt-1">
+                      {backfillTaskState.rounds_fetched.toLocaleString()} fetched, {backfillTaskState.rounds_skipped.toLocaleString()} skipped, {backfillTaskState.rounds_missing_deployments.toLocaleString()} missing deployments
+                      {" • "}{formatDuration(backfillTaskState.elapsed_ms)}
+                      {backfillTaskState.error && <span className="text-red-400"> • Error: {backfillTaskState.error}</span>}
+                    </p>
+                  </div>
+                  <button
+                    onClick={() => { fetchRoundsData(); fetchStats(); }}
+                    className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded-lg"
+                  >
+                    Refresh Data
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* Backfill Form - only show if not running */}
+            {(!backfillTaskState || backfillTaskState.status !== "running") && (
+              <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-6">
+                <h2 className="text-lg font-semibold text-white mb-4">Fetch Round Metadata</h2>
+                <p className="text-sm text-slate-400 mb-4">
+                  Fetch round metadata from the external API. Runs as a background task (1 page/second). Also checks for rounds missing deployments.
+                </p>
+                <div className="flex flex-wrap gap-4 items-end">
+                  <div>
+                    <label className="block text-sm text-slate-400 mb-1">Stop at Round</label>
+                    <input
+                      type="number"
+                      value={stopAtRound}
+                      onChange={(e) => setStopAtRound(e.target.value)}
+                      placeholder="Optional (0)"
+                      className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-32"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm text-slate-400 mb-1">Max Pages</label>
+                    <input
+                      type="number"
+                      value={maxPages}
+                      onChange={(e) => setMaxPages(e.target.value)}
+                      className="px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white w-28"
+                    />
+                  </div>
+                  <button
+                    onClick={handleBackfill}
+                    disabled={backfillLoading}
+                    className={`px-4 py-2 rounded-lg transition-colors ${
+                      backfillLoading
+                        ? "bg-slate-700 text-slate-400 cursor-not-allowed"
+                        : "bg-emerald-500 hover:bg-emerald-600 text-white"
+                    }`}
+                  >
+                    {backfillLoading ? (
+                      <span className="flex items-center gap-2">
+                        <span className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                        Starting...
+                      </span>
+                    ) : (
+                      "Start Backfill"
+                    )}
+                  </button>
+                </div>
+              </div>
+            )}
 
             {/* Pending Rounds Table */}
             <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">

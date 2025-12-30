@@ -168,6 +168,33 @@ export interface WsThroughputSummary {
 }
 
 // Backfill workflow types
+export interface BackfillStartResponse {
+  message: string;
+  stop_at_round: number;
+  max_pages: number;
+}
+
+export type BackfillTaskStatus = "idle" | "running" | "completed" | "failed" | "cancelled";
+
+export interface BackfillRoundsTaskState {
+  status: BackfillTaskStatus;
+  started_at_ms: number | null;
+  stop_at_round: number;
+  max_pages: number;
+  current_page: number;
+  rounds_fetched: number;
+  rounds_skipped: number;
+  rounds_missing_deployments: number;
+  last_round_id_processed: number | null;
+  first_round_id_seen: number | null;
+  estimated_total_rounds: number | null;
+  error: string | null;
+  elapsed_ms: number;
+  estimated_remaining_ms: number | null;
+  last_updated: string;
+}
+
+// Legacy response type (kept for backward compat)
 export interface BackfillRoundsResponse {
   rounds_fetched: number;
   rounds_skipped: number;
@@ -875,12 +902,20 @@ class ApiClient {
 
   // ========== Backfill Workflow ==========
 
-  async backfillRounds(stopAtRound?: number, maxPages?: number): Promise<BackfillRoundsResponse> {
+  async backfillRounds(stopAtRound?: number, maxPages?: number): Promise<BackfillStartResponse> {
     const params = new URLSearchParams();
     if (stopAtRound) params.set("stop_at_round", stopAtRound.toString());
     if (maxPages) params.set("max_pages", maxPages.toString());
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("POST", `/admin/backfill/rounds${query}`, { requireAuth: true });
+  }
+
+  async getBackfillRoundsStatus(): Promise<BackfillRoundsTaskState> {
+    return this.request("GET", "/admin/backfill/rounds/status", { requireAuth: true });
+  }
+
+  async cancelBackfillRounds(): Promise<{ message: string }> {
+    return this.request("POST", "/admin/backfill/rounds/cancel", { requireAuth: true });
   }
 
   async getPendingRounds(): Promise<PendingRoundsResponse> {
