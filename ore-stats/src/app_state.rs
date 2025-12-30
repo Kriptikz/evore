@@ -180,6 +180,8 @@ pub struct BackfillRoundsTaskState {
     pub estimated_remaining_ms: Option<u64>,
     /// Last updated timestamp
     pub last_updated: chrono::DateTime<chrono::Utc>,
+    /// Number of pages jumped (skipped via estimation)
+    pub pages_jumped: u32,
 }
 
 // ============================================================================

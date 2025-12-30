@@ -285,6 +285,7 @@ pub async fn backfill_rounds(
             elapsed_ms: 0,
             estimated_remaining_ms: None,
             last_updated: chrono::Utc::now(),
+            pages_jumped: 0,
         };
     }
     
@@ -466,10 +467,12 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             break;
         }
         
-        // PAGE JUMPING: If all rounds on this page were skipped, jump ahead
-        let all_skipped = page_rounds_skipped as usize == page_size && batch_was_empty && page_rounds_missing_deps == 0;
+        // PAGE JUMPING: If all rounds on this page already exist (with or without deployments), jump ahead
+        // We can skip if nothing new to insert and all rounds were either skipped or marked as missing deps
+        let all_existing = batch_was_empty && 
+            (page_rounds_skipped as usize + page_rounds_missing_deps as usize) == page_size;
         
-        if all_skipped && per_page > 0 && page_lowest_round.is_some() {
+        if all_existing && per_page > 0 && page_lowest_round.is_some() {
             let lowest = page_lowest_round.unwrap();
             
             // Find next round we need by checking a few rounds below the lowest on this page
@@ -495,10 +498,15 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
                     
                     // Only jump if it's more than 1 page ahead
                     if estimated_page > page + 1 {
+                        let pages_skipped = estimated_page - page - 1;
                         tracing::info!(
-                            "Page {} all skipped. Jumping to page {} for round {} (was {})",
-                            page, estimated_page, target, page + 1
+                            "Page {} all existing. Jumping to page {} for round {} (skipping {} pages)",
+                            page, estimated_page, target, pages_skipped
                         );
+                        {
+                            let mut task_state = state.backfill_rounds_task_state.write().await;
+                            task_state.pages_jumped += pages_skipped;
+                        }
                         page = estimated_page;
                         continue;
                     }

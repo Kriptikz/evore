@@ -124,14 +124,27 @@ function RoundBackfillingSection({
           Round Backfilling (External API)
         </h3>
         <StatusBadge status={taskState?.status || "idle"} />
-      </div>
+        </div>
       
       {isRunning && taskState ? (
         <div className="space-y-3">
+          {/* Current Round */}
+          {taskState.last_round_id_processed && (
+            <div className="bg-blue-500/10 rounded p-2 text-xs">
+              <span className="text-slate-400">Current Round: </span>
+              <span className="text-blue-400 font-mono font-bold">{taskState.last_round_id_processed.toLocaleString()}</span>
+              {taskState.first_round_id_seen && (
+                <span className="text-slate-500 ml-2">
+                  (started at {taskState.first_round_id_seen.toLocaleString()})
+                </span>
+              )}
+            </div>
+          )}
+          
           <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
             <div>
               <span className="text-slate-400">Page: </span>
-              <span className="text-white">{taskState.current_page} / {taskState.max_pages}</span>
+              <span className="text-white">{taskState.current_page.toLocaleString()}</span>
             </div>
             <div>
               <span className="text-slate-400">Fetched: </span>
@@ -142,19 +155,25 @@ function RoundBackfillingSection({
               <span className="text-slate-300">{taskState.rounds_skipped.toLocaleString()}</span>
             </div>
             <div>
-              <span className="text-slate-400">Missing: </span>
+              <span className="text-slate-400">Missing Deps: </span>
               <span className="text-yellow-400">{taskState.rounds_missing_deployments.toLocaleString()}</span>
             </div>
           </div>
           
-          <div className="flex items-center gap-4 text-xs">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs">
             <span className="text-slate-400">Elapsed: <span className="text-white font-mono">{formatDuration(taskState.elapsed_ms)}</span></span>
             {taskState.estimated_remaining_ms && taskState.estimated_remaining_ms > 0 && (
               <span className="text-slate-400">ETA: <span className="text-white font-mono">{formatDuration(taskState.estimated_remaining_ms)}</span></span>
             )}
+            {(taskState as any).pages_jumped > 0 && (
+              <span className="text-slate-400">Pages Jumped: <span className="text-cyan-400 font-mono">{(taskState as any).pages_jumped.toLocaleString()}</span></span>
+            )}
+            {taskState.estimated_total_rounds && (
+              <span className="text-slate-400">Est. Total: <span className="text-slate-300 font-mono">{taskState.estimated_total_rounds.toLocaleString()}</span></span>
+            )}
           </div>
           
-          <button
+            <button
             onClick={onCancel}
             className="w-full px-3 py-1.5 text-sm bg-red-500/20 hover:bg-red-500/30 text-red-400 rounded transition-colors"
           >
@@ -388,13 +407,13 @@ function BulkActionsSection({
         </div>
         
         <div className="flex gap-2">
-          <button
+              <button
             onClick={() => onEnqueue(parseInt(startRound) || 0, parseInt(endRound) || 0, action, skipDone, onlyInWorkflow)}
             disabled={loading || !startRound || !endRound}
             className="flex-1 px-3 py-1.5 text-sm bg-blue-500 hover:bg-blue-600 text-white rounded disabled:opacity-50 transition-colors"
           >
             Enqueue
-          </button>
+              </button>
           <button
             onClick={() => onAddToWorkflow(parseInt(startRound) || 0, parseInt(endRound) || 0)}
             disabled={loading || !startRound || !endRound}
@@ -483,9 +502,101 @@ function AttentionSection({
   );
 }
 
+function RoundsDataSection({
+  rounds,
+  loading,
+  filterMode,
+  onFilterChange,
+  onAddToWorkflow,
+  addingRoundId,
+}: {
+  rounds: RoundWithData[];
+  loading: boolean;
+  filterMode: FilterMode;
+  onFilterChange: (mode: FilterMode) => void;
+  onAddToWorkflow: (roundId: number) => void;
+  addingRoundId: number | null;
+}) {
+  return (
+    <div className="bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-white">Rounds Data (ClickHouse)</h3>
+        <select
+          value={filterMode}
+          onChange={(e) => onFilterChange(e.target.value as FilterMode)}
+          className="px-2 py-1 text-xs bg-slate-700 border border-slate-600 rounded text-white"
+        >
+          <option value="all">All</option>
+          <option value="missing_deployments">Missing Deployments (0)</option>
+          <option value="invalid_deployments">Invalid Deployments</option>
+        </select>
+      </div>
+      
+      {loading ? (
+        <div className="flex items-center justify-center h-32">
+          <div className="w-6 h-6 border-2 border-blue-500 border-t-transparent rounded-full animate-spin" />
+        </div>
+      ) : rounds.length === 0 ? (
+        <div className="p-6 text-center text-slate-400 text-sm">
+          No rounds found
+        </div>
+      ) : (
+        <div className="overflow-x-auto max-h-80">
+          <table className="w-full text-sm">
+            <thead className="bg-slate-800/50 sticky top-0">
+              <tr className="border-b border-slate-700">
+                <th className="text-left px-3 py-2 text-xs font-medium text-slate-400">Round</th>
+                <th className="text-left px-3 py-2 text-xs font-medium text-slate-400">Deployed</th>
+                <th className="text-left px-3 py-2 text-xs font-medium text-slate-400">Deployments</th>
+                <th className="text-left px-3 py-2 text-xs font-medium text-slate-400">Valid</th>
+                <th className="text-left px-3 py-2 text-xs font-medium text-slate-400">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rounds.map((round) => (
+                <tr key={round.round_id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
+                  <td className="px-3 py-2 font-mono text-white">{round.round_id.toLocaleString()}</td>
+                  <td className="px-3 py-2 text-slate-300">{formatSol(round.total_deployed)} SOL</td>
+                  <td className={`px-3 py-2 ${round.deployment_count === 0 ? 'text-red-400' : 'text-green-400'}`}>
+                    {round.deployment_count}
+                  </td>
+                  <td className="px-3 py-2">
+                    {round.deployment_count > 0 ? (
+                      <span className="text-green-400 text-xs">✓</span>
+                    ) : (
+                      <span className="text-red-400 text-xs">✗</span>
+                    )}
+                  </td>
+                  <td className="px-3 py-2">
+                    {round.deployment_count === 0 && (
+                      <button
+                        onClick={() => onAddToWorkflow(round.round_id)}
+                        disabled={addingRoundId === round.round_id}
+                        className="px-2 py-0.5 text-xs bg-emerald-500 hover:bg-emerald-600 text-white rounded disabled:opacity-50"
+                      >
+                        {addingRoundId === round.round_id ? '...' : 'Add to Workflow'}
+                      </button>
+                    )}
+                    <a
+                      href={`/admin/transactions?round_id=${round.round_id}`}
+                      className="ml-1 px-2 py-0.5 text-xs bg-purple-500/20 hover:bg-purple-500/30 text-purple-400 rounded"
+                    >
+                      Txns
+                    </a>
+      </td>
+    </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function RoundBrowserSection({ 
   rounds, 
-  loading, 
+  loading,
   hasMore, 
   onLoadMore, 
   onAction,
@@ -548,7 +659,7 @@ function RoundBrowserSection({
                     !round.finalized ? "finalize" : null;
                   const isLoading = actionLoading === round.round_id;
 
-                  return (
+  return (
                     <tr key={round.round_id} className="border-b border-slate-700/50 hover:bg-slate-700/30">
                       <td className="px-3 py-2 font-mono text-white">{round.round_id}</td>
                       <td className="px-3 py-2">
@@ -559,7 +670,7 @@ function RoundBrowserSection({
                           <StepBadge done={round.verified} label="V" />
                           <StepBadge done={round.finalized} label="F" />
                         </div>
-                      </td>
+      </td>
                       <td className="px-3 py-2 text-slate-400">{round.transaction_count}</td>
                       <td className="px-3 py-2 text-slate-400">{round.deployment_count}</td>
                       <td className="px-3 py-2">
@@ -583,8 +694,8 @@ function RoundBrowserSection({
                           )}
                           {!nextStep && <span className="text-green-400 text-xs">✓</span>}
                         </div>
-                      </td>
-                    </tr>
+      </td>
+    </tr>
                   );
                 })}
               </tbody>
@@ -616,7 +727,7 @@ export default function BackfillCommandCenter() {
   const [actionLoading, setActionLoading] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  
+
   // Data
   const [backfillTaskState, setBackfillTaskState] = useState<BackfillRoundsTaskState | null>(null);
   const [queueStatus, setQueueStatus] = useState<QueueStatus | null>(null);
@@ -625,9 +736,18 @@ export default function BackfillCommandCenter() {
   const [pendingRounds, setPendingRounds] = useState<RoundStatus[]>([]);
   const [roundsFilterMode, setRoundsFilterMode] = useState("all");
   
+  // Rounds Data (ClickHouse)
+  const [roundsData, setRoundsData] = useState<RoundWithData[]>([]);
+  const [roundsDataFilter, setRoundsDataFilter] = useState<FilterMode>("missing_deployments");
+  const [roundsDataLoading, setRoundsDataLoading] = useState(false);
+  const [addingRoundId, setAddingRoundId] = useState<number | null>(null);
+  
+  // Active tab
+  const [activeTab, setActiveTab] = useState<"command" | "data">("command");
+  
   // Polling refs
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  
+
   // ============================================================================
   // Data Fetching
   // ============================================================================
@@ -693,6 +813,19 @@ export default function BackfillCommandCenter() {
       console.error("Failed to fetch pending rounds:", err);
     }
   }, [isAuthenticated]);
+  
+  const fetchRoundsData = useCallback(async () => {
+    if (!isAuthenticated) return;
+    setRoundsDataLoading(true);
+    try {
+      const res = await api.getRoundsWithData({ limit: 100, filterMode: roundsDataFilter });
+      setRoundsData(res.rounds);
+    } catch (err) {
+      console.error("Failed to fetch rounds data:", err);
+    } finally {
+      setRoundsDataLoading(false);
+    }
+  }, [isAuthenticated, roundsDataFilter]);
 
   const refreshAll = useCallback(async () => {
     await Promise.all([
@@ -723,6 +856,13 @@ export default function BackfillCommandCenter() {
       }
     };
   }, [isAuthenticated, refreshAll]);
+
+  // Fetch rounds data when tab or filter changes
+  useEffect(() => {
+    if (activeTab === "data") {
+      fetchRoundsData();
+    }
+  }, [activeTab, roundsDataFilter, fetchRoundsData]);
 
   // ============================================================================
   // Action Handlers
@@ -870,10 +1010,24 @@ export default function BackfillCommandCenter() {
         const data = await res.json();
         setMessage(data.message);
         fetchPipelineStats();
-        fetchPendingRounds();
+      fetchPendingRounds();
       }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to bulk verify");
+    }
+  };
+
+  const handleAddSingleToWorkflow = async (roundId: number) => {
+    setAddingRoundId(roundId);
+    try {
+      await api.addToBackfillWorkflow([roundId]);
+      setMessage(`Round ${roundId} added to workflow`);
+      fetchRoundsData();
+      fetchPipelineStats();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to add round to workflow");
+    } finally {
+      setAddingRoundId(null);
     }
   };
 
@@ -915,15 +1069,35 @@ export default function BackfillCommandCenter() {
   return (
     <AdminShell title="Backfill Command Center" subtitle="Manage historical data backfill workflow">
       <div className="space-y-4">
-        {/* Header with Memory */}
+        {/* Tabs + Header */}
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-4">
+          <div className="flex items-center gap-2">
             <button
+              onClick={() => setActiveTab("command")}
+              className={`px-4 py-2 text-sm rounded-t transition-colors ${
+                activeTab === "command" 
+                  ? "bg-slate-700 text-white" 
+                  : "bg-slate-800/50 text-slate-400 hover:text-white"
+              }`}
+            >
+              Command Center
+            </button>
+          <button
+            onClick={() => setActiveTab("data")}
+              className={`px-4 py-2 text-sm rounded-t transition-colors ${
+              activeTab === "data"
+                  ? "bg-slate-700 text-white" 
+                  : "bg-slate-800/50 text-slate-400 hover:text-white"
+              }`}
+            >
+              Rounds Data
+          </button>
+          <button
               onClick={refreshAll}
-              className="px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded transition-colors"
+              className="ml-4 px-3 py-1.5 text-sm bg-slate-700 hover:bg-slate-600 text-white rounded transition-colors"
             >
               Refresh
-            </button>
+          </button>
           </div>
           {memoryUsage && (
             <div className="text-sm text-slate-400">
@@ -946,68 +1120,101 @@ export default function BackfillCommandCenter() {
           </div>
         )}
 
-        {/* Top Row: Round Backfilling + Action Queue */}
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <RoundBackfillingSection
-            taskState={backfillTaskState}
-            onStart={handleStartBackfill}
-            onCancel={handleCancelBackfill}
-            loading={loading}
-          />
-          <ActionQueueSection
-            queueStatus={queueStatus}
-            onPause={handlePauseQueue}
-            onResume={handleResumeQueue}
-            onClear={handleClearQueue}
-            onRetryFailed={handleRetryFailed}
-          />
-        </div>
+        {activeTab === "command" ? (
+          <>
+            {/* Top Row: Round Backfilling + Action Queue */}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <RoundBackfillingSection
+                taskState={backfillTaskState}
+                onStart={handleStartBackfill}
+                onCancel={handleCancelBackfill}
+                loading={loading}
+              />
+              <ActionQueueSection
+                queueStatus={queueStatus}
+                onPause={handlePauseQueue}
+                onResume={handleResumeQueue}
+                onClear={handleClearQueue}
+                onRetryFailed={handleRetryFailed}
+              />
+              </div>
+              
+            {/* Pipeline Status */}
+            <PipelineStatusSection 
+              stats={pipelineStats} 
+              onStageClick={(stage) => console.log("Stage clicked:", stage)}
+            />
 
-        {/* Pipeline Status */}
-        <PipelineStatusSection 
-          stats={pipelineStats} 
-          onStageClick={(stage) => console.log("Stage clicked:", stage)}
-        />
+            {/* Bulk Actions */}
+            <BulkActionsSection
+              onEnqueue={handleEnqueue}
+              onAddToWorkflow={handleAddToWorkflow}
+              onBulkVerify={handleBulkVerify}
+              loading={loading}
+            />
 
-        {/* Bulk Actions */}
-        <BulkActionsSection
-          onEnqueue={handleEnqueue}
-          onAddToWorkflow={handleAddToWorkflow}
-          onBulkVerify={handleBulkVerify}
-          loading={loading}
-        />
+            {/* Attention */}
+            <AttentionSection
+              queueStatus={queueStatus}
+              pipelineStats={pipelineStats}
+              onViewFailed={() => console.log("View failed")}
+              onViewPendingVerify={() => console.log("View pending verify")}
+            />
 
-        {/* Attention */}
-        <AttentionSection
-          queueStatus={queueStatus}
-          pipelineStats={pipelineStats}
-          onViewFailed={() => console.log("View failed")}
-          onViewPendingVerify={() => console.log("View pending verify")}
-        />
+            {/* Round Browser */}
+            <RoundBrowserSection
+              rounds={pendingRounds}
+              loading={loading}
+              hasMore={false}
+              onLoadMore={() => {}}
+              onAction={handleRoundAction}
+              actionLoading={actionLoading}
+              filterMode={roundsFilterMode}
+              onFilterChange={setRoundsFilterMode}
+            />
 
-        {/* Round Browser */}
-        <RoundBrowserSection
-          rounds={pendingRounds}
-          loading={loading}
-          hasMore={false}
-          onLoadMore={() => {}}
-          onAction={handleRoundAction}
-          actionLoading={actionLoading}
-          filterMode={roundsFilterMode}
-          onFilterChange={setRoundsFilterMode}
-        />
-
-        {/* Workflow Legend */}
-        <div className="bg-slate-800/30 rounded-lg border border-slate-700/50 p-4">
-          <h3 className="text-xs font-medium text-slate-400 mb-2">Workflow Steps</h3>
-          <div className="grid grid-cols-5 gap-2 text-xs text-slate-500">
-            <div><span className="text-emerald-400">M</span> = Meta fetched</div>
-            <div><span className="text-emerald-400">T</span> = Txns fetched</div>
-            <div><span className="text-emerald-400">R</span> = Reconstructed</div>
-            <div><span className="text-emerald-400">V</span> = Verified</div>
-            <div><span className="text-emerald-400">F</span> = Finalized</div>
-          </div>
-        </div>
+            {/* Workflow Legend */}
+            <div className="bg-slate-800/30 rounded-lg border border-slate-700/50 p-4">
+              <h3 className="text-xs font-medium text-slate-400 mb-2">Workflow Steps</h3>
+              <div className="grid grid-cols-5 gap-2 text-xs text-slate-500">
+                <div><span className="text-emerald-400">M</span> = Meta fetched</div>
+                <div><span className="text-emerald-400">T</span> = Txns fetched</div>
+                <div><span className="text-emerald-400">R</span> = Reconstructed</div>
+                <div><span className="text-emerald-400">V</span> = Verified</div>
+                <div><span className="text-emerald-400">F</span> = Finalized</div>
+              </div>
+                </div>
+          </>
+        ) : (
+          <>
+            {/* Rounds Data Tab */}
+            <RoundsDataSection
+              rounds={roundsData}
+              loading={roundsDataLoading}
+              filterMode={roundsDataFilter}
+              onFilterChange={setRoundsDataFilter}
+              onAddToWorkflow={handleAddSingleToWorkflow}
+              addingRoundId={addingRoundId}
+            />
+            
+            {/* Stats Summary */}
+            {pipelineStats && (
+              <div className="bg-slate-800/50 rounded-lg border border-slate-700 p-4">
+                <h3 className="text-sm font-semibold text-white mb-3">Summary</h3>
+                <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                <div>
+                    <span className="text-slate-400">Not in Workflow: </span>
+                    <span className="text-yellow-400 font-mono">{pipelineStats.not_in_workflow.toLocaleString()}</span>
+                </div>
+                <div>
+                    <span className="text-slate-400">Complete: </span>
+                    <span className="text-green-400 font-mono">{pipelineStats.complete.toLocaleString()}</span>
+                </div>
+                </div>
+                </div>
+            )}
+          </>
+        )}
       </div>
     </AdminShell>
   );
