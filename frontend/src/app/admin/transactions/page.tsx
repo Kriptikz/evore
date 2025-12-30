@@ -38,8 +38,11 @@ function ProgramBadge({ name }: { name: string }) {
     "Compute Budget": "bg-purple-500/20 text-purple-400 border-purple-500/30",
     "ORE Program": "bg-amber-500/20 text-amber-400 border-amber-500/30",
     "Token Program": "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
+    "Token-2022": "bg-cyan-500/20 text-cyan-400 border-cyan-500/30",
     "Associated Token": "bg-teal-500/20 text-teal-400 border-teal-500/30",
     "EVORE Program": "bg-green-500/20 text-green-400 border-green-500/30",
+    "Entropy Program": "bg-indigo-500/20 text-indigo-400 border-indigo-500/30",
+    "ORE Mint Program": "bg-yellow-500/20 text-yellow-400 border-yellow-500/30",
     "Memo": "bg-pink-500/20 text-pink-400 border-pink-500/30",
   };
   
@@ -1384,16 +1387,58 @@ function TransactionsPageContent() {
               )}
               
               <div>
-                <h3 className="text-sm font-semibold text-slate-300 mb-2">Programs</h3>
+                <h3 className="text-sm font-semibold text-slate-300 mb-2">Known Programs</h3>
                 <div className="flex flex-wrap gap-2">
-                  {data.round_summary.programs_used.map((p, i) => (
-                    <div key={i} className="flex items-center gap-2 bg-slate-800/30 rounded-lg px-3 py-1">
-                      <ProgramBadge name={p.name} />
-                      <span className="text-xs text-slate-500">×{p.invocation_count}</span>
-                    </div>
-                  ))}
+                  {data.round_summary.programs_used
+                    .filter((p) => !p.name.startsWith("Unknown"))
+                    .map((p, i) => (
+                      <div key={i} className="flex items-center gap-2 bg-slate-800/30 rounded-lg px-3 py-1">
+                        <ProgramBadge name={p.name} />
+                        <span className="text-xs text-slate-500">×{p.invocation_count}</span>
+                      </div>
+                    ))}
                 </div>
               </div>
+              
+              {/* Unknown Programs Section */}
+              {data.round_summary.programs_used.filter((p) => p.name.startsWith("Unknown")).length > 0 && (
+                <div className="mt-4 p-3 bg-orange-500/10 border border-orange-500/30 rounded-lg">
+                  <h3 className="text-sm font-semibold text-orange-400 mb-2">
+                    Unknown Programs ({data.round_summary.programs_used.filter((p) => p.name.startsWith("Unknown")).length})
+                  </h3>
+                  <div className="text-xs text-slate-400 mb-3">
+                    These programs were encountered but are not yet recognized. Click to view on Solscan:
+                  </div>
+                  <div className="space-y-2">
+                    {data.round_summary.programs_used
+                      .filter((p) => p.name.startsWith("Unknown"))
+                      .map((p, i) => (
+                        <div key={i} className="flex items-center justify-between bg-slate-900/50 rounded-lg px-3 py-2">
+                          <div className="flex items-center gap-3">
+                            <span className="text-xs text-orange-400 font-medium">×{p.invocation_count}</span>
+                            <a
+                              href={`https://solscan.io/account/${p.program}`}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="font-mono text-xs text-blue-400 hover:text-blue-300 transition-colors"
+                              title={`View ${p.program} on Solscan`}
+                            >
+                              {p.program}
+                            </a>
+                          </div>
+                          <a
+                            href={`https://solscan.io/account/${p.program}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="px-2 py-1 text-xs bg-blue-600 hover:bg-blue-500 rounded transition-colors"
+                          >
+                            View on Solscan →
+                          </a>
+                        </div>
+                      ))}
+                  </div>
+                </div>
+              )}
             </div>
             
             {/* Transactions Table */}

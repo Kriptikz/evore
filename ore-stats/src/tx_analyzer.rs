@@ -87,6 +87,9 @@ pub const TOKEN_2022_PROGRAM_ID: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpP
 pub const ASSOCIATED_TOKEN_PROGRAM_ID: &str = "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL";
 pub const MEMO_PROGRAM_ID: &str = "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr";
 pub const MEMO_PROGRAM_V1_ID: &str = "Memo1UhkJRfHyvLMcVucJwxXeuD728EqVDDwQDxFMNo";
+pub const ORE_MINT_PROGRAM_ID: &str = "mintzxW6Kckmeyh1h6Zfdj9QcYgCzhPSGiC8ChZ6fCx";
+pub const ENTROPY_PROGRAM_ID: &str = "3jSkUuYBoJzQPMEzTvkDFXCZUBksPamrVhrnHR9igu2X";
+pub const EVORE_PROGRAM_ID: &str = "8jaLKWLJAj5jVCZbxpe3zRUvLB3LD48MRtaQ2AjfCfxa";
 
 // ============================================================================
 // Response Types
@@ -885,7 +888,9 @@ impl TransactionAnalyzer {
             ASSOCIATED_TOKEN_PROGRAM_ID => Some("Associated Token".to_string()),
             MEMO_PROGRAM_ID | MEMO_PROGRAM_V1_ID => Some("Memo".to_string()),
             s if s == evore::ore_api::PROGRAM_ID.to_string() => Some("ORE Program".to_string()),
-            s if s == evore::id().to_string() => Some("EVORE Program".to_string()),
+            EVORE_PROGRAM_ID => Some("EVORE Program".to_string()),
+            ENTROPY_PROGRAM_ID => Some("Entropy Program".to_string()),
+            ORE_MINT_PROGRAM_ID => Some("ORE Mint Program".to_string()),
             _ => None,
         }
     }
@@ -1006,6 +1011,9 @@ impl TransactionAnalyzer {
             s if s == evore::ore_api::PROGRAM_ID.to_string() => {
                 self.parse_ore_instruction(data, accounts, account_keys)
             }
+            EVORE_PROGRAM_ID => self.parse_evore_instruction(data, accounts),
+            ENTROPY_PROGRAM_ID => self.parse_entropy_instruction(data, accounts),
+            ORE_MINT_PROGRAM_ID => self.parse_ore_mint_instruction(data, accounts),
             _ => (
                 "Unknown".to_string(),
                 Some(ParsedInstruction::Unknown {
@@ -1536,6 +1544,141 @@ impl TransactionAnalyzer {
                 Some(format!("Unknown ORE instruction tag: {}", tag)),
             ),
         }
+    }
+    
+    /// Parse EVORE program instructions
+    fn parse_evore_instruction(
+        &self,
+        data: &[u8],
+        _accounts: &[InstructionAccount],
+    ) -> (String, Option<ParsedInstruction>, Option<String>) {
+        if data.is_empty() {
+            return ("Empty".to_string(), None, Some("Empty instruction data".to_string()));
+        }
+        
+        let tag = data[0];
+        let instruction_name = match tag {
+            0 => "CreateManager",
+            1 => "MMDeploy",
+            2 => "MMCheckpoint",
+            3 => "MMClaimSOL",
+            4 => "MMClaimORE",
+            5 => "CreateDeployer",
+            6 => "UpdateDeployer",
+            7 => "MMAutodeploy",
+            8 => "DepositAutodeployBalance",
+            9 => "RecycleSol",
+            10 => "WithdrawAutodeployBalance",
+            11 => "MMAutocheckpoint",
+            12 => "MMFullAutodeploy",
+            13 => "TransferManager",
+            14 => "MMCreateMiner",
+            _ => {
+                return (
+                    format!("Unknown({})", tag),
+                    Some(ParsedInstruction::Unknown {
+                        program: EVORE_PROGRAM_ID.to_string(),
+                        data_preview: if data.len() > 32 {
+                            format!("{}...", hex::encode(&data[..32]))
+                        } else {
+                            hex::encode(data)
+                        },
+                    }),
+                    Some(format!("Unknown EVORE instruction tag: {}", tag)),
+                );
+            }
+        };
+        
+        // For known instructions, return the name with data preview
+        (
+            instruction_name.to_string(),
+            Some(ParsedInstruction::Unknown {
+                program: EVORE_PROGRAM_ID.to_string(),
+                data_preview: if data.len() > 32 {
+                    format!("{}...", hex::encode(&data[..32]))
+                } else {
+                    hex::encode(data)
+                },
+            }),
+            None,
+        )
+    }
+    
+    /// Parse Entropy program instructions
+    fn parse_entropy_instruction(
+        &self,
+        data: &[u8],
+        _accounts: &[InstructionAccount],
+    ) -> (String, Option<ParsedInstruction>, Option<String>) {
+        if data.is_empty() {
+            return ("Empty".to_string(), None, Some("Empty instruction data".to_string()));
+        }
+        
+        let tag = data[0];
+        // Basic entropy instruction identification (can be expanded)
+        let instruction_name = match tag {
+            0 => "Open",
+            1 => "Commit",
+            2 => "Reveal",
+            3 => "Sample",
+            4 => "Close",
+            _ => {
+                return (
+                    format!("Unknown({})", tag),
+                    Some(ParsedInstruction::Unknown {
+                        program: ENTROPY_PROGRAM_ID.to_string(),
+                        data_preview: hex::encode(data),
+                    }),
+                    Some(format!("Unknown Entropy instruction tag: {}", tag)),
+                );
+            }
+        };
+        
+        (
+            instruction_name.to_string(),
+            Some(ParsedInstruction::Unknown {
+                program: ENTROPY_PROGRAM_ID.to_string(),
+                data_preview: hex::encode(data),
+            }),
+            None,
+        )
+    }
+    
+    /// Parse ORE Mint program instructions
+    fn parse_ore_mint_instruction(
+        &self,
+        data: &[u8],
+        _accounts: &[InstructionAccount],
+    ) -> (String, Option<ParsedInstruction>, Option<String>) {
+        if data.is_empty() {
+            return ("Empty".to_string(), None, Some("Empty instruction data".to_string()));
+        }
+        
+        let tag = data[0];
+        // Basic ore mint instruction identification (can be expanded)
+        let instruction_name = match tag {
+            0 => "Initialize",
+            1 => "Mint",
+            _ => {
+                return (
+                    format!("Unknown({})", tag),
+                    Some(ParsedInstruction::Unknown {
+                        program: ORE_MINT_PROGRAM_ID.to_string(),
+                        data_preview: hex::encode(data),
+                    }),
+                    Some(format!("Unknown ORE Mint instruction tag: {}", tag)),
+                );
+            }
+        };
+        
+        (
+            instruction_name.to_string(),
+            Some(ParsedInstruction::Unknown {
+                program: ORE_MINT_PROGRAM_ID.to_string(),
+                data_preview: hex::encode(data),
+            }),
+            None,
+        )
     }
     
     fn determine_primary_action(
