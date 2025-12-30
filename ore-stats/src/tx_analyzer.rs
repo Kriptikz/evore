@@ -529,6 +529,31 @@ impl TransactionAnalyzer {
             account_keys.push(pk);
         }
         
+        // For versioned transactions (v0), append loaded addresses from lookup tables
+        // These are in meta.loadedAddresses.writable and meta.loadedAddresses.readonly
+        if let Some(loaded_addresses) = meta.get("loadedAddresses") {
+            // Add writable addresses first (they come after static accounts)
+            if let Some(writable) = loaded_addresses.get("writable").and_then(|w| w.as_array()) {
+                for key_val in writable {
+                    if let Some(key_str) = key_val.as_str() {
+                        if let Ok(pk) = Pubkey::from_str(key_str) {
+                            account_keys.push(pk);
+                        }
+                    }
+                }
+            }
+            // Then readonly addresses
+            if let Some(readonly) = loaded_addresses.get("readonly").and_then(|r| r.as_array()) {
+                for key_val in readonly {
+                    if let Some(key_str) = key_val.as_str() {
+                        if let Ok(pk) = Pubkey::from_str(key_str) {
+                            account_keys.push(pk);
+                        }
+                    }
+                }
+            }
+        }
+        
         // Pre/post balances
         let pre_balances: Vec<u64> = meta.get("preBalances")
             .and_then(|p| p.as_array())
@@ -929,10 +954,22 @@ impl TransactionAnalyzer {
         let mut accounts: Vec<InstructionAccount> = Vec::new();
         for (i, acc_idx_val) in accounts_arr.iter().enumerate() {
             let acc_idx = acc_idx_val.as_u64().ok_or("Invalid account index")? as usize;
-            let pk = account_keys.get(acc_idx).ok_or("Account index out of range")?;
+            // Handle account index out of range gracefully - can happen with inner instructions
+            // or when transaction data references lookup tables or other extended accounts
+            let pk = match account_keys.get(acc_idx) {
+                Some(pk) => pk.to_string(),
+                None => {
+                    tracing::trace!(
+                        acc_idx = acc_idx,
+                        account_keys_len = account_keys.len(),
+                        "Account index out of range, using placeholder"
+                    );
+                    format!("Unknown(idx:{})", acc_idx)
+                }
+            };
             accounts.push(InstructionAccount {
                 index: acc_idx,
-                pubkey: pk.to_string(),
+                pubkey: pk,
                 is_signer: i == 0, // First account is usually the signer
                 is_writable: false,
                 role: None,
