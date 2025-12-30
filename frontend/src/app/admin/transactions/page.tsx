@@ -936,23 +936,39 @@ function TransactionsPageContent() {
                   <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-4">
                     <div>
                       <div className="text-2xl font-bold text-amber-400">{data.round_summary.ore_summary.total_deployments}</div>
-                      <div className="text-xs text-slate-500">Deploys</div>
+                      <div className="text-xs text-slate-500">Deploys (Parsed)</div>
+                    </div>
+                    <div>
+                      <div className="text-2xl font-bold text-cyan-400">{data.round_summary.ore_summary.logged_deploy_count}</div>
+                      <div className="text-xs text-slate-500">Deploys (Logged)</div>
                     </div>
                     <div>
                       <div className="text-2xl font-bold text-green-400">{data.round_summary.ore_summary.deployments_matching_round}</div>
-                      <div className="text-xs text-slate-500">Matching</div>
+                      <div className="text-xs text-slate-500">Matching Round</div>
                     </div>
                     <div>
                       <div className="text-2xl font-bold text-red-400">{data.round_summary.ore_summary.deployments_wrong_round}</div>
                       <div className="text-xs text-slate-500">Wrong Round</div>
                     </div>
-                    <div>
-                      <div className="text-2xl font-bold text-amber-400">{data.round_summary.ore_summary.unique_miners}</div>
-                      <div className="text-xs text-slate-500">Miners</div>
+                  </div>
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-2">
+                    <div className="bg-slate-800/50 rounded-lg p-3">
+                      <div className="text-xs text-slate-500 mb-1">Parsed Total</div>
+                      <div className="text-lg font-bold text-amber-400">{data.round_summary.ore_summary.total_deployed_sol.toFixed(6)} SOL</div>
+                    </div>
+                    <div className="bg-slate-800/50 rounded-lg p-3">
+                      <div className="text-xs text-slate-500 mb-1">Logged Total</div>
+                      <div className="text-lg font-bold text-cyan-400">{data.round_summary.ore_summary.logged_deployed_sol.toFixed(6)} SOL</div>
+                    </div>
+                    <div className="bg-slate-800/50 rounded-lg p-3">
+                      <div className="text-xs text-slate-500 mb-1">Difference (Logged - Parsed)</div>
+                      <div className={`text-lg font-bold ${data.round_summary.ore_summary.logged_vs_parsed_diff_lamports === 0 ? 'text-green-400' : data.round_summary.ore_summary.logged_vs_parsed_diff_lamports > 0 ? 'text-yellow-400' : 'text-red-400'}`}>
+                        {data.round_summary.ore_summary.logged_vs_parsed_diff_sol >= 0 ? '+' : ''}{data.round_summary.ore_summary.logged_vs_parsed_diff_sol.toFixed(6)} SOL
+                      </div>
                     </div>
                   </div>
-                  <div className="text-lg text-white">
-                    Total: <span className="font-bold text-amber-400">{data.round_summary.ore_summary.total_deployed_sol.toFixed(6)} SOL</span>
+                  <div className="text-xs text-slate-500">
+                    Unique Miners: {data.round_summary.ore_summary.unique_miners}
                   </div>
                 </div>
               )}

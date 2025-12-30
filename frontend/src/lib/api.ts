@@ -1494,6 +1494,20 @@ export interface OreTransactionAnalysis {
   deployments: OreDeploymentInfo[];
   total_deployed_lamports: number;
   total_deployed_sol: number;
+  
+  // Logged totals from text logs (parsed from "Round #X: deploying Y SOL to Z squares")
+  logged_deployments: LoggedDeployment[];
+  logged_deploy_count: number;
+  logged_deployed_lamports: number;
+  logged_deployed_sol: number;
+}
+
+export interface LoggedDeployment {
+  round_id: number;
+  amount_per_square_sol: number;
+  squares_count: number;
+  total_sol: number;
+  total_lamports: number;
 }
 
 export interface OreDeploymentInfo {
@@ -1548,6 +1562,15 @@ export interface OreRoundSummary {
   total_deployed_lamports: number;
   total_deployed_sol: number;
   squares_deployed: SquareDeploymentInfo[];
+  
+  // Logged totals from text logs ("Round #X: deploying Y SOL to Z squares")
+  logged_deploy_count: number;
+  logged_deployed_lamports: number;
+  logged_deployed_sol: number;
+  
+  // Comparison: logged - parsed (positive = logged has more than parsed)
+  logged_vs_parsed_diff_lamports: number;
+  logged_vs_parsed_diff_sol: number;
 }
 
 export interface SquareDeploymentInfo {
