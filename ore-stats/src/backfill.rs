@@ -303,13 +303,19 @@ pub async fn backfill_rounds(
     }))
 }
 
-/// The actual background task that runs the backfill
+/// The actual background task that runs the backfill with page jumping optimization
 async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_pages: u32) {
     use crate::app_state::BackfillTaskStatus;
     
     let start_time = std::time::Instant::now();
     
-    for page in 0..max_pages {
+    // Page jumping state
+    let mut highest_round: u64 = 0;
+    let mut per_page: usize = 0;
+    let mut page: u32 = 0;
+    let mut pages_fetched: u32 = 0;
+    
+    while page < max_pages {
         // Check for cancellation
         {
             let cancel = state.backfill_rounds_cancel.read().await;
@@ -323,9 +329,9 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             }
         }
         
-        // Rate limit: 1 page per second to avoid spamming external API
-        if page > 0 {
-            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        // Rate limit: 500ms between pages
+        if pages_fetched > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
         
         // Update current page in state
@@ -336,9 +342,9 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             task_state.last_updated = chrono::Utc::now();
             
             // Calculate estimated time remaining
-            if page > 0 {
+            if pages_fetched > 0 {
                 let elapsed_secs = start_time.elapsed().as_secs_f64();
-                let pages_per_sec = page as f64 / elapsed_secs;
+                let pages_per_sec = pages_fetched as f64 / elapsed_secs;
                 if pages_per_sec > 0.0 {
                     let remaining_pages = max_pages.saturating_sub(page);
                     task_state.estimated_remaining_ms = Some((remaining_pages as f64 / pages_per_sec * 1000.0) as u64);
@@ -348,21 +354,25 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
         
         // Fetch from external API
         let rounds = get_ore_supply_rounds(page as u64).await;
+        pages_fetched += 1;
         
         if rounds.is_empty() {
             tracing::info!("No more rounds at page {}", page);
             break;
         }
         
-        // Track first round seen for estimation
+        let page_size = rounds.len();
+        let page_lowest_round = rounds.last().map(|r| r.round_id as u64);
+        
+        // Track first round seen for estimation and page jumping
         if page == 0 {
+            per_page = page_size;
             if let Some(first_round) = rounds.first() {
-                let first_id = first_round.round_id as u64;
+                highest_round = first_round.round_id as u64;
                 let mut task_state = state.backfill_rounds_task_state.write().await;
-                task_state.first_round_id_seen = Some(first_id);
-                // Estimate total rounds between first_round_id and stop_at_round
-                if first_id > stop_at_round {
-                    task_state.estimated_total_rounds = Some(first_id - stop_at_round);
+                task_state.first_round_id_seen = Some(highest_round);
+                if highest_round > stop_at_round {
+                    task_state.estimated_total_rounds = Some(highest_round - stop_at_round);
                 }
             }
         }
@@ -431,7 +441,8 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
         }
         
         // Insert batch to ClickHouse
-        if !batch.is_empty() {
+        let batch_was_empty = batch.is_empty();
+        if !batch_was_empty {
             let count = batch.len() as u32;
             if let Err(e) = state.clickhouse.insert_rounds(batch).await {
                 tracing::error!("Failed to insert rounds batch: {}", e);
@@ -454,6 +465,49 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             tracing::info!("Reached stop_at_round={}, stopping", stop_at_round);
             break;
         }
+        
+        // PAGE JUMPING: If all rounds on this page were skipped, jump ahead
+        let all_skipped = page_rounds_skipped as usize == page_size && batch_was_empty && page_rounds_missing_deps == 0;
+        
+        if all_skipped && per_page > 0 && page_lowest_round.is_some() {
+            let lowest = page_lowest_round.unwrap();
+            
+            // Find next round we need by checking a few rounds below the lowest on this page
+            let mut next_needed: Option<u64> = None;
+            for check in (stop_at_round + 1..lowest).rev().take(50) {
+                let exists = check_round_exists(&state.clickhouse, check).await;
+                if !exists {
+                    next_needed = Some(check);
+                    break;
+                }
+                let deps = state.clickhouse.count_deployments_for_round(check).await.unwrap_or(0);
+                if deps == 0 {
+                    next_needed = Some(check);
+                    break;
+                }
+            }
+            
+            if let Some(target) = next_needed {
+                // Calculate which page this round should be on
+                if target < highest_round {
+                    let rounds_back = highest_round - target;
+                    let estimated_page = (rounds_back / per_page as u64) as u32;
+                    
+                    // Only jump if it's more than 1 page ahead
+                    if estimated_page > page + 1 {
+                        tracing::info!(
+                            "Page {} all skipped. Jumping to page {} for round {} (was {})",
+                            page, estimated_page, target, page + 1
+                        );
+                        page = estimated_page;
+                        continue;
+                    }
+                }
+            }
+        }
+        
+        // Normal sequential progression
+        page += 1;
     }
     
     // Mark as completed
@@ -464,10 +518,11 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
     task_state.last_updated = chrono::Utc::now();
     
     tracing::info!(
-        "Backfill complete: {} fetched, {} skipped, {} missing deployments in {:?}",
+        "Backfill complete: {} fetched, {} skipped, {} missing deployments, {} pages in {:?}",
         task_state.rounds_fetched,
         task_state.rounds_skipped,
         task_state.rounds_missing_deployments,
+        pages_fetched,
         start_time.elapsed()
     );
 }

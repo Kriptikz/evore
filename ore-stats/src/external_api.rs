@@ -2,7 +2,7 @@ use reqwest::Client;
 use serde::Deserialize;
 use solana_program::pubkey::Pubkey;
 
-use crate::app_state::AppRound; // or solana_sdk::pubkey::Pubkey, depending on your deps
+use crate::app_state::AppRound;
 
 #[derive(Deserialize, Debug)]
 struct ResetRoundMeta {
@@ -73,4 +73,3 @@ pub async fn get_ore_supply_rounds(page: u64) -> Vec<AppRound> {
         })
         .collect()
 }
-
