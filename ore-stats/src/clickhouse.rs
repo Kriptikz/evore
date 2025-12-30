@@ -712,9 +712,10 @@ impl ClickHouseClient {
         Ok(count)
     }
     
-    /// Find the first (lowest) round_id that doesn't exist in ClickHouse within the given range.
+    /// Find the next (highest) round_id that doesn't exist in ClickHouse within the given range.
     /// This is used for page jumping during external API backfill.
-    pub async fn find_first_missing_round_in_range(
+    /// Since the external API returns rounds from highest to lowest, we want the HIGHEST missing round.
+    pub async fn find_next_missing_round_in_range(
         &self,
         min_round: u64,
         max_round: u64,
@@ -723,15 +724,15 @@ impl ClickHouseClient {
             return Ok(None);
         }
         
-        // Find the first number in the range that is NOT in the rounds table
-        // We use numbers() to generate all possible round IDs and find the first missing one
+        // Find the highest number in the range that is NOT in the rounds table
+        // We use numbers() to generate all possible round IDs and find the highest missing one
         let query = format!(r#"
             SELECT n.number as missing_round
             FROM numbers({}, {}) n
             WHERE n.number NOT IN (
                 SELECT round_id FROM rounds WHERE round_id >= {} AND round_id <= {}
             )
-            ORDER BY n.number ASC
+            ORDER BY n.number DESC
             LIMIT 1
         "#, min_round, max_round - min_round + 1, min_round, max_round);
         

@@ -471,8 +471,8 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
         // PAGE JUMPING LOGIC:
         // If ALL rounds on this page already exist, find the next missing round and jump there
         if page_new_rounds == 0 && per_page > 0 {
-            // Find the first round that's MISSING from ClickHouse below the current page's last round
-            let next_missing = find_first_missing_round(
+            // Find the highest round that's MISSING from ClickHouse below the current page's last round
+            let next_missing = find_next_missing_round(
                 &state.clickhouse, 
                 stop_at_round + 1, 
                 page_last_round.saturating_sub(1)
@@ -530,9 +530,10 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
     );
 }
 
-/// Find the first (lowest) round_id that doesn't exist in ClickHouse
-/// within the given range [min_round, max_round]
-async fn find_first_missing_round(
+/// Find the next (highest) round_id that doesn't exist in ClickHouse
+/// within the given range [min_round, max_round].
+/// Since we're iterating from high to low, we want the highest missing round.
+async fn find_next_missing_round(
     clickhouse: &crate::clickhouse::ClickHouseClient,
     min_round: u64,
     max_round: u64,
@@ -541,9 +542,8 @@ async fn find_first_missing_round(
         return None;
     }
     
-    // Query ClickHouse for the first missing round in the range
-    // This finds gaps in the round_id sequence
-    match clickhouse.find_first_missing_round_in_range(min_round, max_round).await {
+    // Query ClickHouse for the next (highest) missing round in the range
+    match clickhouse.find_next_missing_round_in_range(min_round, max_round).await {
         Ok(Some(round)) => Some(round),
         Ok(None) => None,
         Err(e) => {

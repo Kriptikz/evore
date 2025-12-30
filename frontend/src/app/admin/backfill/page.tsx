@@ -539,10 +539,17 @@ function RoundsDataSection({
     });
   };
   
+  // A round needs work if it has 0 deployments OR has a mismatch
+  const needsWork = (r: RoundWithData) => {
+    const isMissing = r.deployment_count === 0;
+    const hasMismatch = r.deployment_count > 0 && (r.deployments_sum ?? 0) !== r.total_deployed;
+    return isMissing || hasMismatch;
+  };
+  
   const selectAll = () => {
-    // Select all rounds that are missing deployments
-    const missingRounds = rounds.filter(r => r.deployment_count === 0).map(r => r.round_id);
-    setSelectedRounds(new Set(missingRounds));
+    // Select all rounds that need work (missing OR invalid)
+    const selectableRounds = rounds.filter(needsWork).map(r => r.round_id);
+    setSelectedRounds(new Set(selectableRounds));
   };
   
   const clearSelection = () => {
@@ -556,6 +563,8 @@ function RoundsDataSection({
   };
   
   const missingCount = rounds.filter(r => r.deployment_count === 0).length;
+  const invalidCount = rounds.filter(r => r.deployment_count > 0 && (r.deployments_sum ?? 0) !== r.total_deployed).length;
+  const selectableCount = rounds.filter(needsWork).length;
   const selectedCount = selectedRounds.size;
 
   return (
@@ -575,14 +584,14 @@ function RoundsDataSection({
         </div>
         
         {/* Bulk Actions Bar */}
-        {rounds.length > 0 && (
+        {rounds.length > 0 && selectableCount > 0 && (
           <div className="flex items-center gap-2 flex-wrap">
             <div className="flex gap-1">
               <button
                 onClick={selectAll}
                 className="px-2 py-1 text-xs bg-slate-700 hover:bg-slate-600 text-white rounded"
               >
-                Select All Missing ({missingCount})
+                Select All ({selectableCount})
               </button>
               <button
                 onClick={clearSelection}
@@ -625,12 +634,14 @@ function RoundsDataSection({
             <thead className="bg-slate-800/50 sticky top-0">
               <tr className="border-b border-slate-700">
                 <th className="text-left px-3 py-2 text-xs font-medium text-slate-400 w-8">
+                  {selectableCount > 0 && (
         <input
           type="checkbox"
-                    checked={selectedCount === missingCount && missingCount > 0}
-                    onChange={() => selectedCount === missingCount ? clearSelection() : selectAll()}
-                    className="rounded border-slate-600 bg-slate-700 text-emerald-500"
-                  />
+                      checked={selectedCount === selectableCount && selectableCount > 0}
+                      onChange={() => selectedCount === selectableCount ? clearSelection() : selectAll()}
+                      className="rounded border-slate-600 bg-slate-700 text-emerald-500"
+                    />
+                  )}
                 </th>
                 <th className="text-left px-3 py-2 text-xs font-medium text-slate-400">Round</th>
                 <th className="text-left px-3 py-2 text-xs font-medium text-slate-400">Total Deployed</th>
@@ -647,6 +658,7 @@ function RoundsDataSection({
                 const deploymentSum = round.deployments_sum ?? 0;
                 const diff = round.total_deployed - deploymentSum;
                 const hasMismatch = round.deployment_count > 0 && diff !== 0;
+                const isSelectable = isMissing || hasMismatch;
                 
                 return (
                   <tr 
@@ -654,7 +666,7 @@ function RoundsDataSection({
                     className={`border-b border-slate-700/50 hover:bg-slate-700/30 ${isSelected ? 'bg-emerald-500/10' : ''} ${hasMismatch ? 'bg-red-500/5' : ''}`}
                   >
                     <td className="px-3 py-2">
-                      {isMissing && (
+                      {isSelectable && (
                         <input
                           type="checkbox"
                           checked={isSelected}
@@ -676,7 +688,7 @@ function RoundsDataSection({
                     </td>
                     <td className="px-3 py-2">
                       <div className="flex gap-1">
-                        {isMissing && (
+                        {isSelectable && (
                           <button
                             onClick={() => onAddToWorkflow(round.round_id)}
                             disabled={addingRoundId === round.round_id || isSelected}
@@ -954,7 +966,7 @@ export default function BackfillCommandCenter() {
       const res = await api.getRoundsWithData({ limit: 100, page, filterMode: roundsDataFilter });
       if (append) {
           setRoundsData(prev => [...prev, ...res.rounds]);
-        } else {
+      } else {
         setRoundsData(res.rounds);
         }
       setRoundsDataPage(page);
@@ -1351,7 +1363,7 @@ export default function BackfillCommandCenter() {
                 <div><span className="text-emerald-400">V</span> = Verified</div>
                 <div><span className="text-emerald-400">F</span> = Finalized</div>
               </div>
-                </div>
+              </div>
           </>
         ) : (
           <>
