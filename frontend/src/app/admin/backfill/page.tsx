@@ -4,49 +4,18 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import Link from "next/link";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { useAdmin } from "@/context/AdminContext";
-import { api, RoundStatus, RoundWithData, RoundStatsResponse, FilterMode, BackfillRoundsTaskState } from "@/lib/api";
-import { API_URL } from "@/lib/constants";
-
-// ============================================================================
-// Types
-// ============================================================================
-
-interface QueuedAction {
-  id: number;
-  round_id: number;
-  action: string;
-  status: string;
-  queued_at: string;
-  started_at: string | null;
-  completed_at: string | null;
-  error: string | null;
-}
-
-interface QueueStatus {
-  paused: boolean;
-  pending_count: number;
-  processing: QueuedAction | null;
-  total_processed: number;
-  total_failed: number;
-  processing_rate: number;
-  recent_completed: QueuedAction[];
-  recent_failed: QueuedAction[];
-}
-
-interface PipelineStats {
-  not_in_workflow: number;
-  pending_txns: number;
-  pending_reconstruct: number;
-  pending_verify: number;
-  pending_finalize: number;
-  complete: number;
-}
-
-interface MemoryUsage {
-  memory_bytes: number;
-  memory_human: string;
-  queue_cache_items: number;
-}
+import { 
+  api, 
+  RoundStatus, 
+  RoundWithData, 
+  RoundStatsResponse, 
+  FilterMode, 
+  BackfillRoundsTaskState,
+  QueueStatus,
+  QueuedAction,
+  PipelineStats,
+  MemoryUsage
+} from "@/lib/api";
 
 // ============================================================================
 // Helper Components
@@ -963,12 +932,8 @@ export default function BackfillCommandCenter() {
   const fetchQueueStatus = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/queue/status`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
-      });
-      if (res.ok) {
-        setQueueStatus(await res.json());
-      }
+      const data = await api.getQueueStatus();
+      setQueueStatus(data);
     } catch (err) {
       console.error("Failed to fetch queue status:", err);
     }
@@ -977,12 +942,8 @@ export default function BackfillCommandCenter() {
   const fetchPipelineStats = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/pipeline-stats`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
-      });
-      if (res.ok) {
-        setPipelineStats(await res.json());
-      }
+      const data = await api.getPipelineStats();
+      setPipelineStats(data);
     } catch (err) {
       console.error("Failed to fetch pipeline stats:", err);
     }
@@ -991,12 +952,8 @@ export default function BackfillCommandCenter() {
   const fetchMemoryUsage = useCallback(async () => {
     if (!isAuthenticated) return;
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/memory`, {
-        headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
-      });
-      if (res.ok) {
-        setMemoryUsage(await res.json());
-      }
+      const data = await api.getMemoryUsage();
+      setMemoryUsage(data);
     } catch (err) {
       console.error("Failed to fetch memory usage:", err);
     }
@@ -1021,7 +978,7 @@ export default function BackfillCommandCenter() {
       console.error("Failed to fetch pending rounds:", err);
     }
   }, [isAuthenticated]);
-  
+
   const fetchRoundsData = useCallback(async (append = false) => {
     if (!isAuthenticated) return;
     setRoundsDataLoading(true);
@@ -1118,14 +1075,9 @@ export default function BackfillCommandCenter() {
 
   const handlePauseQueue = async () => {
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/queue/pause`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
-      });
-      if (res.ok) {
-        setMessage("Queue paused");
-        fetchQueueStatus();
-      }
+      await api.pauseQueue();
+      setMessage("Queue paused");
+      fetchQueueStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to pause queue");
     }
@@ -1133,14 +1085,9 @@ export default function BackfillCommandCenter() {
 
   const handleResumeQueue = async () => {
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/queue/resume`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
-      });
-      if (res.ok) {
-        setMessage("Queue resumed");
-        fetchQueueStatus();
-      }
+      await api.resumeQueue();
+      setMessage("Queue resumed");
+      fetchQueueStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to resume queue");
     }
@@ -1148,15 +1095,9 @@ export default function BackfillCommandCenter() {
 
   const handleClearQueue = async () => {
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/queue/clear`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(data.message);
-        fetchQueueStatus();
-      }
+      const data = await api.clearQueue();
+      setMessage(data.message);
+      fetchQueueStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to clear queue");
     }
@@ -1164,15 +1105,9 @@ export default function BackfillCommandCenter() {
 
   const handleRetryFailed = async () => {
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/queue/retry-failed`, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${localStorage.getItem("adminToken")}` }
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(data.message);
-        fetchQueueStatus();
-      }
+      const data = await api.retryFailedQueue();
+      setMessage(data.message);
+      fetchQueueStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to retry failed items");
     }
@@ -1180,25 +1115,15 @@ export default function BackfillCommandCenter() {
 
   const handleEnqueue = async (start: number, end: number, action: string, skipDone: boolean, onlyInWorkflow: boolean) => {
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/queue/enqueue`, {
-        method: "POST",
-        headers: { 
-          Authorization: `Bearer ${localStorage.getItem("adminToken")}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          start_round: start,
-          end_round: end,
-          action,
-          skip_if_done: skipDone,
-          only_in_workflow: onlyInWorkflow
-        })
+      const data = await api.enqueueActions({
+        start_round: start,
+        end_round: end,
+        action,
+        skip_if_done: skipDone,
+        only_in_workflow: onlyInWorkflow
       });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(data.message);
-        fetchQueueStatus();
-      }
+      setMessage(data.message);
+      fetchQueueStatus();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to enqueue");
     }
@@ -1206,20 +1131,10 @@ export default function BackfillCommandCenter() {
 
   const handleAddToWorkflow = async (start: number, end: number) => {
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/add-range`, {
-        method: "POST",
-        headers: { 
-          Authorization: `Bearer ${localStorage.getItem("adminToken")}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ start_round: start, end_round: end })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(data.message);
-        fetchPipelineStats();
-        fetchPendingRounds();
-      }
+      const data = await api.addRangeToWorkflow(start, end);
+      setMessage(data.message);
+      fetchPipelineStats();
+      fetchPendingRounds();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to add to workflow");
     }
@@ -1227,20 +1142,12 @@ export default function BackfillCommandCenter() {
 
   const handleBulkVerify = async (start: number, end: number) => {
     try {
-      const res = await fetch(`${API_URL}/admin/backfill/bulk-verify`, {
-        method: "POST",
-        headers: { 
-          Authorization: `Bearer ${localStorage.getItem("adminToken")}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ start_round: start, end_round: end })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setMessage(data.message);
-        fetchPipelineStats();
+      // Generate array of round IDs from range
+      const roundIds = Array.from({ length: end - start + 1 }, (_, i) => start + i);
+      const data = await api.bulkVerifyRounds(roundIds);
+      setMessage(data.message);
+      fetchPipelineStats();
       fetchPendingRounds();
-      }
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to bulk verify");
     }

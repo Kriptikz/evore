@@ -185,6 +185,7 @@ export interface BackfillRoundsTaskState {
   per_page: number;
   rounds_fetched: number;
   rounds_skipped: number;
+  pages_jumped: number;
   last_round_id_processed: number | null;
   first_round_id_seen: number | null;
   estimated_total_rounds: number | null;
@@ -192,6 +193,56 @@ export interface BackfillRoundsTaskState {
   elapsed_ms: number;
   estimated_remaining_ms: number | null;
   last_updated: string;
+}
+
+export interface QueuedAction {
+  id: number;
+  round_id: number;
+  action: string;
+  status: string;
+  queued_at: string;
+  started_at: string | null;
+  completed_at: string | null;
+  error: string | null;
+}
+
+export interface QueueStatus {
+  paused: boolean;
+  pending_count: number;
+  processing: QueuedAction | null;
+  total_processed: number;
+  total_failed: number;
+  processing_rate: number;
+  recent_completed: QueuedAction[];
+  recent_failed: QueuedAction[];
+}
+
+export interface PipelineStats {
+  not_in_workflow: number;
+  pending_txns: number;
+  pending_reconstruct: number;
+  pending_verify: number;
+  pending_finalize: number;
+  complete: number;
+}
+
+export interface MemoryUsage {
+  memory_bytes: number;
+  memory_human: string;
+  queue_cache_items: number;
+}
+
+export interface BulkEnqueueRequest {
+  start_round: number;
+  end_round: number;
+  action: string;
+  skip_if_done: boolean;
+  only_in_workflow: boolean;
+}
+
+export interface BulkEnqueueResponse {
+  message: string;
+  enqueued: number;
   pages_jumped: number;
 }
 
@@ -918,6 +969,47 @@ class ApiClient {
 
   async cancelBackfillRounds(): Promise<{ message: string }> {
     return this.request("POST", "/admin/backfill/rounds/cancel", { requireAuth: true });
+  }
+
+  // Queue management
+  async getQueueStatus(): Promise<QueueStatus> {
+    return this.request("GET", "/admin/backfill/queue/status", { requireAuth: true });
+  }
+
+  async getPipelineStats(): Promise<PipelineStats> {
+    return this.request("GET", "/admin/backfill/pipeline-stats", { requireAuth: true });
+  }
+
+  async getMemoryUsage(): Promise<MemoryUsage> {
+    return this.request("GET", "/admin/backfill/memory", { requireAuth: true });
+  }
+
+  async pauseQueue(): Promise<{ message: string }> {
+    return this.request("POST", "/admin/backfill/queue/pause", { requireAuth: true });
+  }
+
+  async resumeQueue(): Promise<{ message: string }> {
+    return this.request("POST", "/admin/backfill/queue/resume", { requireAuth: true });
+  }
+
+  async clearQueue(): Promise<{ message: string; cleared: number }> {
+    return this.request("POST", "/admin/backfill/queue/clear", { requireAuth: true });
+  }
+
+  async retryFailedQueue(): Promise<{ message: string; retried: number }> {
+    return this.request("POST", "/admin/backfill/queue/retry-failed", { requireAuth: true });
+  }
+
+  async enqueueActions(request: BulkEnqueueRequest): Promise<BulkEnqueueResponse> {
+    return this.request("POST", "/admin/backfill/queue/enqueue", { requireAuth: true, body: request });
+  }
+
+  async addRangeToWorkflow(startRound: number, endRound: number): Promise<{ message: string; added: number }> {
+    return this.request("POST", "/admin/backfill/add-range", { requireAuth: true, body: { start_round: startRound, end_round: endRound } });
+  }
+
+  async bulkVerifyRounds(roundIds: number[]): Promise<{ message: string; verified: number }> {
+    return this.request("POST", "/admin/backfill/bulk-verify", { requireAuth: true, body: { round_ids: roundIds } });
   }
 
   async getPendingRounds(): Promise<PendingRoundsResponse> {
