@@ -63,6 +63,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     let mut gpa_result: Option<HashMap<String, Miner>> = None;
     let max_total_attempts = 10;
     let flux_first_attempts = 3;
+    let min_miner_count = 10_000; // Minimum miners for a valid snapshot
     
     for attempt in 1..=max_total_attempts {
         // Use Flux for first 3 attempts, then round robin
@@ -77,9 +78,31 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         
         match state.rpc.get_all_miners_gpa_with_client(treasury_for_gpa.as_ref(), use_helius).await {
             Ok(miners) => {
+                let miner_count = miners.len();
+                
+                // Validate we got a complete snapshot (at least 10k miners)
+                if miner_count < min_miner_count {
+                    tracing::warn!(
+                        "GPA snapshot attempt {}/{} ({}): only {} miners (need at least {}), treating as incomplete",
+                        attempt, max_total_attempts, provider, miner_count, min_miner_count
+                    );
+                    
+                    if attempt < max_total_attempts {
+                        let delay = if attempt < flux_first_attempts {
+                            Duration::from_millis(500)
+                        } else {
+                            Duration::from_secs(1)
+                        };
+                        tracing::info!("Retrying GPA snapshot with {} in {:?}...", 
+                            if use_helius { "Flux" } else { "Helius" }, delay);
+                        tokio::time::sleep(delay).await;
+                    }
+                    continue;
+                }
+                
                 tracing::info!(
                     "GPA snapshot attempt {}/{} ({}): fetched {} miners",
-                    attempt, max_total_attempts, provider, miners.len()
+                    attempt, max_total_attempts, provider, miner_count
                 );
                 gpa_result = Some(miners);
                 break;
