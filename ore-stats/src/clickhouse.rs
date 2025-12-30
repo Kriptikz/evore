@@ -496,6 +496,7 @@ impl ClickHouseClient {
     }
     
     /// Get rounds where deployment amounts don't match total_deployed (invalid data)
+    /// This excludes rounds with 0 deployments (those are "missing", not "invalid")
     pub async fn get_rounds_with_invalid_deployments(
         &self,
         round_id_gte: Option<u64>,
@@ -521,6 +522,7 @@ impl ClickHouseClient {
         let skip = offset.unwrap_or(0);
         
         // Join with deployments sum and filter for mismatches
+        // Invalid = has deployments (dep_count > 0) but sum doesn't match total_deployed
         let query = format!(r#"
             SELECT 
                 r.round_id,
@@ -546,9 +548,7 @@ impl ClickHouseClient {
                 FROM deployments
                 GROUP BY round_id
             ) d ON r.round_id = d.round_id
-            WHERE {} AND (
-                d.dep_count IS NULL OR d.dep_count = 0 OR d.dep_sum != r.total_deployed
-            )
+            WHERE {} AND d.dep_count > 0 AND d.dep_sum != r.total_deployed
             ORDER BY r.round_id DESC
             LIMIT {} OFFSET {}
         "#, where_clause, fetch_limit, skip);
@@ -647,6 +647,7 @@ impl ClickHouseClient {
     }
     
     /// Get count of rounds with invalid deployments
+    /// This excludes rounds with 0 deployments (those are "missing", not "invalid")
     pub async fn get_rounds_with_invalid_deployments_count(
         &self,
         round_id_gte: Option<u64>,
@@ -663,6 +664,7 @@ impl ClickHouseClient {
         
         let where_clause = conditions.join(" AND ");
         
+        // Invalid = has deployments (dep_count > 0) but sum doesn't match total_deployed
         let query = format!(r#"
             SELECT count()
             FROM rounds r
@@ -671,9 +673,7 @@ impl ClickHouseClient {
                 FROM deployments
                 GROUP BY round_id
             ) d ON r.round_id = d.round_id
-            WHERE {} AND (
-                d.dep_count IS NULL OR d.dep_count = 0 OR d.dep_sum != r.total_deployed
-            )
+            WHERE {} AND d.dep_count > 0 AND d.dep_sum != r.total_deployed
         "#, where_clause);
         
         let count: u64 = self.client.query(&query).fetch_one().await?;
@@ -710,6 +710,37 @@ impl ClickHouseClient {
         
         let count: u64 = self.client.query(&query).fetch_one().await?;
         Ok(count)
+    }
+    
+    /// Find the first (lowest) round_id that doesn't exist in ClickHouse within the given range.
+    /// This is used for page jumping during external API backfill.
+    pub async fn find_first_missing_round_in_range(
+        &self,
+        min_round: u64,
+        max_round: u64,
+    ) -> Result<Option<u64>, ClickHouseError> {
+        if min_round > max_round {
+            return Ok(None);
+        }
+        
+        // Find the first number in the range that is NOT in the rounds table
+        // We use numbers() to generate all possible round IDs and find the first missing one
+        let query = format!(r#"
+            SELECT n.number as missing_round
+            FROM numbers({}, {}) n
+            WHERE n.number NOT IN (
+                SELECT round_id FROM rounds WHERE round_id >= {} AND round_id <= {}
+            )
+            ORDER BY n.number ASC
+            LIMIT 1
+        "#, min_round, max_round - min_round + 1, min_round, max_round);
+        
+        let result: Option<u64> = self.client
+            .query(&query)
+            .fetch_optional()
+            .await?;
+        
+        Ok(result)
     }
     
     /// Get total count of rounds in database.

@@ -275,9 +275,9 @@ pub async fn backfill_rounds(
             stop_at_round,
             max_pages,
             current_page: 0,
+            per_page: 0,
             rounds_fetched: 0,
             rounds_skipped: 0,
-            rounds_missing_deployments: 0,
             last_round_id_processed: None,
             first_round_id_seen: None,
             estimated_total_rounds: None,
@@ -305,6 +305,16 @@ pub async fn backfill_rounds(
 }
 
 /// The actual background task that runs the backfill with page jumping optimization
+/// 
+/// This task ONLY fetches round METADATA from the external API and stores it in ClickHouse.
+/// It does NOT deal with deployments at all - that's a completely separate workflow.
+/// 
+/// Logic:
+/// 1. Fetch page 0 to get: highest_round, per_page
+/// 2. For each page, check which rounds don't exist in ClickHouse
+/// 3. Store any missing rounds to ClickHouse
+/// 4. If ALL rounds on a page already exist, query ClickHouse for the NEXT missing round
+/// 5. Calculate target_page = (highest_round - missing_round) / per_page and jump there
 async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_pages: u32) {
     use crate::app_state::BackfillTaskStatus;
     
@@ -330,7 +340,7 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             }
         }
         
-        // Rate limit: 500ms between pages
+        // Rate limit between pages
         if pages_fetched > 0 {
             tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
         }
@@ -341,19 +351,11 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             task_state.current_page = page;
             task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
             task_state.last_updated = chrono::Utc::now();
-            
-            // Calculate estimated time remaining
-            if pages_fetched > 0 {
-                let elapsed_secs = start_time.elapsed().as_secs_f64();
-                let pages_per_sec = pages_fetched as f64 / elapsed_secs;
-                if pages_per_sec > 0.0 {
-                    let remaining_pages = max_pages.saturating_sub(page);
-                    task_state.estimated_remaining_ms = Some((remaining_pages as f64 / pages_per_sec * 1000.0) as u64);
-                }
-            }
+            task_state.per_page = per_page;
         }
         
         // Fetch from external API
+        tracing::info!("Fetching page {} from external API", page);
         let rounds = get_ore_supply_rounds(page as u64).await;
         pages_fetched += 1;
         
@@ -363,27 +365,31 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
         }
         
         let page_size = rounds.len();
-        let page_lowest_round = rounds.last().map(|r| r.round_id as u64);
+        let page_first_round = rounds.first().map(|r| r.round_id as u64).unwrap_or(0);
+        let page_last_round = rounds.last().map(|r| r.round_id as u64).unwrap_or(0);
         
-        // Track first round seen for estimation and page jumping
-        if page == 0 {
+        // On first page, capture highest_round and per_page for page calculations
+        if highest_round == 0 {
             per_page = page_size;
-            if let Some(first_round) = rounds.first() {
-                highest_round = first_round.round_id as u64;
-                let mut task_state = state.backfill_rounds_task_state.write().await;
-                task_state.first_round_id_seen = Some(highest_round);
-                if highest_round > stop_at_round {
-                    task_state.estimated_total_rounds = Some(highest_round - stop_at_round);
-                }
+            highest_round = page_first_round;
+            let mut task_state = state.backfill_rounds_task_state.write().await;
+            task_state.first_round_id_seen = Some(highest_round);
+            task_state.per_page = per_page;
+            if highest_round > stop_at_round {
+                task_state.estimated_total_rounds = Some(highest_round - stop_at_round);
             }
+            tracing::info!(
+                "First page: highest_round={}, per_page={}", 
+                highest_round, per_page
+            );
         }
         
         let mut batch: Vec<RoundInsert> = Vec::new();
         let mut should_stop = false;
         let mut page_rounds_skipped = 0u32;
-        let mut page_rounds_missing_deps = 0u32;
+        let mut page_new_rounds = 0u32;
         
-        for round in rounds {
+        for round in &rounds {
             let round_id = round.round_id as u64;
             
             // Update last processed round
@@ -395,27 +401,20 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             // Check if we should stop
             if round_id <= stop_at_round {
                 should_stop = true;
+                tracing::info!("Reached stop_at_round={} at round_id={}", stop_at_round, round_id);
                 break;
             }
             
             // Check if round already exists in ClickHouse
             let round_exists = check_round_exists(&state.clickhouse, round_id).await;
             
-            // Also check if deployments exist
-            let deployment_count = state.clickhouse.count_deployments_for_round(round_id).await.unwrap_or(0);
-            
-            if round_exists && deployment_count > 0 {
-                // Fully complete - skip
+            if round_exists {
+                // Round exists - skip (we're only looking for missing rounds from external API)
                 page_rounds_skipped += 1;
-                continue;
-            } else if round_exists && deployment_count == 0 {
-                // Round exists but no deployments - mark for backfill
-                page_rounds_missing_deps += 1;
-                update_round_status_meta_fetched(&state.postgres, round_id).await;
                 continue;
             }
             
-            // Round doesn't exist - create it
+            // Round doesn't exist in ClickHouse - fetch from external API and store
             let insert = RoundInsert::from_backfill(
                 round_id,
                 0, // start_slot - not available from external API
@@ -431,19 +430,20 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             );
             
             batch.push(insert);
+            page_new_rounds += 1;
+            
+            // Also add to backfill workflow with meta_fetched = true
             update_round_status_meta_fetched(&state.postgres, round_id).await;
         }
         
-        // Update skipped/missing counts
+        // Update counts
         {
             let mut task_state = state.backfill_rounds_task_state.write().await;
             task_state.rounds_skipped += page_rounds_skipped;
-            task_state.rounds_missing_deployments += page_rounds_missing_deps;
         }
         
         // Insert batch to ClickHouse
-        let batch_was_empty = batch.is_empty();
-        if !batch_was_empty {
+        if !batch.is_empty() {
             let count = batch.len() as u32;
             if let Err(e) = state.clickhouse.insert_rounds(batch).await {
                 tracing::error!("Failed to insert rounds batch: {}", e);
@@ -459,58 +459,53 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
                 let mut task_state = state.backfill_rounds_task_state.write().await;
                 task_state.rounds_fetched += count;
             }
-            tracing::info!("Page {}: inserted {} rounds", page, count);
+            tracing::info!("Page {}: inserted {} new rounds (skipped {})", page, count, page_rounds_skipped);
+        } else {
+            tracing::info!("Page {}: all {} rounds already exist (skipped)", page, page_size);
         }
         
         if should_stop {
-            tracing::info!("Reached stop_at_round={}, stopping", stop_at_round);
             break;
         }
         
-        // PAGE JUMPING: If all rounds on this page already exist (with or without deployments), jump ahead
-        // We can skip if nothing new to insert and all rounds were either skipped or marked as missing deps
-        let all_existing = batch_was_empty && 
-            (page_rounds_skipped as usize + page_rounds_missing_deps as usize) == page_size;
-        
-        if all_existing && per_page > 0 && page_lowest_round.is_some() {
-            let lowest = page_lowest_round.unwrap();
+        // PAGE JUMPING LOGIC:
+        // If ALL rounds on this page already exist, find the next missing round and jump there
+        if page_new_rounds == 0 && per_page > 0 {
+            // Find the first round that's MISSING from ClickHouse below the current page's last round
+            let next_missing = find_first_missing_round(
+                &state.clickhouse, 
+                stop_at_round + 1, 
+                page_last_round.saturating_sub(1)
+            ).await;
             
-            // Find next round we need by checking a few rounds below the lowest on this page
-            let mut next_needed: Option<u64> = None;
-            for check in (stop_at_round + 1..lowest).rev().take(50) {
-                let exists = check_round_exists(&state.clickhouse, check).await;
-                if !exists {
-                    next_needed = Some(check);
-                    break;
-                }
-                let deps = state.clickhouse.count_deployments_for_round(check).await.unwrap_or(0);
-                if deps == 0 {
-                    next_needed = Some(check);
-                    break;
-                }
-            }
-            
-            if let Some(target) = next_needed {
+            if let Some(target_round) = next_missing {
                 // Calculate which page this round should be on
-                if target < highest_round {
-                    let rounds_back = highest_round - target;
-                    let estimated_page = (rounds_back / per_page as u64) as u32;
-                    
-                    // Only jump if it's more than 1 page ahead
-                    if estimated_page > page + 1 {
-                        let pages_skipped = estimated_page - page - 1;
-                        tracing::info!(
-                            "Page {} all existing. Jumping to page {} for round {} (skipping {} pages)",
-                            page, estimated_page, target, pages_skipped
-                        );
-                        {
-                            let mut task_state = state.backfill_rounds_task_state.write().await;
-                            task_state.pages_jumped += pages_skipped;
-                        }
-                        page = estimated_page;
-                        continue;
+                // Pages go from highest_round (page 0) down to lower rounds
+                // page = (highest_round - target_round) / per_page
+                let rounds_from_highest = highest_round.saturating_sub(target_round);
+                let target_page = (rounds_from_highest / per_page as u64) as u32;
+                
+                if target_page > page + 1 {
+                    let pages_to_skip = target_page - page - 1;
+                    tracing::info!(
+                        "Page {} all existing. Next missing round: {}. Jumping from page {} to page {} (skipping {} pages)",
+                        page, target_round, page, target_page, pages_to_skip
+                    );
+                    {
+                        let mut task_state = state.backfill_rounds_task_state.write().await;
+                        task_state.pages_jumped += pages_to_skip;
                     }
+                    page = target_page;
+                    continue;
+                } else {
+                    tracing::debug!(
+                        "Next missing round {} is on page {} (current {}), continuing sequentially",
+                        target_round, target_page, page
+                    );
                 }
+            } else {
+                // No missing rounds found - we might be done
+                tracing::info!("No missing rounds found between {} and {}", stop_at_round + 1, page_last_round);
             }
         }
         
@@ -526,13 +521,36 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
     task_state.last_updated = chrono::Utc::now();
     
     tracing::info!(
-        "Backfill complete: {} fetched, {} skipped, {} missing deployments, {} pages in {:?}",
+        "Backfill complete: {} fetched, {} skipped, {} pages jumped, {} total pages in {:?}",
         task_state.rounds_fetched,
         task_state.rounds_skipped,
-        task_state.rounds_missing_deployments,
+        task_state.pages_jumped,
         pages_fetched,
         start_time.elapsed()
     );
+}
+
+/// Find the first (lowest) round_id that doesn't exist in ClickHouse
+/// within the given range [min_round, max_round]
+async fn find_first_missing_round(
+    clickhouse: &crate::clickhouse::ClickHouseClient,
+    min_round: u64,
+    max_round: u64,
+) -> Option<u64> {
+    if min_round > max_round {
+        return None;
+    }
+    
+    // Query ClickHouse for the first missing round in the range
+    // This finds gaps in the round_id sequence
+    match clickhouse.find_first_missing_round_in_range(min_round, max_round).await {
+        Ok(Some(round)) => Some(round),
+        Ok(None) => None,
+        Err(e) => {
+            tracing::error!("Error finding missing round: {}", e);
+            None
+        }
+    }
 }
 
 /// GET /admin/backfill/rounds/status

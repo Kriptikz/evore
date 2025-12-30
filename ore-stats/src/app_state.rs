@@ -148,6 +148,8 @@ impl Default for BackfillTaskStatus {
 }
 
 /// Live statistics for the rounds backfill background task
+/// This task fetches round METADATA from external API and stores in ClickHouse.
+/// It does NOT fetch or store deployments - that's a separate workflow.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct BackfillRoundsTaskState {
     /// Current task status
@@ -160,12 +162,12 @@ pub struct BackfillRoundsTaskState {
     pub max_pages: u32,
     /// Current page being processed
     pub current_page: u32,
-    /// Total rounds fetched and stored
+    /// Rounds per page (from external API)
+    pub per_page: usize,
+    /// Total NEW rounds fetched and stored (didn't exist in ClickHouse before)
     pub rounds_fetched: u32,
-    /// Rounds skipped (already exist with deployments)
+    /// Rounds skipped (already exist in ClickHouse)
     pub rounds_skipped: u32,
-    /// Rounds that exist but are missing deployments
-    pub rounds_missing_deployments: u32,
     /// Last round ID that was processed
     pub last_round_id_processed: Option<u64>,
     /// First round ID seen (highest round from first page)
@@ -180,7 +182,7 @@ pub struct BackfillRoundsTaskState {
     pub estimated_remaining_ms: Option<u64>,
     /// Last updated timestamp
     pub last_updated: chrono::DateTime<chrono::Utc>,
-    /// Number of pages jumped (skipped via estimation)
+    /// Number of pages jumped (skipped via page estimation)
     pub pages_jumped: u32,
 }
 
