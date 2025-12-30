@@ -1374,6 +1374,7 @@ export interface FullAnalysisResponse {
   transactions: FullTransactionAnalysis[];
   round_summary: RoundAnalysisSummary;
   missing_automation_states: MissingAutomationState[];
+  failed_transactions: FailedTransaction[];
 }
 
 export interface MissingAutomationState {
@@ -1381,6 +1382,12 @@ export interface MissingAutomationState {
   ix_index: number;
   miner: string;
   authority: string;
+}
+
+export interface FailedTransaction {
+  signature: string;
+  slot: number;
+  error: string;
 }
 
 export interface FullTransactionAnalysis {

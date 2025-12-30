@@ -1157,18 +1157,28 @@ function TransactionsPageContent() {
             <div className="bg-slate-900 border border-slate-700 rounded-xl p-4">
               <h2 className="text-lg font-semibold text-white mb-4">Round {data.round_id} Summary</h2>
               
-              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4 mb-6">
+              <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-7 gap-4 mb-6">
                 <div className="bg-slate-800/50 rounded-lg p-3">
-                  <div className="text-2xl font-bold text-white">{data.round_summary.total_transactions}</div>
-                  <div className="text-xs text-slate-500">Total Txns</div>
+                  <div className="text-2xl font-bold text-white">{data.total_transactions}</div>
+                  <div className="text-xs text-slate-500">Total Raw</div>
                 </div>
+                <div className="bg-slate-800/50 rounded-lg p-3">
+                  <div className="text-2xl font-bold text-white">{data.analyzed_count}</div>
+                  <div className="text-xs text-slate-500">Analyzed</div>
+                </div>
+                {data.failed_transactions.length > 0 && (
+                  <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
+                    <div className="text-2xl font-bold text-red-400">{data.failed_transactions.length}</div>
+                    <div className="text-xs text-slate-500">Parse Errors</div>
+                  </div>
+                )}
                 <div className="bg-green-500/10 border border-green-500/30 rounded-lg p-3">
                   <div className="text-2xl font-bold text-green-400">{data.round_summary.successful_transactions}</div>
                   <div className="text-xs text-slate-500">Successful</div>
                 </div>
                 <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-3">
                   <div className="text-2xl font-bold text-red-400">{data.round_summary.failed_transactions}</div>
-                  <div className="text-xs text-slate-500">Failed</div>
+                  <div className="text-xs text-slate-500">Tx Failed</div>
                 </div>
                 <div className="bg-slate-800/50 rounded-lg p-3">
                   <div className="text-2xl font-bold text-white">{data.round_summary.total_fee_sol.toFixed(4)}</div>
@@ -1310,6 +1320,38 @@ function TransactionsPageContent() {
                         </button>
                       </div>
                     )}
+                  </div>
+                </div>
+              )}
+              
+              {/* Failed Transactions */}
+              {data.failed_transactions && data.failed_transactions.length > 0 && (
+                <div className="p-3 bg-red-500/10 rounded-lg border border-red-500/30">
+                  <h3 className="text-sm font-semibold text-red-400 mb-2">
+                    ⚠ Failed to Parse ({data.failed_transactions.length})
+                  </h3>
+                  <div className="text-xs text-slate-400 mb-2">
+                    These transactions failed to parse and may be missing from analysis:
+                  </div>
+                  <div className="space-y-2 max-h-48 overflow-y-auto">
+                    {data.failed_transactions.map((ft, i) => (
+                      <div key={i} className="p-2 bg-slate-900/50 rounded">
+                        <div className="flex items-center gap-2 text-xs">
+                          <a
+                            href={`https://solscan.io/tx/${ft.signature}`}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            className="font-mono text-blue-400 hover:text-blue-300"
+                          >
+                            {ft.signature.slice(0, 8)}...{ft.signature.slice(-8)}
+                          </a>
+                          <span className="text-slate-500">Slot: {ft.slot.toLocaleString()}</span>
+                        </div>
+                        <div className="text-xs text-red-400 mt-1 font-mono">
+                          {ft.error}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               )}

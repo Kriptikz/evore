@@ -2066,6 +2066,15 @@ pub struct FullAnalysisResponse {
     pub round_summary: RoundAnalysisSummary,
     /// Deployments missing automation states (signature + ix_index)
     pub missing_automation_states: Vec<MissingAutomationState>,
+    /// Transactions that failed to parse/analyze
+    pub failed_transactions: Vec<FailedTransaction>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct FailedTransaction {
+    pub signature: String,
+    pub slot: u64,
+    pub error: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -2175,6 +2184,7 @@ pub async fn get_round_transactions_full(
     // Analyze only the paginated subset
     let analyze_start = std::time::Instant::now();
     let mut transactions = Vec::new();
+    let mut failed_transactions = Vec::new();
     let mut analyzed_count = 0usize;
     let mut error_count = 0usize;
     let mut slow_count = 0usize;
@@ -2217,9 +2227,15 @@ pub async fn get_round_transactions_full(
                 tracing::warn!(
                     round_id = round_id,
                     idx = idx + offset,
+                    signature = %raw_tx.signature,
                     error = %e,
                     "get_round_transactions_full: failed to analyze transaction"
                 );
+                failed_transactions.push(FailedTransaction {
+                    signature: raw_tx.signature.clone(),
+                    slot: raw_tx.slot,
+                    error: e,
+                });
             }
         }
         
@@ -2275,6 +2291,7 @@ pub async fn get_round_transactions_full(
         transactions,
         round_summary,
         missing_automation_states: Vec::new(), // Skip for now
+        failed_transactions,
     }))
 }
 
