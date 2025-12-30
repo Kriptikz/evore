@@ -2077,12 +2077,13 @@ impl ClickHouseClient {
         // Query aggregates:
         // - count() = total rounds
         // - sum(total_vaulted) = total cost in lamports
-        // - sum(motherlode * motherlode_hit) = total motherlode ORE (atomic units, 11 decimals)
+        // - sum(motherlode) = total motherlode ORE (atomic units, 11 decimals)
+        //   Note: motherlode is 0 when it doesn't hit, so no need to multiply by motherlode_hit
         let query = format!(r#"
             SELECT 
                 count() as total_rounds,
                 sum(total_vaulted) as total_vaulted,
-                sum(motherlode * motherlode_hit) as total_motherlode_ore
+                sum(motherlode) as total_motherlode_ore
             FROM rounds
             {}
         "#, where_clause);

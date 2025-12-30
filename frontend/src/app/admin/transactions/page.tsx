@@ -1439,7 +1439,7 @@ function TransactionsPageContent() {
                     {data.transactions.map((tx) => {
                       const signer = tx.signers[0] || "";
                       const deployments = tx.ore_analysis?.deployments || [];
-                      const uniqueAuthorities = [...new Set(deployments.map(d => d.authority).filter(Boolean))];
+                      const uniqueAuthorities = Array.from(new Set(deployments.map(d => d.authority).filter(Boolean)));
                       const authorityCount = uniqueAuthorities.length;
                       const firstAuthority = uniqueAuthorities[0] || "";
                       
