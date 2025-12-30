@@ -1508,6 +1508,7 @@ export interface LoggedDeployment {
   squares_count: number;
   total_sol: number;
   total_lamports: number;
+  round_matches: boolean;
 }
 
 export interface OreDeploymentInfo {

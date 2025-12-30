@@ -39,10 +39,12 @@ pub struct LoggedDeployment {
     pub squares_count: u32,
     pub total_sol: f64,
     pub total_lamports: u64,
+    pub round_matches: bool,
 }
 
 /// Parse "Round #X: deploying Y SOL to Z squares" from logs
-pub fn parse_deploy_logs(logs: &[String]) -> Vec<LoggedDeployment> {
+/// If expected_round_id is provided, sets round_matches to true only for matching rounds
+pub fn parse_deploy_logs(logs: &[String], expected_round_id: Option<u64>) -> Vec<LoggedDeployment> {
     logs.iter()
         .filter_map(|log| {
             DEPLOY_LOG_REGEX.captures(log).and_then(|cap| {
@@ -51,6 +53,7 @@ pub fn parse_deploy_logs(logs: &[String]) -> Vec<LoggedDeployment> {
                 let squares: u32 = cap.get(3)?.as_str().parse().ok()?;
                 let total_sol = amount_sol * squares as f64;
                 let total_lamports = (total_sol * 1e9) as u64;
+                let round_matches = expected_round_id.map(|e| round_id == e).unwrap_or(true);
                 
                 Some(LoggedDeployment {
                     round_id,
@@ -58,6 +61,7 @@ pub fn parse_deploy_logs(logs: &[String]) -> Vec<LoggedDeployment> {
                     squares_count: squares,
                     total_sol,
                     total_lamports,
+                    round_matches,
                 })
             })
         })
@@ -751,10 +755,14 @@ impl TransactionAnalyzer {
         let has_ore = ore_deploy_count + ore_reset_count + ore_log_count + ore_other_count > 0;
         let total_deployed: u64 = ore_deployments.iter().map(|d| d.total_lamports).sum();
         
-        // Parse logged deployments from text logs
-        let logged_deployments = parse_deploy_logs(&logs);
-        let logged_deploy_count = logged_deployments.len();
-        let logged_deployed_lamports: u64 = logged_deployments.iter().map(|d| d.total_lamports).sum();
+        // Parse logged deployments from text logs, filtering by expected round
+        let logged_deployments = parse_deploy_logs(&logs, self.expected_round_id);
+        let logged_deploy_count = logged_deployments.iter().filter(|d| d.round_matches).count();
+        let logged_deployed_lamports: u64 = logged_deployments
+            .iter()
+            .filter(|d| d.round_matches)
+            .map(|d| d.total_lamports)
+            .sum();
         let logged_deployed_sol = logged_deployed_lamports as f64 / 1e9;
         
         let ore_analysis = if has_ore || logged_deploy_count > 0 {
