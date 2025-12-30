@@ -11,6 +11,9 @@ import {
   InstructionAnalysis,
   ParsedInstruction,
   RoundTransactionInfo,
+  ExternalComparisonSummary,
+  fetchExternalDeployments,
+  calculateExternalSummary,
 } from "@/lib/api";
 
 // ============================================================================
@@ -705,6 +708,11 @@ function TransactionsPageContent() {
   const [roundsLoading, setRoundsLoading] = useState(true);
   const [roundsPage, setRoundsPage] = useState(1);
   const [roundsTotal, setRoundsTotal] = useState(0);
+  
+  // External API comparison
+  const [externalData, setExternalData] = useState<ExternalComparisonSummary | null>(null);
+  const [externalLoading, setExternalLoading] = useState(false);
+  const [externalError, setExternalError] = useState<string | null>(null);
 
   // Load available rounds on mount
   useEffect(() => {
@@ -737,6 +745,9 @@ function TransactionsPageContent() {
     setLoading(true);
     setError(null);
     setSingleTx(null);
+    // Clear external comparison when switching rounds
+    setExternalData(null);
+    setExternalError(null);
     try {
       const result = await api.getFullTransactionAnalysis(roundIdNum, { limit, offset: newOffset });
       setData(result);
@@ -761,6 +772,30 @@ function TransactionsPageContent() {
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const fetchExternalComparison = useCallback(async (roundIdNum: number) => {
+    setExternalLoading(true);
+    setExternalError(null);
+    setExternalData(null);
+    
+    const { data: deployments, error } = await fetchExternalDeployments(roundIdNum);
+    
+    if (error) {
+      setExternalError(error);
+      setExternalLoading(false);
+      return;
+    }
+    
+    if (!deployments || deployments.length === 0) {
+      setExternalError("No deployment data found for this round");
+      setExternalLoading(false);
+      return;
+    }
+    
+    const summary = calculateExternalSummary(deployments);
+    setExternalData(summary);
+    setExternalLoading(false);
   }, []);
 
   const handleSearch = () => {
@@ -1015,6 +1050,80 @@ function TransactionsPageContent() {
                     {data.round_summary.ore_summary.logged_unmatched_count > 0 && (
                       <div className="text-orange-400">
                         ⚠ Unmatched Logged Deploys: {data.round_summary.ore_summary.logged_unmatched_count} (parsing issue)
+                      </div>
+                    )}
+                  </div>
+                  
+                  {/* External API Comparison */}
+                  <div className="mt-4 pt-4 border-t border-slate-700">
+                    <div className="flex items-center justify-between mb-3">
+                      <h4 className="text-sm font-semibold text-purple-400">External API Comparison</h4>
+                      <button
+                        onClick={() => fetchExternalComparison(data.round_id)}
+                        disabled={externalLoading}
+                        className="px-3 py-1 text-xs bg-purple-600 hover:bg-purple-500 disabled:bg-purple-800 disabled:opacity-50 rounded-lg transition-colors"
+                      >
+                        {externalLoading ? "Loading..." : externalData ? "Refresh" : "Compare"}
+                      </button>
+                    </div>
+                    
+                    {externalError && (
+                      <div className="p-2 bg-red-500/10 border border-red-500/30 rounded-lg text-xs text-red-400 mb-3">
+                        {externalError}
+                      </div>
+                    )}
+                    
+                    {externalData && (
+                      <div className="space-y-3">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="bg-slate-800/50 rounded-lg p-3">
+                            <div className="text-xs text-slate-500 mb-1">External Total</div>
+                            <div className="text-lg font-bold text-purple-400">{externalData.total_sol.toFixed(6)} SOL</div>
+                          </div>
+                          <div className="bg-slate-800/50 rounded-lg p-3">
+                            <div className="text-xs text-slate-500 mb-1">External Unique Miners</div>
+                            <div className="text-lg font-bold text-purple-400">{externalData.unique_miners}</div>
+                          </div>
+                          <div className="bg-slate-800/50 rounded-lg p-3">
+                            <div className="text-xs text-slate-500 mb-1">External Deployments</div>
+                            <div className="text-lg font-bold text-purple-400">{externalData.deployments.length}</div>
+                          </div>
+                        </div>
+                        
+                        {/* Comparison Table */}
+                        <div className="bg-slate-800/30 rounded-lg p-3">
+                          <table className="w-full text-xs">
+                            <thead>
+                              <tr className="text-slate-400">
+                                <th className="text-left py-1">Metric</th>
+                                <th className="text-right py-1">Parsed</th>
+                                <th className="text-right py-1">Logged</th>
+                                <th className="text-right py-1">External</th>
+                                <th className="text-right py-1">Diff (Ext - Parsed)</th>
+                              </tr>
+                            </thead>
+                            <tbody className="text-slate-300">
+                              <tr>
+                                <td className="py-1">Unique Miners</td>
+                                <td className="text-right text-amber-400">{data.round_summary.ore_summary.unique_miners}</td>
+                                <td className="text-right text-cyan-400">{data.round_summary.ore_summary.logged_unique_miners}</td>
+                                <td className="text-right text-purple-400">{externalData.unique_miners}</td>
+                                <td className={`text-right ${externalData.unique_miners - data.round_summary.ore_summary.unique_miners === 0 ? 'text-green-400' : 'text-yellow-400'}`}>
+                                  {externalData.unique_miners - data.round_summary.ore_summary.unique_miners >= 0 ? '+' : ''}{externalData.unique_miners - data.round_summary.ore_summary.unique_miners}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td className="py-1">Total SOL</td>
+                                <td className="text-right text-amber-400">{data.round_summary.ore_summary.total_deployed_sol.toFixed(6)}</td>
+                                <td className="text-right text-cyan-400">{data.round_summary.ore_summary.logged_deployed_sol.toFixed(6)}</td>
+                                <td className="text-right text-purple-400">{externalData.total_sol.toFixed(6)}</td>
+                                <td className={`text-right ${Math.abs(externalData.total_sol - data.round_summary.ore_summary.total_deployed_sol) < 0.000001 ? 'text-green-400' : 'text-yellow-400'}`}>
+                                  {externalData.total_sol - data.round_summary.ore_summary.total_deployed_sol >= 0 ? '+' : ''}{(externalData.total_sol - data.round_summary.ore_summary.total_deployed_sol).toFixed(6)}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
                       </div>
                     )}
                   </div>

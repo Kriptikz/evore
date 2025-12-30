@@ -1723,6 +1723,77 @@ export interface AutomationAddToQueueResponse {
   errors: string[];
 }
 
+// ========== External API (kriptikz.dev) ==========
+
+export interface ExternalDeployment {
+  round_id: number;
+  pubkey: string;           // miner authority
+  deployments: number[];    // 25 values, lamports per square
+  sol_deployed: number;     // total lamports
+  sol_earned: number;
+  ore_earned: number;
+}
+
+export interface ExternalComparisonSummary {
+  unique_miners: number;
+  total_lamports: number;
+  total_sol: number;
+  deployments: ExternalDeployment[];
+}
+
+/**
+ * Fetch deployment data from external API (kriptikz.dev)
+ * Used for comparing with parsed/logged data to validate accuracy
+ */
+export async function fetchExternalDeployments(
+  roundId: number,
+  timeoutMs: number = 30000
+): Promise<{ data: ExternalDeployment[] | null; error: string | null }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  
+  try {
+    const response = await fetch(
+      `https://kriptikz.dev/v2/deployments?round_id=${roundId}`,
+      { signal: controller.signal }
+    );
+    
+    clearTimeout(timeoutId);
+    
+    if (!response.ok) {
+      return { data: null, error: `HTTP ${response.status}: ${response.statusText}` };
+    }
+    
+    const data: ExternalDeployment[] = await response.json();
+    return { data, error: null };
+  } catch (err) {
+    clearTimeout(timeoutId);
+    
+    if (err instanceof Error) {
+      if (err.name === 'AbortError') {
+        return { data: null, error: 'Request timed out' };
+      }
+      return { data: null, error: err.message };
+    }
+    return { data: null, error: 'Unknown error occurred' };
+  }
+}
+
+/**
+ * Calculate comparison summary from external deployments
+ */
+export function calculateExternalSummary(deployments: ExternalDeployment[]): ExternalComparisonSummary {
+  const uniqueMiners = new Set(deployments.map(d => d.pubkey));
+  const totalLamports = deployments.reduce((sum, d) => sum + d.sol_deployed, 0);
+  
+  return {
+    unique_miners: uniqueMiners.size,
+    total_lamports: totalLamports,
+    total_sol: totalLamports / 1e9,
+    deployments,
+  };
+}
+
 // Singleton instance
 export const api = new ApiClient(API_URL);
 
