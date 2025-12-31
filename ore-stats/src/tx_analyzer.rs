@@ -1580,89 +1580,102 @@ impl TransactionAnalyzer {
                 )
             }
             Ok(OreInstruction::Log) => {
-                // Log instruction contains event data after the first byte
-                // First byte is the instruction tag (8 for Log)
-                // The event data starts at byte 1
+                // Log instruction: byte 0 is instruction tag (8), byte 1+ is event data
+                // Event struct starts with disc: u64 field
+                // OreEvent enum: Reset=0, Bury=1, Deploy=2, Liq=3
                 
-                // ResetEvent size: disc(8) + round_id(8) + start_slot(8) + end_slot(8) + 
-                //                 winning_square(8) + top_miner(32) + num_winners(8) + 
-                //                 motherlode(8) + total_deployed(8) + total_vaulted(8) + 
-                //                 total_winnings(8) + total_minted(8) + ts(8) = 136 bytes
-                const RESET_EVENT_SIZE: usize = 136;
+                let reset_event_size = std::mem::size_of::<ResetEvent>();
+                let deploy_event_size = std::mem::size_of::<DeployEvent>();
                 
-                // DeployEvent size: disc(8) + authority(32) + amount(8) + mask(8) + 
-                //                  round_id(8) + signer(32) + strategy(8) + total_squares(8) + ts(8) = 120 bytes
-                const DEPLOY_EVENT_SIZE: usize = 120;
+                let body = &data[1..];
                 
-                let event_payload = &data[1..];
-                
-                // Check discriminator to determine event type
-                if event_payload.len() >= 8 {
-                    let disc = u64::from_le_bytes(event_payload[0..8].try_into().unwrap_or([0u8; 8]));
-                    
-                    match disc {
-                        0 if event_payload.len() >= RESET_EVENT_SIZE => {
-                            // ResetEvent (disc = 0)
-                            let ev: ResetEvent = bytemuck::pod_read_unaligned(&event_payload[..RESET_EVENT_SIZE]);
-                            (
-                                "Log (ResetEvent)".to_string(),
-                                Some(ParsedInstruction::OreLogReset {
-                                    round_id: ev.round_id,
-                                    start_slot: ev.start_slot,
-                                    end_slot: ev.end_slot,
-                                    winning_square: ev.winning_square,
-                                    top_miner: ev.top_miner.to_string(),
-                                    num_winners: ev.num_winners,
-                                    motherlode: ev.motherlode,
-                                    total_deployed: ev.total_deployed,
-                                    total_vaulted: ev.total_vaulted,
-                                    total_winnings: ev.total_winnings,
-                                    total_minted: ev.total_minted,
-                                    timestamp: ev.ts,
-                                }),
-                                None,
-                            )
-                        }
-                        1 if event_payload.len() >= DEPLOY_EVENT_SIZE => {
-                            // DeployEvent (disc = 1)
-                            let ev: DeployEvent = bytemuck::pod_read_unaligned(&event_payload[..DEPLOY_EVENT_SIZE]);
-                            (
-                                "Log (DeployEvent)".to_string(),
-                                Some(ParsedInstruction::OreLogDeploy {
-                                    authority: ev.authority.to_string(),
-                                    signer: ev.signer.to_string(),
-                                    amount: ev.amount,
-                                    mask: ev.mask,
-                                    round_id: ev.round_id,
-                                    strategy: ev.strategy,
-                                    total_squares: ev.total_squares,
-                                    timestamp: ev.ts,
-                                }),
-                                None,
-                            )
-                        }
-                        _ => {
-                            // Unknown event type or insufficient data
-                            (
-                                format!("Log (Unknown disc={})", disc),
-                                Some(ParsedInstruction::OreLogUnknown {
-                                    event_type: format!("disc={}", disc),
-                                    data_hex: hex::encode(event_payload),
-                                }),
-                                None,
-                            )
-                        }
-                    }
-                } else {
-                    // Not enough data for even the discriminator
-                    (
+                if body.len() < 8 {
+                    return (
                         "Log (Empty)".to_string(),
                         Some(ParsedInstruction::OreLogUnknown {
                             event_type: "Empty".to_string(),
-                            data_hex: hex::encode(event_payload),
+                            data_hex: hex::encode(body),
                         }),
                         None,
-                    )
+                    );
+                }
+                
+                // Read discriminator to determine event type
+                let disc = u64::from_le_bytes(body[0..8].try_into().unwrap_or([0u8; 8]));
+                
+                match disc {
+                    0 if body.len() >= reset_event_size => {
+                        // OreEvent::Reset = 0
+                        let ev: ResetEvent = bytemuck::pod_read_unaligned(&body[..reset_event_size]);
+                        (
+                            "Log (ResetEvent)".to_string(),
+                            Some(ParsedInstruction::OreLogReset {
+                                round_id: ev.round_id,
+                                start_slot: ev.start_slot,
+                                end_slot: ev.end_slot,
+                                winning_square: ev.winning_square,
+                                top_miner: ev.top_miner.to_string(),
+                                num_winners: ev.num_winners,
+                                motherlode: ev.motherlode,
+                                total_deployed: ev.total_deployed,
+                                total_vaulted: ev.total_vaulted,
+                                total_winnings: ev.total_winnings,
+                                total_minted: ev.total_minted,
+                                timestamp: ev.ts,
+                            }),
+                            None,
+                        )
+                    }
+                    2 if body.len() >= deploy_event_size => {
+                        // OreEvent::Deploy = 2
+                        let ev: DeployEvent = bytemuck::pod_read_unaligned(&body[..deploy_event_size]);
+                        (
+                            "Log (DeployEvent)".to_string(),
+                            Some(ParsedInstruction::OreLogDeploy {
+                                authority: ev.authority.to_string(),
+                                signer: ev.signer.to_string(),
+                                amount: ev.amount,
+                                mask: ev.mask,
+                                round_id: ev.round_id,
+                                strategy: ev.strategy,
+                                total_squares: ev.total_squares,
+                                timestamp: ev.ts,
+                            }),
+                            None,
+                        )
+                    }
+                    1 => {
+                        // OreEvent::Bury = 1 (not fully parsed yet)
+                        (
+                            "Log (BuryEvent)".to_string(),
+                            Some(ParsedInstruction::OreLogUnknown {
+                                event_type: "BuryEvent".to_string(),
+                                data_hex: hex::encode(body),
+                            }),
+                            None,
+                        )
+                    }
+                    3 => {
+                        // OreEvent::Liq = 3 (not fully parsed yet)
+                        (
+                            "Log (LiqEvent)".to_string(),
+                            Some(ParsedInstruction::OreLogUnknown {
+                                event_type: "LiqEvent".to_string(),
+                                data_hex: hex::encode(body),
+                            }),
+                            None,
+                        )
+                    }
+                    _ => {
+                        (
+                            format!("Log (Unknown disc={})", disc),
+                            Some(ParsedInstruction::OreLogUnknown {
+                                event_type: format!("disc={}", disc),
+                                data_hex: hex::encode(body),
+                            }),
+                            None,
+                        )
+                    }
                 }
             }
             Ok(other) => {
