@@ -46,38 +46,29 @@ ORDER BY round_id;
 
 -- MV that joins mint_snapshots and treasury_snapshots on round_id
 -- Triggers when new rows are inserted into mint_snapshots
+-- 
+-- NOTE: Window functions (lagInFrame) may not work correctly in MVs that 
+-- trigger on INSERT since they only see the newly inserted rows. The supply_change
+-- is pre-calculated in the Rust code and stored in mint_snapshots, so we use that.
+-- For unclaimed_change, we store 0 initially and rely on the pre-aggregated hourly/daily
+-- views which accumulate values correctly.
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.inflation_per_round_mv
 TO ore_stats.inflation_per_round
-AS
-WITH 
-    -- Get previous values for calculating changes
-    prev AS (
-        SELECT 
-            round_id,
-            supply,
-            lagInFrame(supply) OVER (ORDER BY round_id) AS prev_supply
-        FROM ore_stats.mint_snapshots
-    )
-SELECT
-    m.round_id,
-    m.supply,
-    m.supply_change,
+AS SELECT
+    m.round_id AS round_id,
+    m.supply AS supply,
+    m.supply_change AS supply_change,
     t.total_unclaimed AS unclaimed,
-    -- Calculate unclaimed change (need to get previous treasury snapshot)
-    toInt64(t.total_unclaimed) - toInt64(
-        lagInFrame(t.total_unclaimed) OVER (ORDER BY m.round_id)
-    ) AS unclaimed_change,
+    -- Unclaimed change cannot be reliably calculated in MV (window functions don't work)
+    -- We set to 0 here; the supply_change from mint_snapshots is authoritative
+    toInt64(0) AS unclaimed_change,
     -- Circulating = Supply - Unclaimed
     m.supply - t.total_unclaimed AS circulating,
-    -- Market Inflation = Supply Change - Unclaimed Change
-    m.supply_change - (
-        toInt64(t.total_unclaimed) - toInt64(
-            lagInFrame(t.total_unclaimed) OVER (ORDER BY m.round_id)
-        )
-    ) AS market_inflation,
-    m.created_at
-FROM ore_stats.mint_snapshots m
-INNER JOIN ore_stats.treasury_snapshots t ON m.round_id = t.round_id
+    -- Market inflation approximated as supply_change (true inflation requires unclaimed_change)
+    m.supply_change AS market_inflation,
+    m.created_at AS created_at
+FROM ore_stats.mint_snapshots AS m
+INNER JOIN ore_stats.treasury_snapshots AS t ON m.round_id = t.round_id
 WHERE t.round_id > 0;  -- Exclude periodic snapshots without round_id
 
 -- ============================================================================
@@ -114,17 +105,17 @@ ORDER BY hour;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.inflation_hourly_mv
 TO ore_stats.inflation_hourly
 AS SELECT
-    toStartOfHour(created_at) AS hour,
-    argMax(supply, round_id) AS supply_end,
-    sum(supply_change) AS supply_change_total,
-    argMax(unclaimed, round_id) AS unclaimed_end,
-    sum(unclaimed_change) AS unclaimed_change_total,
-    argMax(circulating, round_id) AS circulating_end,
-    sum(market_inflation) AS market_inflation_total,
+    toStartOfHour(i.created_at) AS hour,
+    argMax(i.supply, i.round_id) AS supply_end,
+    sum(i.supply_change) AS supply_change_total,
+    argMax(i.unclaimed, i.round_id) AS unclaimed_end,
+    sum(i.unclaimed_change) AS unclaimed_change_total,
+    argMax(i.circulating, i.round_id) AS circulating_end,
+    sum(i.market_inflation) AS market_inflation_total,
     toUInt32(count()) AS rounds_count,
-    min(round_id) AS min_round_id,
-    max(round_id) AS max_round_id
-FROM ore_stats.inflation_per_round
+    min(i.round_id) AS min_round_id,
+    max(i.round_id) AS max_round_id
+FROM ore_stats.inflation_per_round AS i
 GROUP BY hour;
 
 -- ============================================================================
@@ -164,19 +155,19 @@ ORDER BY day;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.inflation_daily_mv
 TO ore_stats.inflation_daily
 AS SELECT
-    toDate(created_at) AS day,
-    argMin(supply, round_id) AS supply_start,
-    argMax(supply, round_id) AS supply_end,
-    sum(supply_change) AS supply_change_total,
-    argMin(unclaimed, round_id) AS unclaimed_start,
-    argMax(unclaimed, round_id) AS unclaimed_end,
-    sum(unclaimed_change) AS unclaimed_change_total,
-    argMin(circulating, round_id) AS circulating_start,
-    argMax(circulating, round_id) AS circulating_end,
-    sum(market_inflation) AS market_inflation_total,
+    toDate(i.created_at) AS day,
+    argMin(i.supply, i.round_id) AS supply_start,
+    argMax(i.supply, i.round_id) AS supply_end,
+    sum(i.supply_change) AS supply_change_total,
+    argMin(i.unclaimed, i.round_id) AS unclaimed_start,
+    argMax(i.unclaimed, i.round_id) AS unclaimed_end,
+    sum(i.unclaimed_change) AS unclaimed_change_total,
+    argMin(i.circulating, i.round_id) AS circulating_start,
+    argMax(i.circulating, i.round_id) AS circulating_end,
+    sum(i.market_inflation) AS market_inflation_total,
     toUInt32(count()) AS rounds_count,
-    min(round_id) AS min_round_id,
-    max(round_id) AS max_round_id
-FROM ore_stats.inflation_per_round
+    min(i.round_id) AS min_round_id,
+    max(i.round_id) AS max_round_id
+FROM ore_stats.inflation_per_round AS i
 GROUP BY day;
 

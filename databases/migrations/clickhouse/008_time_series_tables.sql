@@ -113,21 +113,22 @@ PARTITION BY toYYYYMM(hour)
 ORDER BY hour;
 
 -- Materialized view for new rounds
+-- Note: We use table.column syntax to avoid alias conflicts in ClickHouse
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.rounds_hourly_mv
 TO ore_stats.rounds_hourly
 AS SELECT
-    toStartOfHour(created_at) AS hour,
+    toStartOfHour(r.created_at) AS hour,
     toUInt32(count()) AS rounds_count,
-    sum(total_deployments) AS total_deployments,
-    sum(unique_miners) AS unique_miners,
-    sum(total_deployed) AS total_deployed,
-    sum(total_vaulted) AS total_vaulted,
-    sum(total_winnings) AS total_winnings,
-    toUInt32(sum(motherlode_hit)) AS motherlode_hits,
-    sum(motherlode) AS total_motherlode,
-    avg(total_deployed) AS avg_deployed_per_round,
-    avg(unique_miners) AS avg_miners_per_round
-FROM ore_stats.rounds
+    sum(r.total_deployments) AS total_deployments,
+    sum(r.unique_miners) AS unique_miners,
+    sum(r.total_deployed) AS total_deployed,
+    sum(r.total_vaulted) AS total_vaulted,
+    sum(r.total_winnings) AS total_winnings,
+    toUInt32(sum(r.motherlode_hit)) AS motherlode_hits,
+    sum(r.motherlode) AS total_motherlode,
+    avg(r.total_deployed) AS avg_deployed_per_round,
+    avg(r.unique_miners) AS avg_miners_per_round
+FROM ore_stats.rounds AS r
 GROUP BY hour;
 
 -- ----------------------------------------------------------------------------
@@ -166,20 +167,20 @@ ORDER BY day;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.rounds_daily_mv
 TO ore_stats.rounds_daily
 AS SELECT
-    toDate(created_at) AS day,
+    toDate(r.created_at) AS day,
     toUInt32(count()) AS rounds_count,
-    sum(total_deployments) AS total_deployments,
-    sum(unique_miners) AS unique_miners,
-    sum(total_deployed) AS total_deployed,
-    sum(total_vaulted) AS total_vaulted,
-    sum(total_winnings) AS total_winnings,
-    toUInt32(sum(motherlode_hit)) AS motherlode_hits,
-    sum(motherlode) AS total_motherlode,
-    min(round_id) AS min_round_id,
-    max(round_id) AS max_round_id,
-    min(start_slot) AS min_slot,
-    max(end_slot) AS max_slot
-FROM ore_stats.rounds
+    sum(r.total_deployments) AS total_deployments,
+    sum(r.unique_miners) AS unique_miners,
+    sum(r.total_deployed) AS total_deployed,
+    sum(r.total_vaulted) AS total_vaulted,
+    sum(r.total_winnings) AS total_winnings,
+    toUInt32(sum(r.motherlode_hit)) AS motherlode_hits,
+    sum(r.motherlode) AS total_motherlode,
+    min(r.round_id) AS min_round_id,
+    max(r.round_id) AS max_round_id,
+    min(r.start_slot) AS min_slot,
+    max(r.end_slot) AS max_slot
+FROM ore_stats.rounds AS r
 GROUP BY day;
 
 -- ----------------------------------------------------------------------------
@@ -209,15 +210,15 @@ ORDER BY hour;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.treasury_hourly_mv
 TO ore_stats.treasury_hourly
 AS SELECT
-    toStartOfHour(created_at) AS hour,
-    argMax(balance, created_at) AS balance,
-    argMax(motherlode, created_at) AS motherlode,
-    argMax(total_staked, created_at) AS total_staked,
-    argMax(total_unclaimed, created_at) AS total_unclaimed,
-    argMax(total_refined, created_at) AS total_refined,
-    argMax(round_id, created_at) AS round_id,
+    toStartOfHour(t.created_at) AS hour,
+    argMax(t.balance, t.created_at) AS balance,
+    argMax(t.motherlode, t.created_at) AS motherlode,
+    argMax(t.total_staked, t.created_at) AS total_staked,
+    argMax(t.total_unclaimed, t.created_at) AS total_unclaimed,
+    argMax(t.total_refined, t.created_at) AS total_refined,
+    argMax(t.round_id, t.created_at) AS round_id,
     toUInt32(count()) AS snapshot_count
-FROM ore_stats.treasury_snapshots
+FROM ore_stats.treasury_snapshots AS t
 GROUP BY hour;
 
 -- ----------------------------------------------------------------------------
@@ -275,11 +276,11 @@ ORDER BY day;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.miner_activity_daily_mv
 TO ore_stats.miner_activity_daily
 AS SELECT
-    toDate(recorded_at) AS day,
-    uniqExactState(miner_pubkey) AS active_miners,
+    toDate(d.recorded_at) AS day,
+    uniqExactState(d.miner_pubkey) AS active_miners,
     count() AS total_deployments,
-    sum(amount) AS total_deployed,
-    sum(sol_earned) AS total_won
-FROM ore_stats.deployments
+    sum(d.amount) AS total_deployed,
+    sum(d.sol_earned) AS total_won
+FROM ore_stats.deployments AS d
 GROUP BY day;
 

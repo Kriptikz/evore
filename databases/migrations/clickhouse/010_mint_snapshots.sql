@@ -62,14 +62,14 @@ ORDER BY hour;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.mint_hourly_mv
 TO ore_stats.mint_hourly
 AS SELECT
-    toStartOfHour(created_at) AS hour,
-    argMax(supply, created_at) AS supply,
-    sum(supply_change) AS supply_change_total,
+    toStartOfHour(m.created_at) AS hour,
+    argMax(m.supply, m.created_at) AS supply,
+    sum(m.supply_change) AS supply_change_total,
     toUInt32(count()) AS round_count,
-    min(round_id) AS min_round_id,
-    max(round_id) AS max_round_id,
+    min(m.round_id) AS min_round_id,
+    max(m.round_id) AS max_round_id,
     toUInt32(count()) AS snapshot_count
-FROM ore_stats.mint_snapshots
+FROM ore_stats.mint_snapshots AS m
 GROUP BY hour;
 
 -- ============================================================================
@@ -100,13 +100,13 @@ ORDER BY day;
 CREATE MATERIALIZED VIEW IF NOT EXISTS ore_stats.mint_daily_mv
 TO ore_stats.mint_daily
 AS SELECT
-    toDate(created_at) AS day,
-    argMax(supply, created_at) AS supply,
-    argMin(supply, created_at) AS supply_start,
-    toInt64(argMax(supply, created_at)) - toInt64(argMin(supply, created_at)) AS supply_change_total,
+    toDate(m.created_at) AS day,
+    argMax(m.supply, m.created_at) AS supply,
+    argMin(m.supply, m.created_at) AS supply_start,
+    toInt64(argMax(m.supply, m.created_at)) - toInt64(argMin(m.supply, m.created_at)) AS supply_change_total,
     toUInt32(count()) AS round_count,
-    min(round_id) AS min_round_id,
-    max(round_id) AS max_round_id
-FROM ore_stats.mint_snapshots
+    min(m.round_id) AS min_round_id,
+    max(m.round_id) AS max_round_id
+FROM ore_stats.mint_snapshots AS m
 GROUP BY day;
 
