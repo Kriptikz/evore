@@ -2838,10 +2838,21 @@ pub struct RoundInsert {
     // Source tracking
     #[serde(default = "default_source")]
     pub source: String,
+    
+    // Actual round timestamp (from API ts field or captured time)
+    // Stored as milliseconds since epoch (DateTime64(3) in ClickHouse)
+    pub created_at: i64,
 }
 
 fn default_source() -> String {
     "live".to_string()
+}
+
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as i64
 }
 
 impl RoundInsert {
@@ -2857,10 +2868,13 @@ impl RoundInsert {
         total_winnings: u64,
         motherlode: u64,
         unique_miners: u32,
-        _timestamp_secs: u64,
+        timestamp_secs: u64,
     ) -> Self {
         // Approximate expires_at: ts + 24 hours worth of slots (~216000 at 400ms/slot)
         let expires_at = end_slot.saturating_add(216000);
+        
+        // Convert seconds to milliseconds for DateTime64(3)
+        let created_at = (timestamp_secs * 1000) as i64;
         
         Self {
             round_id,
@@ -2880,6 +2894,47 @@ impl RoundInsert {
             total_deployments: 0,  // Will be updated after reconstruction
             unique_miners,
             source: "backfill".to_string(),
+            created_at,
+        }
+    }
+    
+    /// Create a RoundInsert for live tracking (uses current time)
+    pub fn new_live(
+        round_id: u64,
+        expires_at: u64,
+        start_slot: u64,
+        end_slot: u64,
+        slot_hash: [u8; 32],
+        winning_square: u8,
+        rent_payer: String,
+        top_miner: String,
+        top_miner_reward: u64,
+        total_deployed: u64,
+        total_vaulted: u64,
+        total_winnings: u64,
+        motherlode: u64,
+        total_deployments: u32,
+        unique_miners: u32,
+    ) -> Self {
+        Self {
+            round_id,
+            expires_at,
+            start_slot,
+            end_slot,
+            slot_hash,
+            winning_square,
+            rent_payer,
+            top_miner,
+            top_miner_reward,
+            total_deployed,
+            total_vaulted,
+            total_winnings,
+            motherlode,
+            motherlode_hit: if motherlode > 0 { 1 } else { 0 },
+            total_deployments,
+            unique_miners,
+            source: "live".to_string(),
+            created_at: now_ms(),
         }
     }
 }

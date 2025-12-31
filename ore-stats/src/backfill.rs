@@ -557,19 +557,19 @@ async fn store_missing_rounds_from_page(
         }
         
         // Round doesn't exist - add to batch
-            let insert = RoundInsert::from_backfill(
-                round_id,
-                0, // start_slot - not available from external API
-            round.created_at as u64,
-                round.winning_square as u8,
-                round.top_miner.clone(),
-                round.total_deployed as u64,
-                round.total_vaulted as u64,
-                round.total_winnings as u64,
-                round.motherlode as u64,
+        let insert = RoundInsert::from_backfill(
+            round_id,
+            0, // start_slot - not available from external API
+            0, // end_slot - not available from external API
+            round.winning_square as u8,
+            round.top_miner.clone(),
+            round.total_deployed as u64,
+            round.total_vaulted as u64,
+            round.total_winnings as u64,
+            round.motherlode as u64,
             0, // unique_miners
-                round.created_at as u64,
-            );
+            round.created_at as u64, // actual round timestamp
+        );
             
             batch.push(insert);
             

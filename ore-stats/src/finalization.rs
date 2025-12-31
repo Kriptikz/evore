@@ -458,7 +458,7 @@ pub async fn finalize_round(
         top_miner_pubkey
     );
     
-    // Build round insert
+    // Build round insert - uses ClickHouse DEFAULT now64(3) for created_at
     let round_insert = RoundInsert {
         round_id,
         expires_at: snapshot.end_slot, // Using end_slot as expiry
@@ -477,6 +477,11 @@ pub async fn finalize_round(
         total_deployments: all_deployments.len() as u32,
         unique_miners: miners_with_deployments,
         source: "live".to_string(),
+        // Live rounds: current time is correct (round is happening now)
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64,
     };
     
     // Build treasury snapshot
