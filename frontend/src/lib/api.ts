@@ -1391,6 +1391,44 @@ class ApiClient {
     const query = params.toString() ? `?${params.toString()}` : "";
     return this.request("GET", `/admin/automation/parse-queue/items${query}`, { requireAuth: true });
   }
+
+  // ========== Public Chart Endpoints ==========
+
+  async getChartRoundsHourly(hours: number = 24): Promise<RoundsHourlyData[]> {
+    return this.request("GET", `/charts/rounds/hourly?hours=${hours}`);
+  }
+
+  async getChartRoundsDaily(days: number = 30): Promise<RoundsDailyData[]> {
+    return this.request("GET", `/charts/rounds/daily?days=${days}`);
+  }
+
+  async getChartTreasuryHourly(hours: number = 24): Promise<TreasuryHourlyData[]> {
+    return this.request("GET", `/charts/treasury/hourly?hours=${hours}`);
+  }
+
+  async getChartMintHourly(hours: number = 24): Promise<MintHourlyData[]> {
+    return this.request("GET", `/charts/mint/hourly?hours=${hours}`);
+  }
+
+  async getChartMintDaily(days: number = 30): Promise<MintDailyData[]> {
+    return this.request("GET", `/charts/mint/daily?days=${days}`);
+  }
+
+  async getChartInflationHourly(hours: number = 24): Promise<InflationHourlyData[]> {
+    return this.request("GET", `/charts/inflation/hourly?hours=${hours}`);
+  }
+
+  async getChartInflationDaily(days: number = 30): Promise<InflationDailyData[]> {
+    return this.request("GET", `/charts/inflation/daily?days=${days}`);
+  }
+
+  async getChartCostPerOreDaily(days: number = 30): Promise<CostPerOreDailyData[]> {
+    return this.request("GET", `/charts/cost-per-ore/daily?days=${days}`);
+  }
+
+  async getChartMinersDaily(days: number = 30): Promise<MinerActivityDailyData[]> {
+    return this.request("GET", `/charts/miners/daily?days=${days}`);
+  }
 }
 
 // Transaction Viewer Types
@@ -1697,6 +1735,99 @@ export interface RoundsWithTransactionsResponse {
   total: number;
   page: number;
   limit: number;
+}
+
+// ============================================================================
+// Chart Data Types
+// ============================================================================
+
+export interface RoundsHourlyData {
+  hour: number;  // Unix timestamp
+  rounds_count: number;
+  total_deployments: number;
+  unique_miners: number;
+  total_deployed: number;
+  total_vaulted: number;
+  total_winnings: number;
+  motherlode_hits: number;
+  total_motherlode: number;
+}
+
+export interface RoundsDailyData {
+  day: number;  // Unix timestamp (midnight UTC)
+  rounds_count: number;
+  total_deployments: number;
+  unique_miners: number;
+  total_deployed: number;
+  total_vaulted: number;
+  total_winnings: number;
+  motherlode_hits: number;
+  total_motherlode: number;
+}
+
+export interface TreasuryHourlyData {
+  hour: number;  // Unix timestamp
+  balance: number;
+  motherlode: number;
+  total_staked: number;
+  total_unclaimed: number;
+  total_refined: number;
+}
+
+export interface MintHourlyData {
+  hour: number;  // Unix timestamp
+  supply: number;
+  supply_change_total: number;
+  round_count: number;
+}
+
+export interface MintDailyData {
+  day: number;  // Unix timestamp (midnight UTC)
+  supply: number;
+  supply_start: number;
+  supply_change_total: number;
+  round_count: number;
+}
+
+export interface InflationHourlyData {
+  hour: number;  // Unix timestamp
+  supply_end: number;
+  supply_change_total: number;
+  unclaimed_end: number;
+  unclaimed_change_total: number;
+  circulating_end: number;
+  market_inflation_total: number;
+  rounds_count: number;
+}
+
+export interface InflationDailyData {
+  day: number;  // Unix timestamp (midnight UTC)
+  supply_start: number;
+  supply_end: number;
+  supply_change_total: number;
+  circulating_start: number;
+  circulating_end: number;
+  market_inflation_total: number;
+  rounds_count: number;
+}
+
+export interface CostPerOreDailyData {
+  day: number;  // Unix timestamp (midnight UTC)
+  rounds_count: number;
+  total_vaulted: number;
+  ore_minted_total: number;
+  cost_per_ore_lamports: number;
+  cumulative_vaulted: number;
+  cumulative_ore: number;
+  cumulative_cost_per_ore: number;
+}
+
+export interface MinerActivityDailyData {
+  day: number;  // Unix timestamp (midnight UTC)
+  active_miners: number;
+  total_deployments: number;
+  total_deployed: number;
+  total_won: number;
 }
 
 // ============================================================================

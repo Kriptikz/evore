@@ -20,7 +20,7 @@ use tracing;
 
 use crate::app_state::{AppState, LiveBroadcastData, RoundSnapshot};
 use crate::clickhouse::{
-    ClickHouseClient, DeploymentInsert, MinerSnapshot, RoundInsert, TreasurySnapshot,
+    ClickHouseClient, DeploymentInsert, MinerSnapshot, MintSnapshot, RoundInsert, TreasurySnapshot,
 };
 use crate::tasks::fetch_all_miners;
 
@@ -310,6 +310,18 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // Get round state (may not have slot_hash yet)
     let round = state.rpc.get_round(round_id).await.ok()?;
     
+    // Get ORE mint supply
+    let mint_supply = match state.rpc.get_mint_supply().await {
+        Ok(supply) => {
+            tracing::debug!("Fetched mint supply for round {}: {} atomic units", round_id, supply);
+            Some(supply)
+        }
+        Err(e) => {
+            tracing::warn!("Failed to fetch mint supply for round {}: {}", round_id, e);
+            None
+        }
+    };
+    
     let snapshot = RoundSnapshot {
         round_id,
         start_slot,
@@ -319,6 +331,7 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         all_miners: all_gpa_miners, // Store ALL miners for historical tracking
         treasury,
         round,
+        mint_supply,
         captured_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
@@ -497,6 +510,36 @@ pub async fn finalize_round(
     
     state.clickhouse.insert_treasury_snapshot(treasury_snapshot).await?;
     tracing::debug!("Stored treasury snapshot for round {}", round_id);
+    
+    // Store mint supply snapshot if available
+    if let Some(supply) = snapshot.mint_supply {
+        // Get previous supply to calculate change
+        let previous_supply = state.clickhouse.get_latest_mint_supply().await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        
+        let supply_change = if previous_supply > 0 {
+            supply as i64 - previous_supply as i64
+        } else {
+            0 // First snapshot, no change to calculate
+        };
+        
+        let mint_snapshot = MintSnapshot {
+            round_id,
+            supply,
+            decimals: 11, // ORE has 11 decimals
+            supply_change,
+        };
+        
+        state.clickhouse.insert_mint_snapshot(mint_snapshot).await?;
+        tracing::debug!(
+            "Stored mint snapshot for round {}: supply={}, change={}",
+            round_id, supply, supply_change
+        );
+    } else {
+        tracing::warn!("No mint supply available for round {} - skipping mint snapshot", round_id);
+    }
     
     // Only store deployments and miner snapshots if GPA succeeded
     if snapshot.gpa_failed {

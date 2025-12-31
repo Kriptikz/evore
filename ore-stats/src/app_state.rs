@@ -371,6 +371,10 @@ pub struct RoundSnapshot {
     /// Round state (without slot_hash - that comes after reset)
     pub round: Round,
     
+    /// ORE Mint supply at round end (atomic units, 11 decimals)
+    /// None if mint fetch failed
+    pub mint_supply: Option<u64>,
+    
     /// Timestamp when snapshot was captured
     pub captured_at: u64,
     

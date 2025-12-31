@@ -844,6 +844,244 @@ impl ClickHouseClient {
         Ok(())
     }
     
+    // ========== Mint Snapshots ==========
+    
+    /// Insert a mint supply snapshot.
+    pub async fn insert_mint_snapshot(&self, snapshot: MintSnapshot) -> Result<(), ClickHouseError> {
+        let mut insert = self.client.insert("mint_snapshots")?;
+        insert.write(&snapshot).await?;
+        insert.end().await?;
+        Ok(())
+    }
+    
+    /// Get the latest mint supply (from most recent snapshot).
+    pub async fn get_latest_mint_supply(&self) -> Result<Option<u64>, ClickHouseError> {
+        let result: Option<u64> = self.client
+            .query("SELECT supply FROM mint_snapshots ORDER BY round_id DESC LIMIT 1")
+            .fetch_optional()
+            .await?;
+        Ok(result)
+    }
+    
+    // ========== Chart Queries ==========
+    
+    /// Get rounds hourly chart data.
+    pub async fn get_rounds_hourly(
+        &self,
+        hours: u32,
+    ) -> Result<Vec<RoundsHourlyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                hour,
+                rounds_count,
+                total_deployments,
+                unique_miners,
+                total_deployed,
+                total_vaulted,
+                total_winnings,
+                motherlode_hits,
+                total_motherlode
+            FROM rounds_hourly
+            WHERE hour >= now() - INTERVAL {} HOUR
+            ORDER BY hour ASC"#,
+            hours
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get rounds daily chart data.
+    pub async fn get_rounds_daily(
+        &self,
+        days: u32,
+    ) -> Result<Vec<RoundsDailyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                day,
+                rounds_count,
+                total_deployments,
+                unique_miners,
+                total_deployed,
+                total_vaulted,
+                total_winnings,
+                motherlode_hits,
+                total_motherlode
+            FROM rounds_daily
+            WHERE day >= today() - INTERVAL {} DAY
+            ORDER BY day ASC"#,
+            days
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get treasury hourly chart data.
+    pub async fn get_treasury_hourly(
+        &self,
+        hours: u32,
+    ) -> Result<Vec<TreasuryHourlyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                hour,
+                balance,
+                motherlode,
+                total_staked,
+                total_unclaimed,
+                total_refined
+            FROM treasury_hourly FINAL
+            WHERE hour >= now() - INTERVAL {} HOUR
+            ORDER BY hour ASC"#,
+            hours
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get mint supply hourly chart data.
+    pub async fn get_mint_hourly(
+        &self,
+        hours: u32,
+    ) -> Result<Vec<MintHourlyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                hour,
+                supply,
+                supply_change_total,
+                round_count
+            FROM mint_hourly FINAL
+            WHERE hour >= now() - INTERVAL {} HOUR
+            ORDER BY hour ASC"#,
+            hours
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get mint supply daily chart data.
+    pub async fn get_mint_daily(
+        &self,
+        days: u32,
+    ) -> Result<Vec<MintDailyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                day,
+                supply,
+                supply_start,
+                supply_change_total,
+                round_count
+            FROM mint_daily FINAL
+            WHERE day >= today() - INTERVAL {} DAY
+            ORDER BY day ASC"#,
+            days
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get market inflation hourly chart data.
+    pub async fn get_inflation_hourly(
+        &self,
+        hours: u32,
+    ) -> Result<Vec<InflationHourlyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                hour,
+                supply_end,
+                supply_change_total,
+                unclaimed_end,
+                unclaimed_change_total,
+                circulating_end,
+                market_inflation_total,
+                rounds_count
+            FROM inflation_hourly FINAL
+            WHERE hour >= now() - INTERVAL {} HOUR
+            ORDER BY hour ASC"#,
+            hours
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get market inflation daily chart data.
+    pub async fn get_inflation_daily(
+        &self,
+        days: u32,
+    ) -> Result<Vec<InflationDailyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                day,
+                supply_start,
+                supply_end,
+                supply_change_total,
+                circulating_start,
+                circulating_end,
+                market_inflation_total,
+                rounds_count
+            FROM inflation_daily FINAL
+            WHERE day >= today() - INTERVAL {} DAY
+            ORDER BY day ASC"#,
+            days
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get cost per ORE daily chart data.
+    pub async fn get_cost_per_ore_daily(
+        &self,
+        days: u32,
+    ) -> Result<Vec<CostPerOreDailyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                day,
+                rounds_count,
+                total_vaulted,
+                ore_minted_total,
+                cost_per_ore_lamports,
+                cumulative_vaulted,
+                cumulative_ore,
+                cumulative_cost_per_ore
+            FROM cost_per_ore_daily FINAL
+            WHERE day >= today() - INTERVAL {} DAY
+            ORDER BY day ASC"#,
+            days
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
+    /// Get miner activity daily chart data.
+    /// Note: active_miners uses AggregatingMergeTree, need to finalize with uniqExactMerge.
+    pub async fn get_miner_activity_daily(
+        &self,
+        days: u32,
+    ) -> Result<Vec<MinerActivityDailyRow>, ClickHouseError> {
+        let query = format!(
+            r#"SELECT 
+                day,
+                uniqExactMerge(active_miners) AS active_miners,
+                sum(total_deployments) AS total_deployments,
+                sum(total_deployed) AS total_deployed,
+                sum(total_won) AS total_won
+            FROM miner_activity_daily
+            WHERE day >= today() - INTERVAL {} DAY
+            GROUP BY day
+            ORDER BY day ASC"#,
+            days
+        );
+        
+        let rows = self.client.query(&query).fetch_all().await?;
+        Ok(rows)
+    }
+    
     // ========== Miner Snapshots ==========
     
     /// Create an inserter for miner snapshots.
@@ -2731,6 +2969,25 @@ pub struct TreasurySnapshot {
     pub round_id: u64,
 }
 
+/// Mint supply snapshot at round end.
+/// Tracks the total ORE token supply after each round.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct MintSnapshot {
+    pub round_id: u64,
+    /// Total supply in atomic units (11 decimals for ORE)
+    pub supply: u64,
+    /// Decimals (always 11 for ORE, but stored for completeness)
+    #[serde(default = "default_decimals")]
+    pub decimals: u8,
+    /// Supply change since last snapshot (calculated before insert)
+    #[serde(default)]
+    pub supply_change: i64,
+}
+
+fn default_decimals() -> u8 {
+    11
+}
+
 /// Miner snapshot at round end.
 #[derive(Debug, Clone, Row, Serialize, Deserialize)]
 pub struct MinerSnapshot {
@@ -3343,6 +3600,122 @@ pub struct TreasurySnapshotRow {
     pub total_unclaimed: u64,
     pub total_refined: u64,
     pub created_at: i64,
+}
+
+// ============================================================================
+// Chart Data Row Types
+// 
+// These match ClickHouse's native binary format:
+// - DateTime -> u32 (seconds since Unix epoch)
+// - Date -> u16 (days since 1970-01-01)
+// No conversion functions needed in queries.
+// ============================================================================
+
+/// Rounds hourly chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RoundsHourlyRow {
+    pub hour: u32,  // DateTime as Unix timestamp
+    pub rounds_count: u32,
+    pub total_deployments: u64,
+    pub unique_miners: u64,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub motherlode_hits: u32,
+    pub total_motherlode: u64,
+}
+
+/// Rounds daily chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RoundsDailyRow {
+    pub day: u16,  // Date as days since 1970-01-01
+    pub rounds_count: u32,
+    pub total_deployments: u64,
+    pub unique_miners: u64,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub motherlode_hits: u32,
+    pub total_motherlode: u64,
+}
+
+/// Treasury hourly chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct TreasuryHourlyRow {
+    pub hour: u32,  // DateTime as Unix timestamp
+    pub balance: u64,
+    pub motherlode: u64,
+    pub total_staked: u64,
+    pub total_unclaimed: u64,
+    pub total_refined: u64,
+}
+
+/// Mint supply hourly chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct MintHourlyRow {
+    pub hour: u32,  // DateTime as Unix timestamp
+    pub supply: u64,
+    pub supply_change_total: i64,
+    pub round_count: u32,
+}
+
+/// Mint supply daily chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct MintDailyRow {
+    pub day: u16,  // Date as days since 1970-01-01
+    pub supply: u64,
+    pub supply_start: u64,
+    pub supply_change_total: i64,
+    pub round_count: u32,
+}
+
+/// Market inflation hourly chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct InflationHourlyRow {
+    pub hour: u32,  // DateTime as Unix timestamp
+    pub supply_end: u64,
+    pub supply_change_total: i64,
+    pub unclaimed_end: u64,
+    pub unclaimed_change_total: i64,
+    pub circulating_end: u64,
+    pub market_inflation_total: i64,
+    pub rounds_count: u32,
+}
+
+/// Market inflation daily chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct InflationDailyRow {
+    pub day: u16,  // Date as days since 1970-01-01
+    pub supply_start: u64,
+    pub supply_end: u64,
+    pub supply_change_total: i64,
+    pub circulating_start: u64,
+    pub circulating_end: u64,
+    pub market_inflation_total: i64,
+    pub rounds_count: u32,
+}
+
+/// Cost per ORE daily chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct CostPerOreDailyRow {
+    pub day: u16,  // Date as days since 1970-01-01
+    pub rounds_count: u32,
+    pub total_vaulted: u64,
+    pub ore_minted_total: u64,
+    pub cost_per_ore_lamports: u64,
+    pub cumulative_vaulted: u64,
+    pub cumulative_ore: u64,
+    pub cumulative_cost_per_ore: u64,
+}
+
+/// Miner activity daily chart data.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct MinerActivityDailyRow {
+    pub day: u16,  // Date as days since 1970-01-01
+    pub active_miners: u64,  // From uniqExactMerge
+    pub total_deployments: u64,
+    pub total_deployed: u64,
+    pub total_won: u64,
 }
 
 #[cfg(test)]

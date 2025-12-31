@@ -20,7 +20,7 @@ use tokio::time::Instant;
 
 use evore::ore_api::{
     Board, Miner, Round, Treasury,
-    TREASURY_ADDRESS, board_pda, miner_pda, round_pda,
+    TREASURY_ADDRESS, MINT_ADDRESS, board_pda, miner_pda, round_pda,
 };
 
 use crate::app_state::apply_refined_ore_fix;
@@ -347,6 +347,47 @@ impl AppRpc {
                 self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
                 let treasury = Treasury::try_from_bytes(&data)?;
                 Ok(*treasury)
+            }
+            Err(e) => {
+                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
+                Err(e.into())
+            }
+        }
+    }
+    
+    /// Get the ORE Mint supply (uses Flux RPC)
+    /// Returns the total supply of ORE tokens in atomic units (11 decimals)
+    pub async fn get_mint_supply(&self) -> Result<u64> {
+        self.rate_limit_flux().await;
+        let start = Instant::now();
+        
+        let ctx = RpcContext {
+            method: "getAccountInfo".to_string(),
+            target_type: "mint".to_string(),
+            target_address: MINT_ADDRESS.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
+        
+        let result = self.flux_client.get_account_data(&MINT_ADDRESS).await;
+        let duration_ms = start.elapsed().as_millis() as u32;
+        
+        match result {
+            Ok(data) => {
+                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
+                // SPL Token Mint account layout:
+                // - 0..4: mint_authority_option (4 bytes)
+                // - 4..36: mint_authority (32 bytes, if option = 1)
+                // - 36..44: supply (8 bytes, little-endian u64)
+                // - 44..45: decimals (1 byte)
+                // - 45..46: is_initialized (1 byte)
+                // - 46..50: freeze_authority_option (4 bytes)
+                // - 50..82: freeze_authority (32 bytes, if option = 1)
+                if data.len() < 44 {
+                    return Err(anyhow::anyhow!("Mint account data too short: {} bytes", data.len()));
+                }
+                let supply = u64::from_le_bytes(data[36..44].try_into()?);
+                Ok(supply)
             }
             Err(e) => {
                 self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;

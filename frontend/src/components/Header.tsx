@@ -70,6 +70,16 @@ export function Header() {
             >
               Miners
             </Link>
+            <Link 
+              href="/charts" 
+              className={`text-sm transition-colors ${
+                isActive('/charts')
+                  ? 'text-amber-400 font-medium' 
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              Charts
+            </Link>
             {/* AutoMiners link hidden - feature not ready for public yet */}
             {/* <Link 
               href="/autominers" 

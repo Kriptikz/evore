@@ -27,6 +27,7 @@ mod app_state;
 mod app_error;
 mod app_rpc;
 mod automation_states;
+mod chart_routes;
 mod clickhouse;
 mod database;
 mod entropy_api;
@@ -236,6 +237,9 @@ async fn main() -> anyhow::Result<()> {
         
         // Historical data endpoints (Phase 3)
         .nest("/history", historical_routes::historical_router(state.clone()))
+        
+        // Chart data endpoints
+        .nest("/charts", chart_routes::chart_router(state.clone()))
         
         // Metrics
         .route("/metrics", get(routes::get_metrics))
