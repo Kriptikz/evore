@@ -20,6 +20,8 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::LazyLock;
 
+use crate::helius_api::{ResetEvent, DeployEvent};
+
 // ============================================================================
 // Logged Deployment Parsing (from text logs)
 // ============================================================================
@@ -294,8 +296,33 @@ pub enum ParsedInstruction {
         executor: String,
         miner: String,
     },
-    OreLog {
-        // Log instruction - event data
+    /// Log instruction containing either a ResetEvent or DeployEvent
+    OreLogReset {
+        round_id: u64,
+        start_slot: u64,
+        end_slot: u64,
+        winning_square: u64,
+        top_miner: String,
+        num_winners: u64,
+        motherlode: u64,
+        total_deployed: u64,
+        total_vaulted: u64,
+        total_winnings: u64,
+        total_minted: u64,
+        timestamp: i64,
+    },
+    OreLogDeploy {
+        authority: String,
+        signer: String,
+        amount: u64,
+        mask: u64,
+        round_id: u64,
+        strategy: u64,
+        total_squares: u64,
+        timestamp: i64,
+    },
+    OreLogUnknown {
+        // Fallback for unparseable log events
         event_type: String,
         data_hex: String,
     },
@@ -689,7 +716,9 @@ impl TransactionAnalyzer {
                             });
                         }
                         ParsedInstruction::OreReset { .. } => ore_reset_count += 1,
-                        ParsedInstruction::OreLog { .. } => ore_log_count += 1,
+                        ParsedInstruction::OreLogReset { .. } => ore_log_count += 1,
+                        ParsedInstruction::OreLogDeploy { .. } => ore_log_count += 1,
+                        ParsedInstruction::OreLogUnknown { .. } => ore_log_count += 1,
                         ParsedInstruction::OreOther { .. } => ore_other_count += 1,
                         _ => {}
                     }
@@ -750,7 +779,9 @@ impl TransactionAnalyzer {
                                     });
                                 }
                                 ParsedInstruction::OreReset { .. } => ore_reset_count += 1,
-                                ParsedInstruction::OreLog { .. } => ore_log_count += 1,
+                                ParsedInstruction::OreLogReset { .. } => ore_log_count += 1,
+                                ParsedInstruction::OreLogDeploy { .. } => ore_log_count += 1,
+                                ParsedInstruction::OreLogUnknown { .. } => ore_log_count += 1,
                                 ParsedInstruction::OreOther { .. } => ore_other_count += 1,
                                 _ => {}
                             }
@@ -1549,19 +1580,90 @@ impl TransactionAnalyzer {
                 )
             }
             Ok(OreInstruction::Log) => {
-                let event_type = if data.len() > 1 {
-                    format!("Event({})", data[1])
+                // Log instruction contains event data after the first byte
+                // First byte is the instruction tag (8 for Log)
+                // The event data starts at byte 1
+                
+                // ResetEvent size: disc(8) + round_id(8) + start_slot(8) + end_slot(8) + 
+                //                 winning_square(8) + top_miner(32) + num_winners(8) + 
+                //                 motherlode(8) + total_deployed(8) + total_vaulted(8) + 
+                //                 total_winnings(8) + total_minted(8) + ts(8) = 136 bytes
+                const RESET_EVENT_SIZE: usize = 136;
+                
+                // DeployEvent size: disc(8) + authority(32) + amount(8) + mask(8) + 
+                //                  round_id(8) + signer(32) + strategy(8) + total_squares(8) + ts(8) = 120 bytes
+                const DEPLOY_EVENT_SIZE: usize = 120;
+                
+                let event_payload = &data[1..];
+                
+                // Check discriminator to determine event type
+                if event_payload.len() >= 8 {
+                    let disc = u64::from_le_bytes(event_payload[0..8].try_into().unwrap_or([0u8; 8]));
+                    
+                    match disc {
+                        0 if event_payload.len() >= RESET_EVENT_SIZE => {
+                            // ResetEvent (disc = 0)
+                            let ev: ResetEvent = bytemuck::pod_read_unaligned(&event_payload[..RESET_EVENT_SIZE]);
+                            (
+                                "Log (ResetEvent)".to_string(),
+                                Some(ParsedInstruction::OreLogReset {
+                                    round_id: ev.round_id,
+                                    start_slot: ev.start_slot,
+                                    end_slot: ev.end_slot,
+                                    winning_square: ev.winning_square,
+                                    top_miner: ev.top_miner.to_string(),
+                                    num_winners: ev.num_winners,
+                                    motherlode: ev.motherlode,
+                                    total_deployed: ev.total_deployed,
+                                    total_vaulted: ev.total_vaulted,
+                                    total_winnings: ev.total_winnings,
+                                    total_minted: ev.total_minted,
+                                    timestamp: ev.ts,
+                                }),
+                                None,
+                            )
+                        }
+                        1 if event_payload.len() >= DEPLOY_EVENT_SIZE => {
+                            // DeployEvent (disc = 1)
+                            let ev: DeployEvent = bytemuck::pod_read_unaligned(&event_payload[..DEPLOY_EVENT_SIZE]);
+                            (
+                                "Log (DeployEvent)".to_string(),
+                                Some(ParsedInstruction::OreLogDeploy {
+                                    authority: ev.authority.to_string(),
+                                    signer: ev.signer.to_string(),
+                                    amount: ev.amount,
+                                    mask: ev.mask,
+                                    round_id: ev.round_id,
+                                    strategy: ev.strategy,
+                                    total_squares: ev.total_squares,
+                                    timestamp: ev.ts,
+                                }),
+                                None,
+                            )
+                        }
+                        _ => {
+                            // Unknown event type or insufficient data
+                            (
+                                format!("Log (Unknown disc={})", disc),
+                                Some(ParsedInstruction::OreLogUnknown {
+                                    event_type: format!("disc={}", disc),
+                                    data_hex: hex::encode(event_payload),
+                                }),
+                                None,
+                            )
+                        }
+                    }
                 } else {
-                    "Unknown".to_string()
-                };
-                (
-                    "Log".to_string(),
-                    Some(ParsedInstruction::OreLog {
-                        event_type,
-                        data_hex: hex::encode(&data[1..]),
-                    }),
-                    None,
-                )
+                    // Not enough data for even the discriminator
+                    (
+                        "Log (Empty)".to_string(),
+                        Some(ParsedInstruction::OreLogUnknown {
+                            event_type: "Empty".to_string(),
+                            data_hex: hex::encode(event_payload),
+                        }),
+                        None,
+                    )
+                }
             }
             Ok(other) => {
                 let name = format!("{:?}", other);
