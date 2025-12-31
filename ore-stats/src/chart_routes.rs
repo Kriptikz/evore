@@ -442,7 +442,7 @@ pub async fn get_miners_daily(
 // ============================================================================
 
 /// Create the charts router with all endpoints.
-pub fn chart_router(state: Arc<AppState>) -> Router {
+pub fn chart_router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
         // Rounds
         .route("/rounds/hourly", get(get_rounds_hourly))
@@ -459,5 +459,4 @@ pub fn chart_router(state: Arc<AppState>) -> Router {
         .route("/cost-per-ore/daily", get(get_cost_per_ore_daily))
         // Miner activity
         .route("/miners/daily", get(get_miners_daily))
-        .with_state(state)
 }
