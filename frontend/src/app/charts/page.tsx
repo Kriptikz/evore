@@ -4,6 +4,15 @@ import { useState, useEffect, useCallback, Suspense, useMemo } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { Header } from "@/components/Header";
 import {
+  TimeSeriesChart,
+  StatsBarChart,
+  ComposedChart,
+  TimeRangeSelector,
+  formatters,
+  colors,
+  ChartVariant,
+} from "@/components/charts";
+import {
   api,
   RoundsHourlyData,
   RoundsDailyData,
@@ -15,7 +24,6 @@ import {
   CostPerOreDailyData,
   MinerActivityDailyData,
 } from "@/lib/api";
-import { formatSol, formatOre } from "@/lib/format";
 
 // ============================================================================
 // Types
@@ -35,6 +43,7 @@ interface ChartConfig {
   id: string;
   type: ChartType;
   range: TimeRange;
+  variant?: ChartVariant;
 }
 
 interface ChartData {
@@ -49,21 +58,21 @@ interface ChartData {
 // Constants
 // ============================================================================
 
-const CHART_TYPES: { value: ChartType; label: string; description: string }[] = [
-  { value: "rounds", label: "Round Activity", description: "Deployments, miners, and winnings per time period" },
-  { value: "treasury", label: "Treasury", description: "Balance, motherlode, staked, and unclaimed ORE" },
-  { value: "miners", label: "Miner Activity", description: "Active miners and deployment volume" },
-  { value: "cost_per_ore", label: "Cost per ORE", description: "Daily cost per ORE mined in SOL" },
-  { value: "mint", label: "Mint Supply", description: "Total ORE supply changes" },
-  { value: "inflation", label: "Market Inflation", description: "Circulating supply and market inflation" },
+const CHART_TYPES: { value: ChartType; label: string; description: string; icon: string }[] = [
+  { value: "rounds", label: "Round Activity", description: "Deployments, miners, and winnings", icon: "⚡" },
+  { value: "treasury", label: "Treasury", description: "Balance and unclaimed ORE", icon: "💰" },
+  { value: "miners", label: "Miner Activity", description: "Active miners and volume", icon: "⛏️" },
+  { value: "cost_per_ore", label: "Cost per ORE", description: "SOL cost per ORE mined", icon: "📊" },
+  { value: "mint", label: "Mint Supply", description: "Total ORE supply", icon: "🪙" },
+  { value: "inflation", label: "Market Inflation", description: "Circulating supply", icon: "📈" },
 ];
 
 const TIME_RANGES: { value: TimeRange; label: string; hours?: number; days?: number }[] = [
-  { value: "24h", label: "24 Hours", hours: 24 },
-  { value: "7d", label: "7 Days", days: 7 },
-  { value: "30d", label: "30 Days", days: 30 },
-  { value: "90d", label: "90 Days", days: 90 },
-  { value: "1y", label: "1 Year", days: 365 },
+  { value: "24h", label: "24H", hours: 24 },
+  { value: "7d", label: "7D", days: 7 },
+  { value: "30d", label: "30D", days: 30 },
+  { value: "90d", label: "90D", days: 90 },
+  { value: "1y", label: "1Y", days: 365 },
 ];
 
 const MAX_CHARTS = 6;
@@ -75,15 +84,13 @@ const MAX_CHARTS = 6;
 function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
   const chartsParam = searchParams.get("c");
   if (!chartsParam) {
-    // Default charts
     return [
-      { id: "1", type: "rounds", range: "24h" },
-      { id: "2", type: "treasury", range: "24h" },
+      { id: "1", type: "rounds", range: "7d" },
+      { id: "2", type: "treasury", range: "7d" },
     ];
   }
 
   try {
-    // Format: "type:range,type:range,..."
     const configs: ChartConfig[] = [];
     const parts = chartsParam.split(",");
     parts.forEach((part, idx) => {
@@ -96,9 +103,9 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
         });
       }
     });
-    return configs.length > 0 ? configs : [{ id: "1", type: "rounds", range: "24h" }];
+    return configs.length > 0 ? configs : [{ id: "1", type: "rounds", range: "7d" }];
   } catch {
-    return [{ id: "1", type: "rounds", range: "24h" }];
+    return [{ id: "1", type: "rounds", range: "7d" }];
   }
 }
 
@@ -117,12 +124,12 @@ async function fetchChartData(type: ChartType, range: TimeRange): Promise<unknow
 
   switch (type) {
     case "rounds":
-      if (hours <= 168) { // 7 days
+      if (hours <= 168) {
         return api.getChartRoundsHourly(hours);
       }
       return api.getChartRoundsDaily(days);
     case "treasury":
-      return api.getChartTreasuryHourly(hours);
+      return api.getChartTreasuryHourly(Math.min(hours, 720));
     case "mint":
       if (hours <= 168) {
         return api.getChartMintHourly(hours);
@@ -143,7 +150,380 @@ async function fetchChartData(type: ChartType, range: TimeRange): Promise<unknow
 }
 
 // ============================================================================
-// Chart Display Component
+// Chart Renderers
+// ============================================================================
+
+function RoundsChart({ data, range }: { data: (RoundsHourlyData | RoundsDailyData)[]; range: TimeRange }) {
+  const isHourly = range === "24h" || range === "7d";
+  const xKey = isHourly ? "hour" : "day";
+  const xFormatter = isHourly ? formatters.dateTime : formatters.date;
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Stats */}
+      <div className="grid grid-cols-4 gap-3">
+        <StatCard
+          label="Rounds"
+          value={data.reduce((sum, d) => sum + d.rounds_count, 0)}
+          formatter={formatters.number}
+          color="text-amber-400"
+        />
+        <StatCard
+          label="Total Deployed"
+          value={data.reduce((sum, d) => sum + d.total_deployed, 0)}
+          formatter={formatters.sol}
+          suffix=" SOL"
+          color="text-emerald-400"
+        />
+        <StatCard
+          label="Total Won"
+          value={data.reduce((sum, d) => sum + d.total_winnings, 0)}
+          formatter={formatters.sol}
+          suffix=" SOL"
+          color="text-purple-400"
+        />
+        <StatCard
+          label="Motherlode Hits"
+          value={data.reduce((sum, d) => sum + d.motherlode_hits, 0)}
+          formatter={formatters.number}
+          color="text-cyan-400"
+        />
+      </div>
+
+      {/* Chart */}
+      <TimeSeriesChart
+        data={data}
+        series={[
+          { key: "total_deployed", name: "Deployed (SOL)", color: colors.positive },
+          { key: "total_winnings", name: "Winnings (SOL)", color: colors.purple },
+        ]}
+        xKey={xKey}
+        height={280}
+        xFormatter={xFormatter}
+        yFormatter={formatters.sol}
+        showLegend={true}
+        showGrid={true}
+      />
+    </div>
+  );
+}
+
+function TreasuryChart({ data }: { data: TreasuryHourlyData[] }) {
+  const latest = data[data.length - 1];
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Stats */}
+      <div className="grid grid-cols-4 gap-3">
+        <StatCard
+          label="Current Balance"
+          value={latest?.balance || 0}
+          formatter={formatters.sol}
+          suffix=" SOL"
+          color="text-amber-400"
+        />
+        <StatCard
+          label="Motherlode"
+          value={latest?.motherlode || 0}
+          formatter={formatters.ore}
+          suffix=" ORE"
+          color="text-purple-400"
+        />
+        <StatCard
+          label="Unclaimed"
+          value={latest?.total_unclaimed || 0}
+          formatter={formatters.ore}
+          suffix=" ORE"
+          color="text-slate-300"
+        />
+        <StatCard
+          label="Total Staked"
+          value={latest?.total_staked || 0}
+          formatter={formatters.ore}
+          suffix=" ORE"
+          color="text-emerald-400"
+        />
+      </div>
+
+      {/* Chart */}
+      <TimeSeriesChart
+        data={data}
+        series={[
+          { key: "balance", name: "Balance (SOL)", color: colors.primary },
+        ]}
+        xKey="hour"
+        height={280}
+        xFormatter={formatters.dateTime}
+        yFormatter={formatters.sol}
+        showLegend={false}
+        showGrid={true}
+      />
+    </div>
+  );
+}
+
+function MinersChart({ data }: { data: MinerActivityDailyData[] }) {
+  const latest = data[data.length - 1];
+  const avgMiners = data.length > 0
+    ? Math.round(data.reduce((sum, d) => sum + d.active_miners, 0) / data.length)
+    : 0;
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Stats */}
+      <div className="grid grid-cols-4 gap-3">
+        <StatCard
+          label="Active Today"
+          value={latest?.active_miners || 0}
+          formatter={formatters.number}
+          color="text-amber-400"
+        />
+        <StatCard
+          label="Avg Daily"
+          value={avgMiners}
+          formatter={formatters.number}
+          color="text-slate-300"
+        />
+        <StatCard
+          label="Deployments Today"
+          value={latest?.total_deployments || 0}
+          formatter={formatters.number}
+          color="text-emerald-400"
+        />
+        <StatCard
+          label="Won Today"
+          value={latest?.total_won || 0}
+          formatter={formatters.sol}
+          suffix=" SOL"
+          color="text-purple-400"
+        />
+      </div>
+
+      {/* Chart */}
+      <StatsBarChart
+        data={data}
+        series={[
+          { key: "active_miners", name: "Active Miners", color: colors.blue },
+        ]}
+        xKey="day"
+        height={280}
+        xFormatter={formatters.date}
+        yFormatter={formatters.number}
+        showLegend={false}
+        showGrid={true}
+      />
+    </div>
+  );
+}
+
+function CostPerOreChart({ data }: { data: CostPerOreDailyData[] }) {
+  const latest = data[data.length - 1];
+  const avgCost = data.length > 0
+    ? data.reduce((sum, d) => sum + d.cost_per_ore_lamports, 0) / data.length
+    : 0;
+
+  // Transform data for chart - convert lamports to SOL for display
+  const chartData = data.map(d => ({
+    ...d,
+    cost_per_ore_sol: d.cost_per_ore_lamports / 1e9,
+    cumulative_cost_sol: d.cumulative_cost_per_ore / 1e9,
+  }));
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Stats */}
+      <div className="grid grid-cols-3 gap-3">
+        <StatCard
+          label="Today's Cost/ORE"
+          value={(latest?.cost_per_ore_lamports || 0) / 1e9}
+          formatter={(v) => v.toFixed(4)}
+          suffix=" SOL"
+          color="text-amber-400"
+        />
+        <StatCard
+          label="Avg Cost/ORE"
+          value={avgCost / 1e9}
+          formatter={(v) => v.toFixed(4)}
+          suffix=" SOL"
+          color="text-slate-300"
+        />
+        <StatCard
+          label="All-Time Cost/ORE"
+          value={(latest?.cumulative_cost_per_ore || 0) / 1e9}
+          formatter={(v) => v.toFixed(4)}
+          suffix=" SOL"
+          color="text-emerald-400"
+        />
+      </div>
+
+      {/* Chart */}
+      <ComposedChart
+        data={chartData}
+        series={[
+          { key: "cost_per_ore_sol", name: "Daily Cost (SOL/ORE)", type: "bar", color: colors.primary },
+          { key: "cumulative_cost_sol", name: "Cumulative Avg", type: "line", color: colors.positive, yAxisId: "right" },
+        ]}
+        xKey="day"
+        height={280}
+        xFormatter={formatters.date}
+        yFormatter={(v) => v.toFixed(4)}
+        dualAxis={true}
+        showLegend={true}
+        showGrid={true}
+      />
+    </div>
+  );
+}
+
+function MintChart({ data, range }: { data: (MintHourlyData | MintDailyData)[]; range: TimeRange }) {
+  const isHourly = range === "24h" || range === "7d";
+  const xKey = isHourly ? "hour" : "day";
+  const xFormatter = isHourly ? formatters.dateTime : formatters.date;
+  
+  const latest = data[data.length - 1];
+  const totalChange = data.reduce((sum, d) => sum + d.supply_change_total, 0);
+
+  if (data.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-64 text-slate-500">
+        <div className="text-center">
+          <span className="text-4xl mb-2 block">🪙</span>
+          <p>Mint supply tracking begins after deployment</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Stats */}
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard
+          label="Current Supply"
+          value={latest?.supply || 0}
+          formatter={formatters.ore}
+          suffix=" ORE"
+          color="text-amber-400"
+        />
+        <StatCard
+          label="Period Change"
+          value={totalChange}
+          formatter={formatters.ore}
+          suffix=" ORE"
+          color={totalChange >= 0 ? "text-emerald-400" : "text-red-400"}
+          prefix={totalChange >= 0 ? "+" : ""}
+        />
+      </div>
+
+      {/* Chart */}
+      <TimeSeriesChart
+        data={data}
+        series={[
+          { key: "supply", name: "Total Supply", color: colors.primary },
+        ]}
+        xKey={xKey}
+        height={280}
+        xFormatter={xFormatter}
+        yFormatter={formatters.ore}
+        showLegend={false}
+        showGrid={true}
+      />
+    </div>
+  );
+}
+
+function InflationChart({ data, range }: { data: (InflationHourlyData | InflationDailyData)[]; range: TimeRange }) {
+  const isHourly = range === "24h" || range === "7d";
+  const xKey = isHourly ? "hour" : "day";
+  const xFormatter = isHourly ? formatters.dateTime : formatters.date;
+  
+  const latest = data[data.length - 1] as InflationHourlyData | InflationDailyData | undefined;
+  const totalInflation = data.reduce((sum, d) => sum + d.market_inflation_total, 0);
+
+  if (data.length === 0) {
+    return (
+      <div className="flex items-center justify-center h-64 text-slate-500">
+        <div className="text-center">
+          <span className="text-4xl mb-2 block">📈</span>
+          <p>Inflation tracking begins after deployment</p>
+        </div>
+      </div>
+    );
+  }
+
+  const circulatingEnd = 'circulating_end' in (latest || {})
+    ? (latest as InflationHourlyData).circulating_end
+    : (latest as InflationDailyData)?.circulating_end;
+
+  return (
+    <div className="space-y-4">
+      {/* Summary Stats */}
+      <div className="grid grid-cols-2 gap-3">
+        <StatCard
+          label="Circulating Supply"
+          value={circulatingEnd || 0}
+          formatter={formatters.ore}
+          suffix=" ORE"
+          color="text-amber-400"
+        />
+        <StatCard
+          label="Market Inflation"
+          value={totalInflation}
+          formatter={formatters.ore}
+          suffix=" ORE"
+          color={totalInflation >= 0 ? "text-emerald-400" : "text-red-400"}
+          prefix={totalInflation >= 0 ? "+" : ""}
+        />
+      </div>
+
+      {/* Chart */}
+      <TimeSeriesChart
+        data={data}
+        series={[
+          { key: "market_inflation_total", name: "Market Inflation", color: colors.positive },
+        ]}
+        xKey={xKey}
+        height={280}
+        xFormatter={xFormatter}
+        yFormatter={formatters.ore}
+        showLegend={false}
+        showGrid={true}
+      />
+    </div>
+  );
+}
+
+// ============================================================================
+// Stat Card Component
+// ============================================================================
+
+function StatCard({
+  label,
+  value,
+  formatter,
+  color = "text-white",
+  suffix = "",
+  prefix = "",
+}: {
+  label: string;
+  value: number;
+  formatter: (v: number) => string;
+  color?: string;
+  suffix?: string;
+  prefix?: string;
+}) {
+  return (
+    <div className="bg-slate-800/30 rounded-lg px-3 py-2">
+      <div className="text-xs text-slate-500 mb-0.5">{label}</div>
+      <div className={`text-lg font-semibold font-mono ${color}`}>
+        {prefix}{formatter(value)}{suffix}
+      </div>
+    </div>
+  );
+}
+
+// ============================================================================
+// Chart Card Component
 // ============================================================================
 
 function ChartCard({
@@ -165,30 +545,85 @@ function ChartCard({
 }) {
   const chartInfo = CHART_TYPES.find(c => c.value === config.type);
 
+  const renderChart = () => {
+    if (loading) {
+      return (
+        <div className="h-64 flex items-center justify-center">
+          <div className="flex items-center gap-2 text-slate-400">
+            <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
+            </svg>
+            <span>Loading...</span>
+          </div>
+        </div>
+      );
+    }
+
+    if (error) {
+      return (
+        <div className="h-64 flex items-center justify-center">
+          <div className="text-center">
+            <span className="text-red-400 text-sm">{error}</span>
+            <p className="text-slate-500 text-xs mt-1">This data may not be available yet</p>
+          </div>
+        </div>
+      );
+    }
+
+    if (data.length === 0) {
+      return (
+        <div className="h-64 flex items-center justify-center">
+          <span className="text-slate-500 text-sm">No data available</span>
+        </div>
+      );
+    }
+
+    switch (config.type) {
+      case "rounds":
+        return <RoundsChart data={data as (RoundsHourlyData | RoundsDailyData)[]} range={config.range} />;
+      case "treasury":
+        return <TreasuryChart data={data as TreasuryHourlyData[]} />;
+      case "miners":
+        return <MinersChart data={data as MinerActivityDailyData[]} />;
+      case "cost_per_ore":
+        return <CostPerOreChart data={data as CostPerOreDailyData[]} />;
+      case "mint":
+        return <MintChart data={data as (MintHourlyData | MintDailyData)[]} range={config.range} />;
+      case "inflation":
+        return <InflationChart data={data as (InflationHourlyData | InflationDailyData)[]} range={config.range} />;
+      default:
+        return null;
+    }
+  };
+
   return (
     <div className="bg-slate-900/50 border border-slate-800/50 rounded-xl overflow-hidden">
       {/* Chart Header */}
       <div className="px-4 py-3 border-b border-slate-800/50 flex items-center justify-between">
         <div className="flex items-center gap-3">
+          {/* Chart Type Selector */}
           <select
             value={config.type}
             onChange={(e) => onChangeType(e.target.value as ChartType)}
-            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer"
           >
             {CHART_TYPES.map(ct => (
-              <option key={ct.value} value={ct.value}>{ct.label}</option>
+              <option key={ct.value} value={ct.value}>
+                {ct.icon} {ct.label}
+              </option>
             ))}
           </select>
-          <select
-            value={config.range}
-            onChange={(e) => onChangeRange(e.target.value as TimeRange)}
-            className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
-          >
-            {TIME_RANGES.map(tr => (
-              <option key={tr.value} value={tr.value}>{tr.label}</option>
-            ))}
-          </select>
+
+          {/* Time Range Selector */}
+          <TimeRangeSelector
+            value={config.range as TimeRange}
+            onChange={(range) => onChangeRange(range as TimeRange)}
+            options={TIME_RANGES.map(tr => ({ value: tr.value, label: tr.label }))}
+          />
         </div>
+
+        {/* Remove Button */}
         <button
           onClick={onRemove}
           className="p-1.5 text-slate-500 hover:text-red-400 hover:bg-slate-800 rounded-lg transition-colors"
@@ -201,296 +636,9 @@ function ChartCard({
       </div>
 
       {/* Chart Content */}
-      <div className="p-4 min-h-[300px]">
-        {loading ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="flex items-center gap-2 text-slate-400">
-              <svg className="animate-spin h-5 w-5" viewBox="0 0 24 24">
-                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
-                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z" />
-              </svg>
-              <span>Loading...</span>
-            </div>
-          </div>
-        ) : error ? (
-          <div className="h-full flex items-center justify-center">
-            <div className="text-center">
-              <span className="text-red-400 text-sm">{error}</span>
-              <p className="text-slate-500 text-xs mt-1">This data may not be available yet</p>
-            </div>
-          </div>
-        ) : data.length === 0 ? (
-          <div className="h-full flex items-center justify-center">
-            <span className="text-slate-500 text-sm">No data available</span>
-          </div>
-        ) : (
-          <ChartVisualization type={config.type} range={config.range} data={data} />
-        )}
+      <div className="p-4">
+        {renderChart()}
       </div>
-    </div>
-  );
-}
-
-// ============================================================================
-// Chart Visualization (temporary table view until charting library is added)
-// ============================================================================
-
-function ChartVisualization({
-  type,
-  range,
-  data,
-}: {
-  type: ChartType;
-  range: TimeRange;
-  data: unknown[];
-}) {
-  // For now, render a simple summary + mini bar chart using CSS
-  // This can be replaced with a proper charting library later
-
-  if (type === "rounds") {
-    const roundsData = data as (RoundsHourlyData | RoundsDailyData)[];
-    const totalDeployed = roundsData.reduce((sum, d) => sum + d.total_deployed, 0);
-    const totalWinnings = roundsData.reduce((sum, d) => sum + d.total_winnings, 0);
-    const totalRounds = roundsData.reduce((sum, d) => sum + d.rounds_count, 0);
-    const maxDeployed = Math.max(...roundsData.map(d => d.total_deployed));
-
-    return (
-      <div className="space-y-4">
-        {/* Summary Stats */}
-        <div className="grid grid-cols-3 gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-amber-400">{totalRounds.toLocaleString()}</div>
-            <div className="text-xs text-slate-500">Rounds</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-emerald-400">{formatSol(totalDeployed)}</div>
-            <div className="text-xs text-slate-500">Total Deployed</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-purple-400">{formatSol(totalWinnings)}</div>
-            <div className="text-xs text-slate-500">Total Won</div>
-          </div>
-        </div>
-
-        {/* Mini Bar Chart */}
-        <div className="h-40 flex items-end gap-0.5 px-2">
-          {roundsData.slice(-50).map((d, i) => {
-            const height = maxDeployed > 0 ? (d.total_deployed / maxDeployed) * 100 : 0;
-            const timestamp = 'hour' in d ? d.hour : d.day;
-            return (
-              <div
-                key={i}
-                className="flex-1 bg-gradient-to-t from-amber-600 to-amber-400 rounded-t opacity-80 hover:opacity-100 transition-opacity cursor-pointer group relative"
-                style={{ height: `${Math.max(height, 2)}%` }}
-                title={`${new Date(timestamp * 1000).toLocaleString()}: ${formatSol(d.total_deployed)} deployed`}
-              />
-            );
-          })}
-        </div>
-        <div className="text-xs text-slate-500 text-center">
-          SOL Deployed over time (last {roundsData.slice(-50).length} periods)
-        </div>
-      </div>
-    );
-  }
-
-  if (type === "treasury") {
-    const treasuryData = data as TreasuryHourlyData[];
-    const latest = treasuryData[treasuryData.length - 1];
-    const maxBalance = Math.max(...treasuryData.map(d => d.balance));
-
-    return (
-      <div className="space-y-4">
-        {/* Summary Stats */}
-        <div className="grid grid-cols-3 gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-amber-400">{formatSol(latest?.balance || 0)}</div>
-            <div className="text-xs text-slate-500">Current Balance</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-purple-400">{formatOre(latest?.motherlode || 0)}</div>
-            <div className="text-xs text-slate-500">Motherlode</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-slate-300">{formatOre(latest?.total_unclaimed || 0)}</div>
-            <div className="text-xs text-slate-500">Unclaimed</div>
-          </div>
-        </div>
-
-        {/* Mini Line Chart approximation */}
-        <div className="h-40 flex items-end gap-0.5 px-2">
-          {treasuryData.slice(-50).map((d, i) => {
-            const height = maxBalance > 0 ? (d.balance / maxBalance) * 100 : 0;
-            return (
-              <div
-                key={i}
-                className="flex-1 bg-gradient-to-t from-emerald-600 to-emerald-400 rounded-t opacity-80 hover:opacity-100 transition-opacity cursor-pointer"
-                style={{ height: `${Math.max(height, 2)}%` }}
-                title={`${new Date(d.hour * 1000).toLocaleString()}: ${formatSol(d.balance)}`}
-              />
-            );
-          })}
-        </div>
-        <div className="text-xs text-slate-500 text-center">
-          Treasury Balance over time
-        </div>
-      </div>
-    );
-  }
-
-  if (type === "miners") {
-    const minersData = data as MinerActivityDailyData[];
-    const latest = minersData[minersData.length - 1];
-    const maxMiners = Math.max(...minersData.map(d => d.active_miners));
-
-    return (
-      <div className="space-y-4">
-        {/* Summary Stats */}
-        <div className="grid grid-cols-3 gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-amber-400">{(latest?.active_miners || 0).toLocaleString()}</div>
-            <div className="text-xs text-slate-500">Active Miners (Today)</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-emerald-400">{(latest?.total_deployments || 0).toLocaleString()}</div>
-            <div className="text-xs text-slate-500">Deployments (Today)</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-purple-400">{formatSol(latest?.total_won || 0)}</div>
-            <div className="text-xs text-slate-500">Won (Today)</div>
-          </div>
-        </div>
-
-        {/* Mini Bar Chart */}
-        <div className="h-40 flex items-end gap-0.5 px-2">
-          {minersData.slice(-50).map((d, i) => {
-            const height = maxMiners > 0 ? (d.active_miners / maxMiners) * 100 : 0;
-            return (
-              <div
-                key={i}
-                className="flex-1 bg-gradient-to-t from-blue-600 to-blue-400 rounded-t opacity-80 hover:opacity-100 transition-opacity cursor-pointer"
-                style={{ height: `${Math.max(height, 2)}%` }}
-                title={`${new Date(d.day * 1000).toLocaleDateString()}: ${d.active_miners} miners`}
-              />
-            );
-          })}
-        </div>
-        <div className="text-xs text-slate-500 text-center">
-          Daily Active Miners
-        </div>
-      </div>
-    );
-  }
-
-  if (type === "cost_per_ore") {
-    const costData = data as CostPerOreDailyData[];
-    const latest = costData[costData.length - 1];
-    const avgCost = costData.length > 0 
-      ? costData.reduce((sum, d) => sum + d.cost_per_ore_lamports, 0) / costData.length 
-      : 0;
-    const maxCost = Math.max(...costData.map(d => d.cost_per_ore_lamports));
-
-    return (
-      <div className="space-y-4">
-        {/* Summary Stats */}
-        <div className="grid grid-cols-3 gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-amber-400">{formatSol(latest?.cost_per_ore_lamports || 0)}</div>
-            <div className="text-xs text-slate-500">Today's Cost/ORE</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-slate-300">{formatSol(avgCost)}</div>
-            <div className="text-xs text-slate-500">Avg Cost/ORE</div>
-          </div>
-          <div className="text-center">
-            <div className="text-2xl font-bold text-emerald-400">{formatSol(latest?.cumulative_cost_per_ore || 0)}</div>
-            <div className="text-xs text-slate-500">All-Time Cost/ORE</div>
-          </div>
-        </div>
-
-        {/* Mini Bar Chart */}
-        <div className="h-40 flex items-end gap-0.5 px-2">
-          {costData.slice(-50).map((d, i) => {
-            const height = maxCost > 0 ? (d.cost_per_ore_lamports / maxCost) * 100 : 0;
-            return (
-              <div
-                key={i}
-                className="flex-1 bg-gradient-to-t from-orange-600 to-orange-400 rounded-t opacity-80 hover:opacity-100 transition-opacity cursor-pointer"
-                style={{ height: `${Math.max(height, 2)}%` }}
-                title={`${new Date(d.day * 1000).toLocaleDateString()}: ${formatSol(d.cost_per_ore_lamports)} SOL/ORE`}
-              />
-            );
-          })}
-        </div>
-        <div className="text-xs text-slate-500 text-center">
-          Daily Cost per ORE (in SOL)
-        </div>
-      </div>
-    );
-  }
-
-  if (type === "mint") {
-    const mintData = data as (MintHourlyData | MintDailyData)[];
-    const latest = mintData[mintData.length - 1];
-    const totalChange = mintData.reduce((sum, d) => sum + d.supply_change_total, 0);
-
-    return (
-      <div className="space-y-4">
-        {/* Summary Stats */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-amber-400">{formatOre(latest?.supply || 0)}</div>
-            <div className="text-xs text-slate-500">Current Supply</div>
-          </div>
-          <div className="text-center">
-            <div className={`text-2xl font-bold ${totalChange >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {totalChange >= 0 ? '+' : ''}{formatOre(totalChange)}
-            </div>
-            <div className="text-xs text-slate-500">Period Change</div>
-          </div>
-        </div>
-
-        <div className="text-center text-slate-500 text-sm py-8">
-          📊 Mint supply tracking begins after deployment
-        </div>
-      </div>
-    );
-  }
-
-  if (type === "inflation") {
-    const inflationData = data as (InflationHourlyData | InflationDailyData)[];
-    const latest = inflationData[inflationData.length - 1];
-    const circulatingEnd = 'circulating_end' in (latest || {}) 
-      ? (latest as InflationHourlyData).circulating_end 
-      : (latest as InflationDailyData)?.circulating_end;
-    const totalInflation = inflationData.reduce((sum, d) => sum + d.market_inflation_total, 0);
-
-    return (
-      <div className="space-y-4">
-        {/* Summary Stats */}
-        <div className="grid grid-cols-2 gap-4">
-          <div className="text-center">
-            <div className="text-2xl font-bold text-amber-400">{formatOre(circulatingEnd || 0)}</div>
-            <div className="text-xs text-slate-500">Circulating Supply</div>
-          </div>
-          <div className="text-center">
-            <div className={`text-2xl font-bold ${totalInflation >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
-              {totalInflation >= 0 ? '+' : ''}{formatOre(totalInflation)}
-            </div>
-            <div className="text-xs text-slate-500">Market Inflation</div>
-          </div>
-        </div>
-
-        <div className="text-center text-slate-500 text-sm py-8">
-          📊 Inflation tracking begins after deployment
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="text-center text-slate-500 py-8">
-      Chart visualization coming soon
     </div>
   );
 }
@@ -517,13 +665,12 @@ function ChartsContent() {
     const urlParam = chartsToUrlParam(charts);
     const currentParam = searchParams.get("c");
     const defaultParam = chartsToUrlParam([
-      { id: "1", type: "rounds", range: "24h" },
-      { id: "2", type: "treasury", range: "24h" },
+      { id: "1", type: "rounds", range: "7d" },
+      { id: "2", type: "treasury", range: "7d" },
     ]);
 
     if (urlParam !== currentParam) {
       if (urlParam === defaultParam) {
-        // Remove param if it's the default
         router.replace(pathname, { scroll: false });
       } else {
         router.replace(`${pathname}?c=${urlParam}`, { scroll: false });
@@ -536,13 +683,11 @@ function ChartsContent() {
     charts.forEach(async (config) => {
       const key = `${config.type}:${config.range}`;
       
-      // Skip if already loading or has data
       const existing = chartData.get(key);
       if (existing && (existing.loading || existing.data.length > 0)) {
         return;
       }
 
-      // Set loading state
       setChartData(prev => {
         const next = new Map(prev);
         next.set(key, { type: config.type, range: config.range, data: [], loading: true, error: null });
@@ -576,7 +721,7 @@ function ChartsContent() {
   const addChart = useCallback(() => {
     if (charts.length >= MAX_CHARTS) return;
     const newId = String(Date.now());
-    setCharts(prev => [...prev, { id: newId, type: "rounds", range: "24h" }]);
+    setCharts(prev => [...prev, { id: newId, type: "rounds", range: "7d" }]);
   }, [charts.length]);
 
   const removeChart = useCallback((id: string) => {
@@ -595,8 +740,13 @@ function ChartsContent() {
     return `${base}?c=${param}`;
   }, [charts, pathname]);
 
-  const copyShareUrl = useCallback(() => {
-    navigator.clipboard.writeText(shareUrl);
+  const copyShareUrl = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(shareUrl);
+    } catch {
+      // Fallback for older browsers
+      console.log("Share URL:", shareUrl);
+    }
   }, [shareUrl]);
 
   return (
@@ -609,7 +759,7 @@ function ChartsContent() {
           <div>
             <h1 className="text-2xl font-bold text-white">Charts</h1>
             <p className="text-slate-400 text-sm mt-1">
-              Customize your dashboard with time series charts. URL updates automatically for sharing.
+              Customize your dashboard with time series charts
             </p>
           </div>
           <div className="flex items-center gap-3">
@@ -670,20 +820,32 @@ function ChartsContent() {
           </div>
         )}
 
-        {/* Info Footer */}
-        <div className="mt-8 p-4 bg-slate-900/30 border border-slate-800/50 rounded-xl">
-          <div className="flex items-start gap-3">
-            <span className="text-xl">💡</span>
-            <div className="text-sm text-slate-400">
-              <p className="font-medium text-slate-300 mb-1">Tips</p>
-              <ul className="list-disc list-inside space-y-1">
-                <li>Charts are saved in the URL - bookmark or share to save your layout</li>
-                <li>You can add up to {MAX_CHARTS} charts</li>
-                <li>Mint and Inflation data will appear after the mint snapshot feature is deployed</li>
-              </ul>
+        {/* Quick Add Section */}
+        {charts.length > 0 && charts.length < MAX_CHARTS && (
+          <div className="mt-6 p-4 bg-slate-900/30 border border-slate-800/50 rounded-xl">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-slate-400 text-sm">Quick add:</span>
+                <div className="flex items-center gap-2">
+                  {CHART_TYPES.filter(ct => !charts.some(c => c.type === ct.value)).slice(0, 4).map(ct => (
+                    <button
+                      key={ct.value}
+                      onClick={() => {
+                        const newId = String(Date.now());
+                        setCharts(prev => [...prev, { id: newId, type: ct.value, range: "7d" }]);
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 rounded-lg text-xs text-slate-400 hover:text-slate-300 transition-colors"
+                    >
+                      <span>{ct.icon}</span>
+                      <span>{ct.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <span className="text-slate-500 text-xs">{charts.length}/{MAX_CHARTS} charts</span>
             </div>
           </div>
-        </div>
+        )}
       </main>
     </div>
   );
@@ -710,4 +872,3 @@ export default function ChartsPage() {
     </Suspense>
   );
 }
-
