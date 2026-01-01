@@ -2429,6 +2429,64 @@ impl ClickHouseClient {
         Ok(())
     }
     
+    /// Get transaction migration stats (old vs v2 tables).
+    /// Returns (raw_transactions_count, signatures_count, raw_transactions_v2_count)
+    pub async fn get_transaction_migration_stats(&self) -> Result<TransactionMigrationStats, ClickHouseError> {
+        // Count raw_transactions (old table)
+        let old_count: u64 = self.client
+            .query("SELECT count() FROM raw_transactions FINAL")
+            .fetch_one()
+            .await?;
+        
+        // Count unique rounds in old table
+        let old_rounds: u64 = self.client
+            .query("SELECT count(DISTINCT round_id) FROM raw_transactions FINAL")
+            .fetch_one()
+            .await?;
+        
+        // Count signatures table
+        let signatures_count: u64 = self.client
+            .query("SELECT count() FROM signatures FINAL")
+            .fetch_one()
+            .await?;
+        
+        // Count raw_transactions_v2
+        let v2_count: u64 = self.client
+            .query("SELECT count() FROM raw_transactions_v2 FINAL")
+            .fetch_one()
+            .await?;
+        
+        // Count unmigrated transactions (in old but not in v2)
+        let unmigrated_count: u64 = self.client
+            .query(r#"
+                SELECT count() 
+                FROM raw_transactions rt FINAL
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
+                    WHERE v2.signature = rt.signature
+                )
+            "#)
+            .fetch_one()
+            .await?;
+        
+        // Get next round to migrate
+        let next_round: Option<u64> = self.get_next_unmigrated_round().await?;
+        
+        Ok(TransactionMigrationStats {
+            raw_transactions_count: old_count,
+            raw_transactions_rounds: old_rounds,
+            signatures_count,
+            raw_transactions_v2_count: v2_count,
+            unmigrated_count,
+            next_round_to_migrate: next_round,
+            migration_progress_pct: if old_count > 0 {
+                ((old_count - unmigrated_count) as f64 / old_count as f64 * 100.0) as f32
+            } else {
+                100.0
+            },
+        })
+    }
+    
     /// Get the next unmigrated round (for backfill from old raw_transactions).
     /// Returns the earliest round_id that exists in raw_transactions but has 
     /// transactions not yet in raw_transactions_v2.
@@ -3911,6 +3969,25 @@ pub struct RawTransactionV2 {
     pub block_time: i64,
     pub accounts: Vec<String>,
     pub raw_json: String,
+}
+
+/// Transaction migration stats for tracking old -> v2 migration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionMigrationStats {
+    /// Count of transactions in old raw_transactions table
+    pub raw_transactions_count: u64,
+    /// Number of unique rounds in old table
+    pub raw_transactions_rounds: u64,
+    /// Count of signatures in signatures table
+    pub signatures_count: u64,
+    /// Count of transactions in raw_transactions_v2 table
+    pub raw_transactions_v2_count: u64,
+    /// Count of transactions in old table not yet in v2
+    pub unmigrated_count: u64,
+    /// Next round that needs migration
+    pub next_round_to_migrate: Option<u64>,
+    /// Migration progress percentage (0-100)
+    pub migration_progress_pct: f32,
 }
 
 /// Automation state snapshot.

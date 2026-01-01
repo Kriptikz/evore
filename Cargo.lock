@@ -3863,6 +3863,7 @@ dependencies = [
  "axum",
  "base64 0.22.1",
  "bincode",
+ "bs58",
  "bytemuck",
  "chrono",
  "clickhouse",
@@ -3899,6 +3900,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "uuid",
+ "zstd",
 ]
 
 [[package]]

@@ -46,6 +46,7 @@ solana-account-decoder-client-types = "=2.3.11"
 async-stream = "0.3"
 reqwest = { version = "0.12", features = ["json"] }
 base64 = "0.22"
+zstd = "0.13"
 clickhouse = { version = "0.13", features = ["inserter", "time"] }
 time = { version = "0.3", features = ["serde", "formatting"] }
 futures-util = "0.3"
@@ -59,3 +60,4 @@ uuid = { version = "1.0", features = ["v4", "serde"] }
 hex = "0.4"
 ipnetwork = "0.20"
 regex = "1.10"
+bs58 = "0.5"

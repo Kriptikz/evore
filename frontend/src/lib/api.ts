@@ -528,6 +528,16 @@ export interface DatabaseSizesResponse {
   postgres: PostgresSizes;
 }
 
+export interface TransactionMigrationStats {
+  raw_transactions_count: number;
+  raw_transactions_rounds: number;
+  signatures_count: number;
+  raw_transactions_v2_count: number;
+  unmigrated_count: number;
+  next_round_to_migrate: number | null;
+  migration_progress_pct: number;
+}
+
 // ORE data types (cached by ore-stats)
 export interface Board {
   round_id: number;
@@ -952,6 +962,10 @@ class ApiClient {
 
   async getDatabaseSizes(): Promise<DatabaseSizesResponse> {
     return this.request("GET", "/admin/database/sizes", { requireAuth: true });
+  }
+
+  async getTransactionMigrationStats(): Promise<TransactionMigrationStats> {
+    return this.request("GET", "/admin/database/transaction-migration", { requireAuth: true });
   }
 
   // ========== Backfill Workflow ==========

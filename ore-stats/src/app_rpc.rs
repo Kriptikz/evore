@@ -12,8 +12,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::commitment_config::{CommitmentConfig, CommitmentLevel};
+
+use crate::custom_rpc::CustomRpcClient;
 use solana_sdk::pubkey::Pubkey;
 use steel::AccountDeserialize;
 use tokio::sync::RwLock;
@@ -59,7 +60,7 @@ pub struct RpcProvider {
     pub name: String,
     pub url: String,
     pub api_key_id: String,
-    pub client: RpcClient,
+    pub client: CustomRpcClient,
     pub last_request_at: RwLock<Instant>,
     pub min_request_interval_ms: u64,
 }
@@ -74,11 +75,7 @@ impl RpcProvider {
             format!("https://{}", url)
         };
         
-        let client = RpcClient::new_with_commitment(
-            normalized_url.clone(),
-            CommitmentConfig { commitment: CommitmentLevel::Confirmed },
-        );
-        
+        let client = CustomRpcClient::new(&normalized_url);
         let api_key_id = extract_api_key_id(&normalized_url);
         
         Self {
@@ -268,7 +265,7 @@ impl AppRpc {
                 Ok(response) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     if let Some(account) = response.value {
-                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, response.response_size as u32).await;
                         let board = Board::try_from_bytes(&account.data)?;
                         return Ok(*board);
                     } else {
@@ -321,7 +318,7 @@ impl AppRpc {
                 Ok(response) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     if let Some(account) = response.value {
-                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, response.response_size as u32).await;
                         let round = Round::try_from_bytes(&account.data)?;
                         return Ok(*round);
                     } else {
@@ -373,7 +370,7 @@ impl AppRpc {
                 Ok(response) => {
         let duration_ms = start.elapsed().as_millis() as u32;
                     if let Some(account) = response.value {
-                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, response.response_size as u32).await;
                         let treasury = Treasury::try_from_bytes(&account.data)?;
                         return Ok(*treasury);
                     } else {
@@ -426,7 +423,7 @@ impl AppRpc {
                 Ok(response) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     if let Some(account) = response.value {
-                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, response.response_size as u32).await;
                         // SPL Token Mint account layout:
                         // - 36..44: supply (8 bytes, little-endian u64)
                         if account.data.len() < 44 {
@@ -486,7 +483,7 @@ impl AppRpc {
         match result {
             Ok(response) => {
                 if let Some(account) = response.value {
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, response.response_size as u32).await;
                     let miner = Miner::try_from_bytes(&account.data)?;
                 Ok(Some(*miner))
                 } else {
@@ -612,8 +609,7 @@ impl AppRpc {
                     let accounts = response.value;
                     let duration_ms = start.elapsed().as_millis() as u32;
                     let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
-                    let total_size: u32 = accounts.iter().filter_map(|a| a.as_ref()).map(|a| a.data.len() as u32).sum();
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, found_count, total_size).await;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, found_count, response.response_size as u32).await;
                     return Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect());
             }
             Err(e) => {
@@ -778,13 +774,10 @@ impl AppRpc {
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
-            Ok(accounts) => {
+                Ok((accounts, response_size)) => {
                 let mut miners = std::collections::HashMap::new();
-                let mut total_size = 0u32;
                 
                     for (_pubkey, account) in &accounts {
-                    total_size += account.data.len() as u32;
-                    
                     if let Ok(miner) = Miner::try_from_bytes(&account.data) {
                         // Apply refined_ore fix if treasury is available
                         let fixed_miner = if let Some(t) = treasury {
@@ -818,7 +811,7 @@ impl AppRpc {
                         provider.name, accounts.len(), miners.len(), duration_ms
                 );
                 
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, miners.len() as u32, total_size).await;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, miners.len() as u32, response_size as u32).await;
                     return Ok(miners);
             }
             Err(e) => {
@@ -882,8 +875,7 @@ impl AppRpc {
             let duration_ms = start.elapsed().as_millis() as u32;
             
             match result {
-                Ok(accounts) => {
-                    let total_size: u32 = accounts.iter().map(|(_, a)| a.data.len() as u32).sum();
+                Ok((accounts, response_size)) => {
                     let result: Vec<(Pubkey, Vec<u8>)> = accounts
                         .into_iter()
                         .map(|(pk, acc)| (pk, acc.data))
@@ -894,7 +886,7 @@ impl AppRpc {
                         provider.name, result.len(), duration_ms
                     );
                     
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, result.len() as u32, total_size).await;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, result.len() as u32, response_size as u32).await;
                     return Ok(result);
                 }
                 Err(e) => {
@@ -958,8 +950,7 @@ impl AppRpc {
             let duration_ms = start.elapsed().as_millis() as u32;
             
             match result {
-                Ok(accounts) => {
-                    let total_size: u32 = accounts.iter().map(|(_, a)| a.data.len() as u32).sum();
+                Ok((accounts, response_size)) => {
                     let result: Vec<(Pubkey, Vec<u8>)> = accounts
                         .into_iter()
                         .map(|(pk, acc)| (pk, acc.data))
@@ -970,7 +961,7 @@ impl AppRpc {
                         provider.name, result.len(), duration_ms
                     );
                     
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, result.len() as u32, total_size).await;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, result.len() as u32, response_size as u32).await;
                     return Ok(result);
                 }
                 Err(e) => {
@@ -1058,7 +1049,7 @@ impl AppRpc {
             };
             
             match result {
-                Ok(sigs) => {
+                Ok((sigs, response_size)) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     self.log_success(
                         &provider.name, 
@@ -1066,7 +1057,7 @@ impl AppRpc {
                         &ctx, 
                         duration_ms,
                         sigs.len() as u32, 
-                        0
+                        response_size as u32
                     ).await;
                     return Ok(sigs);
                 }

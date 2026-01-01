@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback } from "react";
 import { AdminShell } from "@/components/admin/AdminShell";
 import { useAdmin } from "@/context/AdminContext";
-import { api, DatabaseSizesResponse, DetailedTable, PostgresTableSize, TableEngineRow } from "@/lib/api";
+import { api, DatabaseSizesResponse, DetailedTable, PostgresTableSize, TableEngineRow, TransactionMigrationStats } from "@/lib/api";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -47,6 +47,7 @@ function EngineTag({ engine }: { engine: string }) {
 export default function DatabasePage() {
   const { isAuthenticated } = useAdmin();
   const [data, setData] = useState<DatabaseSizesResponse | null>(null);
+  const [migrationStats, setMigrationStats] = useState<TransactionMigrationStats | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [selectedDb, setSelectedDb] = useState<string>("all");
@@ -60,11 +61,15 @@ export default function DatabasePage() {
     
     try {
       setLoading(true);
-      const sizes = await api.getDatabaseSizes();
+      const [sizes, migration] = await Promise.all([
+        api.getDatabaseSizes(),
+        api.getTransactionMigrationStats(),
+      ]);
       setData(sizes);
+      setMigrationStats(migration);
       setError(null);
     } catch (e) {
-      console.error("Failed to fetch database sizes:", e);
+      console.error("Failed to fetch database data:", e);
       setError(e instanceof Error ? e.message : "Failed to fetch data");
     } finally {
       setLoading(false);
@@ -170,6 +175,78 @@ export default function DatabasePage() {
                 </p>
               </div>
             </div>
+
+            {/* Transaction Migration Stats */}
+            {migrationStats && (
+              <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">
+                <h2 className="text-xl font-bold text-white mb-4 flex items-center gap-2">
+                  <span className="text-cyan-400">📦</span> Transaction Migration Status
+                </h2>
+                
+                {/* Progress Bar */}
+                <div className="mb-6">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm text-slate-400">Migration Progress</span>
+                    <span className={`text-sm font-bold ${migrationStats.migration_progress_pct >= 100 ? 'text-green-400' : 'text-cyan-400'}`}>
+                      {migrationStats.migration_progress_pct.toFixed(1)}%
+                    </span>
+                  </div>
+                  <div className="w-full bg-slate-700 rounded-full h-3">
+                    <div 
+                      className={`h-3 rounded-full transition-all duration-500 ${
+                        migrationStats.migration_progress_pct >= 100 ? 'bg-green-500' : 'bg-cyan-500'
+                      }`}
+                      style={{ width: `${Math.min(migrationStats.migration_progress_pct, 100)}%` }}
+                    />
+                  </div>
+                </div>
+                
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-4">
+                  {/* Old raw_transactions */}
+                  <div className="bg-slate-900/50 border border-slate-600 rounded-lg p-4">
+                    <div className="text-xs text-slate-500 uppercase mb-1">raw_transactions (old)</div>
+                    <div className="text-xl font-bold text-orange-400">{formatNumber(migrationStats.raw_transactions_count)}</div>
+                    <div className="text-xs text-slate-500">{migrationStats.raw_transactions_rounds} rounds</div>
+                  </div>
+                  
+                  {/* Signatures */}
+                  <div className="bg-slate-900/50 border border-slate-600 rounded-lg p-4">
+                    <div className="text-xs text-slate-500 uppercase mb-1">signatures</div>
+                    <div className="text-xl font-bold text-blue-400">{formatNumber(migrationStats.signatures_count)}</div>
+                  </div>
+                  
+                  {/* v2 transactions */}
+                  <div className="bg-slate-900/50 border border-slate-600 rounded-lg p-4">
+                    <div className="text-xs text-slate-500 uppercase mb-1">raw_transactions_v2</div>
+                    <div className="text-xl font-bold text-green-400">{formatNumber(migrationStats.raw_transactions_v2_count)}</div>
+                  </div>
+                  
+                  {/* Unmigrated */}
+                  <div className={`bg-slate-900/50 border rounded-lg p-4 ${migrationStats.unmigrated_count > 0 ? 'border-yellow-500/50' : 'border-slate-600'}`}>
+                    <div className="text-xs text-slate-500 uppercase mb-1">Unmigrated</div>
+                    <div className={`text-xl font-bold ${migrationStats.unmigrated_count > 0 ? 'text-yellow-400' : 'text-green-400'}`}>
+                      {formatNumber(migrationStats.unmigrated_count)}
+                    </div>
+                  </div>
+                  
+                  {/* Next round to migrate */}
+                  <div className="bg-slate-900/50 border border-slate-600 rounded-lg p-4">
+                    <div className="text-xs text-slate-500 uppercase mb-1">Next Round</div>
+                    <div className="text-xl font-bold text-purple-400">
+                      {migrationStats.next_round_to_migrate !== null ? `#${migrationStats.next_round_to_migrate}` : '✓ Done'}
+                    </div>
+                  </div>
+                  
+                  {/* Migration Status */}
+                  <div className={`bg-slate-900/50 border rounded-lg p-4 ${migrationStats.migration_progress_pct >= 100 ? 'border-green-500/50' : 'border-cyan-500/50'}`}>
+                    <div className="text-xs text-slate-500 uppercase mb-1">Status</div>
+                    <div className={`text-xl font-bold ${migrationStats.migration_progress_pct >= 100 ? 'text-green-400' : 'text-cyan-400'}`}>
+                      {migrationStats.migration_progress_pct >= 100 ? '✓ Complete' : 'In Progress'}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* ClickHouse Databases */}
             <div className="bg-slate-800/50 border border-slate-700 rounded-xl p-6">

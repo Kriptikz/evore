@@ -842,6 +842,25 @@ pub struct PostgresTableSize {
     pub last_analyze: Option<String>,
 }
 
+/// GET /admin/database/transaction-migration
+/// Get transaction migration stats (old raw_transactions vs v2 tables)
+pub async fn get_transaction_migration_stats(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<crate::clickhouse::TransactionMigrationStats>, (StatusCode, Json<AuthError>)> {
+    let stats = state.clickhouse
+        .get_transaction_migration_stats()
+        .await
+        .map_err(|e| {
+            tracing::error!("Failed to get transaction migration stats: {}", e);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(AuthError { error: format!("ClickHouse error: {}", e) }),
+            )
+        })?;
+    
+    Ok(Json(stats))
+}
+
 /// GET /admin/database/sizes
 /// Comprehensive database storage metrics for production monitoring
 pub async fn get_database_sizes(
@@ -1715,8 +1734,9 @@ pub fn admin_router(state: Arc<AppState>) -> Router<Arc<AppState>> {
         .route("/requests/endpoints", get(get_endpoint_summary))
         .route("/requests/rate-limits", get(get_rate_limit_events))
         .route("/requests/ip-activity", get(get_ip_activity))
-        // Database sizes
+        // Database sizes and migration stats
         .route("/database/sizes", get(get_database_sizes))
+        .route("/database/transaction-migration", get(get_transaction_migration_stats))
         // Backfill workflow
         .route("/backfill/rounds", post(crate::backfill::backfill_rounds))
         .route("/backfill/rounds/status", get(crate::backfill::get_backfill_rounds_status))
