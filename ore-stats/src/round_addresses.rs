@@ -136,15 +136,21 @@ async fn backfill_round_addresses(state: &AppState) -> anyhow::Result<BackfillRe
 }
 
 async fn backfill_round_transaction_stats(state: &AppState) -> anyhow::Result<BackfillResult> {
+    tracing::info!("Checking round transaction stats backfill...");
+    
     // Check if already complete
     if state.clickhouse.all_round_stats_complete().await? {
+        tracing::info!("all_round_stats_complete returned true");
         return Ok(BackfillResult::Complete);
     }
     
     // Get rounds that need stats (have addresses + v2 transactions but no stats)
     let rounds_needing_stats = state.clickhouse.get_rounds_needing_stats_backfill().await?;
     
+    tracing::info!("Found {} rounds needing stats backfill", rounds_needing_stats.len());
+    
     if rounds_needing_stats.is_empty() {
+        tracing::info!("No rounds needing stats, marking complete");
         return Ok(BackfillResult::Complete);
     }
     
@@ -152,7 +158,11 @@ async fn backfill_round_transaction_stats(state: &AppState) -> anyhow::Result<Ba
     let batch_size = 50.min(rounds_needing_stats.len());
     let batch = &rounds_needing_stats[..batch_size];
     
+    tracing::info!("Backfilling stats for rounds: {:?}", &batch[..batch.len().min(5)]);
+    
     let count = state.clickhouse.backfill_round_transaction_stats(batch).await?;
+    
+    tracing::info!("Backfilled stats for {} rounds", count);
     
     Ok(BackfillResult::Progress(count))
 }
