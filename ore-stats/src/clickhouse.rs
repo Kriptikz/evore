@@ -2667,19 +2667,17 @@ impl ClickHouseClient {
     
     // ========== Round Transaction Stats Backfill ==========
     
-    /// Get round_ids that have addresses and v2 transactions but no stats yet.
-    /// Returns up to 100 round_ids per call.
+    /// Get round_ids that don't have stats yet.
+    /// Returns up to 100 round_ids per call, ordered by round_id ASC.
+    /// We don't check if they have v2 transactions - we'll try to compute stats
+    /// and if there are none, it's just a no-op INSERT.
     pub async fn get_rounds_needing_stats_backfill(&self) -> Result<Vec<u64>, ClickHouseError> {
         let results: Vec<u64> = self.client
             .query(r#"
-                SELECT DISTINCT ra.round_id
+                SELECT ra.round_id
                 FROM round_addresses ra FINAL
                 WHERE ra.round_id NOT IN (
-                    SELECT round_id FROM round_transaction_stats FINAL
-                )
-                AND EXISTS (
-                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
-                    WHERE has(v2.accounts, ra.address)
+                    SELECT DISTINCT round_id FROM round_transaction_stats FINAL
                 )
                 ORDER BY ra.round_id ASC
                 LIMIT 100
@@ -2689,19 +2687,22 @@ impl ClickHouseClient {
         Ok(results)
     }
     
-    /// Insert round transaction stats for a batch of round_ids.
+    /// Insert round transaction stats for a batch of round_ids with their addresses.
     /// Computes stats from raw_transactions_v2 joined with round_addresses.
-    pub async fn backfill_round_transaction_stats(&self, round_ids: &[u64]) -> Result<usize, ClickHouseError> {
-        if round_ids.is_empty() {
+    /// If a round has no transactions, inserts a placeholder with count=0.
+    pub async fn backfill_round_transaction_stats(&self, rounds: &[(u64, String)]) -> Result<usize, ClickHouseError> {
+        if rounds.is_empty() {
             return Ok(0);
         }
         
-        // Build the IN clause
-        let ids_str = round_ids.iter()
-            .map(|id| id.to_string())
+        // Build comma-separated addresses for the batch
+        let addresses_str = rounds.iter()
+            .map(|(_, addr)| format!("'{}'", addr))
             .collect::<Vec<_>>()
             .join(", ");
         
+        // Query transactions that contain any of these round addresses
+        // Then join back to get the round_id
         let query = format!(r#"
             INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
             SELECT 
@@ -2712,31 +2713,35 @@ impl ClickHouseClient {
                 max(v2.slot) AS max_slot
             FROM raw_transactions_v2 AS v2 FINAL
             INNER JOIN round_addresses AS ra FINAL ON has(v2.accounts, ra.address)
-            WHERE ra.round_id IN ({})
+            WHERE ra.address IN ({})
             GROUP BY ra.round_id, ra.address
-        "#, ids_str);
+        "#, addresses_str);
         
         self.client.query(&query).execute().await?;
-        Ok(round_ids.len())
-    }
-    
-    /// Check if all rounds with v2 transactions have stats.
-    pub async fn all_round_stats_complete(&self) -> Result<bool, ClickHouseError> {
-        let missing: u64 = self.client
-            .query(r#"
-                SELECT count(DISTINCT ra.round_id)
-                FROM round_addresses ra FINAL
-                WHERE ra.round_id NOT IN (
-                    SELECT round_id FROM round_transaction_stats FINAL
-                )
-                AND EXISTS (
-                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
-                    WHERE has(v2.accounts, ra.address)
-                )
-            "#)
-            .fetch_one()
-            .await?;
-        Ok(missing == 0)
+        
+        // Also insert a placeholder for rounds with no transactions so we don't re-check them
+        // We use 0 transaction_count as a marker
+        let round_ids_str = rounds.iter()
+            .map(|(id, _)| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        let placeholder_query = format!(r#"
+            INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
+            SELECT 
+                ra.round_id,
+                ra.address,
+                0 AS transaction_count,
+                0 AS min_slot,
+                0 AS max_slot
+            FROM round_addresses AS ra FINAL
+            WHERE ra.round_id IN ({})
+              AND ra.round_id NOT IN (SELECT DISTINCT round_id FROM round_transaction_stats FINAL)
+        "#, round_ids_str);
+        
+        self.client.query(&placeholder_query).execute().await?;
+        
+        Ok(rounds.len())
     }
     
     // ========== Automation States ==========

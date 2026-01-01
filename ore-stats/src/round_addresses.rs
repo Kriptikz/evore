@@ -138,29 +138,31 @@ async fn backfill_round_addresses(state: &AppState) -> anyhow::Result<BackfillRe
 async fn backfill_round_transaction_stats(state: &AppState) -> anyhow::Result<BackfillResult> {
     tracing::info!("Checking round transaction stats backfill...");
     
-    // Check if already complete
-    if state.clickhouse.all_round_stats_complete().await? {
-        tracing::info!("all_round_stats_complete returned true");
-        return Ok(BackfillResult::Complete);
-    }
+    // Get round_ids that need stats
+    let round_ids = state.clickhouse.get_rounds_needing_stats_backfill().await?;
     
-    // Get rounds that need stats (have addresses + v2 transactions but no stats)
-    let rounds_needing_stats = state.clickhouse.get_rounds_needing_stats_backfill().await?;
+    tracing::info!("Found {} rounds needing stats backfill", round_ids.len());
     
-    tracing::info!("Found {} rounds needing stats backfill", rounds_needing_stats.len());
-    
-    if rounds_needing_stats.is_empty() {
+    if round_ids.is_empty() {
         tracing::info!("No rounds needing stats, marking complete");
         return Ok(BackfillResult::Complete);
     }
     
     // Process in smaller batches to avoid timeouts
-    let batch_size = 50.min(rounds_needing_stats.len());
-    let batch = &rounds_needing_stats[..batch_size];
+    let batch_size = 10.min(round_ids.len());
+    let batch_ids = &round_ids[..batch_size];
     
-    tracing::info!("Backfilling stats for rounds: {:?}", &batch[..batch.len().min(5)]);
+    // Convert round_ids to (round_id, address) tuples
+    let batch: Vec<(u64, String)> = batch_ids.iter()
+        .map(|&round_id| {
+            let (pda, _) = evore::ore_api::round_pda(round_id);
+            (round_id, pda.to_string())
+        })
+        .collect();
     
-    let count = state.clickhouse.backfill_round_transaction_stats(batch).await?;
+    tracing::info!("Backfilling stats for rounds: {:?}", batch_ids);
+    
+    let count = state.clickhouse.backfill_round_transaction_stats(&batch).await?;
     
     tracing::info!("Backfilled stats for {} rounds", count);
     
