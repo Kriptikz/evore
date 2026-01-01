@@ -516,61 +516,79 @@ pub async fn fetch_and_store_round_transactions(state: &std::sync::Arc<crate::ap
     }).collect();
     state.clickhouse.insert_signatures(sig_rows).await?;
     
-    // Fetch and store full transactions
-    let mut stored_count = 0;
-    let mut tx_rows = Vec::new();
-    
+    // Filter to signatures not already stored (avoid redundant fetches)
+    let mut sigs_to_fetch = Vec::new();
     for sig_info in &signatures {
-        // Check if already stored
-        if state.clickhouse.transaction_exists_v2(&sig_info.signature).await? {
-            continue;
+        if !state.clickhouse.transaction_exists_v2(&sig_info.signature).await? {
+            sigs_to_fetch.push(sig_info.clone());
         }
-        
-        // Fetch full transaction
-        match state.rpc.get_transaction(&sig_info.signature).await {
-            Ok(Some(tx)) => {
-                // Parse accounts from raw JSON
-                let accounts = match parse_transaction_accounts(&tx.raw_json) {
-                    Ok(acc) => acc,
-                    Err(e) => {
-                        tracing::warn!(
-                            "Failed to parse accounts for tx {}: {}. Using round PDA only.",
-                            sig_info.signature, e
-                        );
-                        vec![round_pda_str.clone()]
-                    }
-                };
-                
-                tx_rows.push(RawTransactionV2 {
-                    signature: sig_info.signature.clone(),
-                    slot: sig_info.slot,
-                    block_time: tx.block_time.unwrap_or(0),
-                    accounts,
-                    raw_json: tx.raw_json,
-                });
-                
-                stored_count += 1;
-                
-                // Batch insert every 50 transactions
-                if tx_rows.len() >= 50 {
-                    state.clickhouse.insert_raw_transactions_v2(tx_rows.drain(..).collect()).await?;
-                }
-            }
-            Ok(None) => {
-                tracing::debug!("Transaction {} not found (may be too old)", sig_info.signature);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to fetch transaction {}: {}", sig_info.signature, e);
-            }
-        }
-        
-        // Small delay to respect rate limits
-        tokio::time::sleep(Duration::from_millis(10)).await;
     }
     
-    // Insert remaining transactions
-    if !tx_rows.is_empty() {
-        state.clickhouse.insert_raw_transactions_v2(tx_rows).await?;
+    tracing::info!("Round {}: {} transactions need fetching ({} already stored)", 
+        round_id, sigs_to_fetch.len(), signatures.len() - sigs_to_fetch.len());
+    
+    // Fetch transactions concurrently in batches of 100
+    // RPC providers have built-in rate limiting, so we can fire many requests at once
+    const BATCH_SIZE: usize = 100;
+    let mut stored_count = 0;
+    
+    for batch in sigs_to_fetch.chunks(BATCH_SIZE) {
+        // Spawn all fetch requests concurrently (don't await individually)
+        let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
+            let sig = sig_info.signature.clone();
+            let slot = sig_info.slot;
+            let rpc = state.rpc.clone();
+            async move {
+                let result = rpc.get_transaction(&sig).await;
+                (sig, slot, result)
+            }
+        }).collect();
+        
+        // Wait for all requests in this batch to complete
+        let results = futures::future::join_all(fetch_futures).await;
+        
+        // Process results
+        let mut tx_rows = Vec::new();
+        for (sig, slot, result) in results {
+            match result {
+                Ok(Some(tx)) => {
+                    // Parse accounts from raw JSON
+                    let accounts = match parse_transaction_accounts(&tx.raw_json) {
+                        Ok(acc) => acc,
+                        Err(e) => {
+                            tracing::warn!(
+                                "Failed to parse accounts for tx {}: {}. Using round PDA only.",
+                                sig, e
+                            );
+                            vec![round_pda_str.clone()]
+                        }
+                    };
+                    
+                    tx_rows.push(RawTransactionV2 {
+                        signature: sig,
+                        slot,
+                        block_time: tx.block_time.unwrap_or(0),
+                        accounts,
+                        raw_json: tx.raw_json,
+                    });
+                    
+                    stored_count += 1;
+                }
+                Ok(None) => {
+                    tracing::debug!("Transaction {} not found (may be too old)", sig);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch transaction {}: {}", sig, e);
+                }
+            }
+        }
+        
+        // Insert this batch to ClickHouse
+        if !tx_rows.is_empty() {
+            state.clickhouse.insert_raw_transactions_v2(tx_rows).await?;
+        }
+        
+        tracing::debug!("Round {}: processed batch of {} transactions", round_id, batch.len());
     }
     
         tracing::info!(

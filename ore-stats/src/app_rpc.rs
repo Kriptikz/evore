@@ -37,7 +37,7 @@ const RETRY_DELAY_MS: u64 = 500;
 /// Rate limits per provider (milliseconds between requests)
 const FLUX_MIN_INTERVAL_MS: u64 = 33;    // ~30 rps
 const HELIUS_MIN_INTERVAL_MS: u64 = 40;  // ~25 rps
-const TRITON_MIN_INTERVAL_MS: u64 = 40;  // ~25 rps
+const TRITON_MIN_INTERVAL_MS: u64 = 20;  // ~50 rps
 
 /// RPC metrics context for a single request
 #[derive(Debug, Clone)]

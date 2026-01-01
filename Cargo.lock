@@ -3870,6 +3870,7 @@ dependencies = [
  "const-crypto",
  "dotenvy",
  "evore",
+ "futures",
  "futures-util",
  "hex",
  "ipnetwork",
