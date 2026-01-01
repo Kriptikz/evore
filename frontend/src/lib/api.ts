@@ -185,6 +185,7 @@ export interface BackfillRoundsTaskState {
   per_page: number;
   rounds_fetched: number;
   rounds_skipped: number;
+  rounds_not_in_external_api: number;
   pages_jumped: number;
   last_round_id_processed: number | null;
   first_round_id_seen: number | null;
@@ -1429,6 +1430,68 @@ class ApiClient {
   async getChartMinersDaily(days: number = 30): Promise<MinerActivityDailyData[]> {
     return this.request("GET", `/charts/miners/daily?days=${days}`);
   }
+
+  // ========== Direct/Round-based Chart Endpoints ==========
+
+  async getChartRoundsDirect(
+    start?: number,
+    end?: number | "live",
+    limit: number = 1000
+  ): Promise<DirectResponse<RoundDirectData>> {
+    const params = new URLSearchParams();
+    if (start !== undefined) params.set("start", String(start));
+    if (end !== undefined) params.set("end", String(end));
+    params.set("limit", String(limit));
+    return this.request("GET", `/charts/rounds/direct?${params.toString()}`);
+  }
+
+  async getChartTreasuryDirect(
+    start?: number,
+    end?: number | "live",
+    limit: number = 1000
+  ): Promise<DirectResponse<TreasuryDirectData>> {
+    const params = new URLSearchParams();
+    if (start !== undefined) params.set("start", String(start));
+    if (end !== undefined) params.set("end", String(end));
+    params.set("limit", String(limit));
+    return this.request("GET", `/charts/treasury/direct?${params.toString()}`);
+  }
+
+  async getChartMintDirect(
+    start?: number,
+    end?: number | "live",
+    limit: number = 1000
+  ): Promise<DirectResponse<MintDirectData>> {
+    const params = new URLSearchParams();
+    if (start !== undefined) params.set("start", String(start));
+    if (end !== undefined) params.set("end", String(end));
+    params.set("limit", String(limit));
+    return this.request("GET", `/charts/mint/direct?${params.toString()}`);
+  }
+
+  async getChartInflationDirect(
+    start?: number,
+    end?: number | "live",
+    limit: number = 1000
+  ): Promise<DirectResponse<InflationDirectData>> {
+    const params = new URLSearchParams();
+    if (start !== undefined) params.set("start", String(start));
+    if (end !== undefined) params.set("end", String(end));
+    params.set("limit", String(limit));
+    return this.request("GET", `/charts/inflation/direct?${params.toString()}`);
+  }
+
+  async getChartCostPerOreDirect(
+    start?: number,
+    end?: number | "live",
+    limit: number = 1000
+  ): Promise<DirectResponse<CostPerOreDirectData>> {
+    const params = new URLSearchParams();
+    if (start !== undefined) params.set("start", String(start));
+    if (end !== undefined) params.set("end", String(end));
+    params.set("limit", String(limit));
+    return this.request("GET", `/charts/cost-per-ore/direct?${params.toString()}`);
+  }
 }
 
 // Transaction Viewer Types
@@ -1817,9 +1880,6 @@ export interface CostPerOreDailyData {
   total_vaulted: number;
   ore_minted_total: number;
   cost_per_ore_lamports: number;
-  cumulative_vaulted: number;
-  cumulative_ore: number;
-  cumulative_cost_per_ore: number;
 }
 
 export interface MinerActivityDailyData {
@@ -1828,6 +1888,66 @@ export interface MinerActivityDailyData {
   total_deployments: number;
   total_deployed: number;
   total_won: number;
+}
+
+// ============================================================================
+// Direct/Round-based Chart Data Types
+// ============================================================================
+
+export interface DirectMeta {
+  latest_round_id: number;
+}
+
+export interface DirectResponse<T> {
+  meta: DirectMeta;
+  data: T[];
+}
+
+export interface RoundDirectData {
+  round_id: number;
+  created_at: number;  // Unix timestamp ms
+  total_deployments: number;
+  unique_miners: number;
+  total_deployed: number;
+  total_vaulted: number;
+  total_winnings: number;
+  motherlode_hit: boolean;
+  motherlode: number;
+}
+
+export interface TreasuryDirectData {
+  round_id: number;
+  created_at: number;  // Unix timestamp ms
+  balance: number;
+  motherlode: number;
+  total_staked: number;
+  total_unclaimed: number;
+  total_refined: number;
+}
+
+export interface MintDirectData {
+  round_id: number;
+  created_at: number;  // Unix timestamp ms
+  supply: number;
+  supply_change: number;
+}
+
+export interface InflationDirectData {
+  round_id: number;
+  created_at: number;  // Unix timestamp ms
+  supply: number;
+  supply_change: number;
+  unclaimed: number;
+  circulating: number;
+  market_inflation: number;
+}
+
+export interface CostPerOreDirectData {
+  round_id: number;
+  created_at: number;  // Unix timestamp ms
+  total_vaulted: number;
+  ore_minted: number;
+  cost_per_ore_lamports: number;
 }
 
 // ============================================================================

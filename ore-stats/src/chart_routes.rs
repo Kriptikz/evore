@@ -15,8 +15,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::app_state::AppState;
 use crate::clickhouse::{
-    CostPerOreDailyRow, InflationDailyRow, InflationHourlyRow, MinerActivityDailyRow,
-    MintDailyRow, MintHourlyRow, RoundsDailyRow, RoundsHourlyRow, TreasuryHourlyRow,
+    CostPerOreDailyRow, CostPerOreDirectRow, InflationDailyRow, InflationDirectRow,
+    InflationHourlyRow, MinerActivityDailyRow, MintDailyRow, MintDirectRow, MintHourlyRow,
+    RoundDirectRow, RoundsDailyRow, RoundsHourlyRow, TreasuryDirectRow, TreasuryHourlyRow,
 };
 
 // ============================================================================
@@ -35,6 +36,30 @@ pub struct HourlyQuery {
 pub struct DailyQuery {
     /// Number of days to fetch (default: 30, max: 365).
     pub days: Option<u32>,
+}
+
+/// Round range query for direct data.
+#[derive(Debug, Deserialize)]
+pub struct DirectQuery {
+    /// Start round ID (inclusive). If omitted, starts from latest - limit.
+    pub start: Option<u64>,
+    /// End round ID (inclusive). If omitted or "live", uses latest round.
+    pub end: Option<String>,
+    /// Maximum number of data points to return (default: 1000, max: 5000).
+    pub limit: Option<u32>,
+}
+
+impl DirectQuery {
+    /// Parse end parameter - returns None for "live" or missing.
+    pub fn end_round(&self) -> Option<u64> {
+        self.end.as_ref().and_then(|s| {
+            if s == "live" {
+                None
+            } else {
+                s.parse().ok()
+            }
+        })
+    }
 }
 
 // ============================================================================
@@ -236,9 +261,6 @@ pub struct CostPerOreDailyResponse {
     pub total_vaulted: u64,
     pub ore_minted_total: u64,
     pub cost_per_ore_lamports: u64,
-    pub cumulative_vaulted: u64,
-    pub cumulative_ore: u64,
-    pub cumulative_cost_per_ore: u64,
 }
 
 impl From<CostPerOreDailyRow> for CostPerOreDailyResponse {
@@ -250,9 +272,6 @@ impl From<CostPerOreDailyRow> for CostPerOreDailyResponse {
             total_vaulted: row.total_vaulted,
             ore_minted_total: row.ore_minted_total,
             cost_per_ore_lamports: row.cost_per_ore_lamports,
-            cumulative_vaulted: row.cumulative_vaulted,
-            cumulative_ore: row.cumulative_ore,
-            cumulative_cost_per_ore: row.cumulative_cost_per_ore,
         }
     }
 }
@@ -278,6 +297,67 @@ impl From<MinerActivityDailyRow> for MinerActivityDailyResponse {
             total_won: row.total_won,
         }
     }
+}
+
+// ============================================================================
+// Direct/Round-based Response Types
+// ============================================================================
+
+/// Direct round data (from rounds table).
+#[derive(Debug, Serialize)]
+pub struct RoundDirectResponse {
+    pub round_id: u64,
+    pub created_at: i64,  // Unix timestamp ms
+    pub total_deployments: u32,
+    pub unique_miners: u32,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub motherlode_hit: bool,
+    pub motherlode: u64,
+}
+
+/// Direct treasury snapshot data.
+#[derive(Debug, Serialize)]
+pub struct TreasuryDirectResponse {
+    pub round_id: u64,
+    pub created_at: i64,  // Unix timestamp ms
+    pub balance: u64,
+    pub motherlode: u64,
+    pub total_staked: u64,
+    pub total_unclaimed: u64,
+    pub total_refined: u64,
+}
+
+/// Direct mint snapshot data.
+#[derive(Debug, Serialize)]
+pub struct MintDirectResponse {
+    pub round_id: u64,
+    pub created_at: i64,  // Unix timestamp ms
+    pub supply: u64,
+    pub supply_change: i64,
+}
+
+/// Direct inflation data (per round).
+#[derive(Debug, Serialize)]
+pub struct InflationDirectResponse {
+    pub round_id: u64,
+    pub created_at: i64,  // Unix timestamp ms
+    pub supply: u64,
+    pub supply_change: i64,
+    pub unclaimed: u64,
+    pub circulating: u64,
+    pub market_inflation: i64,
+}
+
+/// Direct cost per ORE (calculated per round).
+#[derive(Debug, Serialize)]
+pub struct CostPerOreDirectResponse {
+    pub round_id: u64,
+    pub created_at: i64,  // Unix timestamp ms
+    pub total_vaulted: u64,
+    pub ore_minted: u64,  // 1 ORE base + motherlode
+    pub cost_per_ore_lamports: u64,
 }
 
 // ============================================================================
@@ -438,25 +518,230 @@ pub async fn get_miners_daily(
 }
 
 // ============================================================================
+// Direct/Round-based Route Handlers
+// ============================================================================
+
+/// Metadata about the latest round (for "live" end value).
+#[derive(Debug, Serialize)]
+pub struct DirectMetadata {
+    pub latest_round_id: u64,
+}
+
+/// Wrapper response for direct data with metadata.
+#[derive(Debug, Serialize)]
+pub struct DirectResponse<T> {
+    pub meta: DirectMetadata,
+    pub data: Vec<T>,
+}
+
+/// GET /charts/rounds/direct
+/// Returns direct round data by round range.
+pub async fn get_rounds_direct(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DirectQuery>,
+) -> Result<Json<DirectResponse<RoundDirectResponse>>, StatusCode> {
+    let limit = query.limit.unwrap_or(1000).min(5000);
+    let end_round = query.end_round();
+    
+    // Get latest round ID for metadata
+    let latest = state.clickhouse.get_latest_round_id().await
+        .map_err(|e| {
+            tracing::error!("Failed to get latest round: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap_or(0);
+
+    match state.clickhouse.get_rounds_direct(query.start, end_round, limit).await {
+        Ok(rows) => {
+            let data: Vec<RoundDirectResponse> = rows.into_iter().map(|r| RoundDirectResponse {
+                round_id: r.round_id,
+                created_at: r.created_at,
+                total_deployments: r.total_deployments,
+                unique_miners: r.unique_miners,
+                total_deployed: r.total_deployed,
+                total_vaulted: r.total_vaulted,
+                total_winnings: r.total_winnings,
+                motherlode_hit: r.motherlode_hit != 0,
+                motherlode: r.motherlode,
+            }).collect();
+            Ok(Json(DirectResponse { meta: DirectMetadata { latest_round_id: latest }, data }))
+        },
+        Err(e) => {
+            tracing::error!("Failed to get rounds direct: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /charts/treasury/direct
+/// Returns direct treasury snapshots by round range.
+pub async fn get_treasury_direct(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DirectQuery>,
+) -> Result<Json<DirectResponse<TreasuryDirectResponse>>, StatusCode> {
+    let limit = query.limit.unwrap_or(1000).min(5000);
+    let end_round = query.end_round();
+    
+    let latest = state.clickhouse.get_latest_round_id().await
+        .map_err(|e| {
+            tracing::error!("Failed to get latest round: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap_or(0);
+
+    match state.clickhouse.get_treasury_direct(query.start, end_round, limit).await {
+        Ok(rows) => {
+            let data: Vec<TreasuryDirectResponse> = rows.into_iter().map(|r| TreasuryDirectResponse {
+                round_id: r.round_id,
+                created_at: r.created_at,
+                balance: r.balance,
+                motherlode: r.motherlode,
+                total_staked: r.total_staked,
+                total_unclaimed: r.total_unclaimed,
+                total_refined: r.total_refined,
+            }).collect();
+            Ok(Json(DirectResponse { meta: DirectMetadata { latest_round_id: latest }, data }))
+        },
+        Err(e) => {
+            tracing::error!("Failed to get treasury direct: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /charts/mint/direct
+/// Returns direct mint snapshots by round range.
+pub async fn get_mint_direct(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DirectQuery>,
+) -> Result<Json<DirectResponse<MintDirectResponse>>, StatusCode> {
+    let limit = query.limit.unwrap_or(1000).min(5000);
+    let end_round = query.end_round();
+    
+    let latest = state.clickhouse.get_latest_round_id().await
+        .map_err(|e| {
+            tracing::error!("Failed to get latest round: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap_or(0);
+
+    match state.clickhouse.get_mint_direct(query.start, end_round, limit).await {
+        Ok(rows) => {
+            let data: Vec<MintDirectResponse> = rows.into_iter().map(|r| MintDirectResponse {
+                round_id: r.round_id,
+                created_at: r.created_at,
+                supply: r.supply,
+                supply_change: r.supply_change,
+            }).collect();
+            Ok(Json(DirectResponse { meta: DirectMetadata { latest_round_id: latest }, data }))
+        },
+        Err(e) => {
+            tracing::error!("Failed to get mint direct: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /charts/inflation/direct
+/// Returns direct inflation data by round range.
+pub async fn get_inflation_direct(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DirectQuery>,
+) -> Result<Json<DirectResponse<InflationDirectResponse>>, StatusCode> {
+    let limit = query.limit.unwrap_or(1000).min(5000);
+    let end_round = query.end_round();
+    
+    let latest = state.clickhouse.get_latest_round_id().await
+        .map_err(|e| {
+            tracing::error!("Failed to get latest round: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap_or(0);
+
+    match state.clickhouse.get_inflation_direct(query.start, end_round, limit).await {
+        Ok(rows) => {
+            let data: Vec<InflationDirectResponse> = rows.into_iter().map(|r| InflationDirectResponse {
+                round_id: r.round_id,
+                created_at: r.created_at,
+                supply: r.supply,
+                supply_change: r.supply_change,
+                unclaimed: r.unclaimed,
+                circulating: r.circulating,
+                market_inflation: r.market_inflation,
+            }).collect();
+            Ok(Json(DirectResponse { meta: DirectMetadata { latest_round_id: latest }, data }))
+        },
+        Err(e) => {
+            tracing::error!("Failed to get inflation direct: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+/// GET /charts/cost-per-ore/direct
+/// Returns direct cost per ORE by round range.
+pub async fn get_cost_per_ore_direct(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<DirectQuery>,
+) -> Result<Json<DirectResponse<CostPerOreDirectResponse>>, StatusCode> {
+    let limit = query.limit.unwrap_or(1000).min(5000);
+    let end_round = query.end_round();
+    
+    let latest = state.clickhouse.get_latest_round_id().await
+        .map_err(|e| {
+            tracing::error!("Failed to get latest round: {}", e);
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .unwrap_or(0);
+
+    match state.clickhouse.get_cost_per_ore_direct(query.start, end_round, limit).await {
+        Ok(rows) => {
+            let data: Vec<CostPerOreDirectResponse> = rows.into_iter().map(|r| CostPerOreDirectResponse {
+                round_id: r.round_id,
+                created_at: r.created_at,
+                total_vaulted: r.total_vaulted,
+                ore_minted: r.ore_minted,
+                cost_per_ore_lamports: r.cost_per_ore_lamports,
+            }).collect();
+            Ok(Json(DirectResponse { meta: DirectMetadata { latest_round_id: latest }, data }))
+        },
+        Err(e) => {
+            tracing::error!("Failed to get cost per ore direct: {}", e);
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
+// ============================================================================
 // Router
 // ============================================================================
 
 /// Create the charts router with all endpoints.
 pub fn chart_router(_state: Arc<AppState>) -> Router<Arc<AppState>> {
     Router::new()
-        // Rounds
+        // Rounds - aggregate
         .route("/rounds/hourly", get(get_rounds_hourly))
         .route("/rounds/daily", get(get_rounds_daily))
-        // Treasury
+        // Rounds - direct (by round_id)
+        .route("/rounds/direct", get(get_rounds_direct))
+        // Treasury - aggregate
         .route("/treasury/hourly", get(get_treasury_hourly))
-        // Mint supply
+        // Treasury - direct (by round_id)
+        .route("/treasury/direct", get(get_treasury_direct))
+        // Mint supply - aggregate
         .route("/mint/hourly", get(get_mint_hourly))
         .route("/mint/daily", get(get_mint_daily))
-        // Market inflation
+        // Mint supply - direct (by round_id)
+        .route("/mint/direct", get(get_mint_direct))
+        // Market inflation - aggregate
         .route("/inflation/hourly", get(get_inflation_hourly))
         .route("/inflation/daily", get(get_inflation_daily))
-        // Cost per ORE
+        // Market inflation - direct (by round_id)
+        .route("/inflation/direct", get(get_inflation_direct))
+        // Cost per ORE - aggregate
         .route("/cost-per-ore/daily", get(get_cost_per_ore_daily))
-        // Miner activity
+        // Cost per ORE - direct (by round_id)
+        .route("/cost-per-ore/direct", get(get_cost_per_ore_direct))
+        // Miner activity (aggregate only - no per-round view)
         .route("/miners/daily", get(get_miners_daily))
 }

@@ -320,22 +320,18 @@ pub async fn backfill_rounds(
 /// 7. Stop when no more missing rounds or we reach stop_at_round
 async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_pages: u32) {
     use crate::app_state::BackfillTaskStatus;
+    use std::collections::HashSet;
     
     let start_time = std::time::Instant::now();
     let mut pages_fetched: u32 = 0;
+    
+    // Cache of rounds not found in external API (skipped during this run)
+    let mut skipped_rounds: HashSet<u64> = HashSet::new();
     
     // Helper to check cancellation
     let check_cancelled = || async {
         let cancel = state.backfill_rounds_cancel.read().await;
         *cancel
-    };
-    
-    // Helper to update state
-    let update_state = |f: Box<dyn FnOnce(&mut crate::app_state::BackfillRoundsTaskState) + Send>| async {
-        let mut task_state = state.backfill_rounds_task_state.write().await;
-        f(&mut task_state);
-        task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
-        task_state.last_updated = chrono::Utc::now();
     };
     
     // STEP 1: Fetch page 0 to get highest_round and per_page
@@ -391,8 +387,12 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             break;
         }
         
-        // STEP 2: Find the next missing round in ClickHouse
-        let next_missing = match state.clickhouse.find_next_missing_round_in_range(stop_at_round + 1, highest_round).await {
+        // STEP 2: Find the next missing round in ClickHouse (excluding already-skipped rounds)
+        let next_missing = match state.clickhouse.find_next_missing_round_in_range_excluding(
+            stop_at_round + 1, 
+            highest_round,
+            &skipped_rounds,
+        ).await {
             Ok(Some(round_id)) => round_id,
             Ok(None) => {
                 tracing::info!("No more missing rounds between {} and {}", stop_at_round + 1, highest_round);
@@ -499,20 +499,33 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
                 found = true;
                 tracing::info!("Found and stored round {} (plus {} other missing rounds from page)", next_missing, stored.saturating_sub(1));
             } else {
-                tracing::error!("Round {} should be on page {} but wasn't found! Page range: [{}, {}]", 
+                // Round not on this page even though it should be - external API has a gap
+                tracing::warn!("Round {} not found on page {} (range [{}, {}]) - external API gap, skipping", 
                     next_missing, target_page, page_first, page_last);
-                break;
+                
+                // Add to skipped set so we don't keep looking for this round
+                skipped_rounds.insert(next_missing);
+                
+                {
+                    let mut task_state = state.backfill_rounds_task_state.write().await;
+                    task_state.rounds_not_in_external_api += 1;
+                }
+                
+                found = true; // Mark as "handled" so we continue to next missing round
             }
         }
         
         if !found {
-            tracing::error!("Failed to find round {} after {} attempts", next_missing, search_attempts);
-            let mut task_state = state.backfill_rounds_task_state.write().await;
-            task_state.status = BackfillTaskStatus::Failed;
-            task_state.error = Some(format!("Failed to find round {} after {} page fetches", next_missing, search_attempts));
-            task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
-            task_state.last_updated = chrono::Utc::now();
-            return;
+            // This means we hit MAX_SEARCH_ATTEMPTS without finding the round
+            // External API doesn't have this round, skip it
+            tracing::warn!("Round {} not found after {} attempts - external API gap, skipping", next_missing, search_attempts);
+            
+            skipped_rounds.insert(next_missing);
+            
+            {
+                let mut task_state = state.backfill_rounds_task_state.write().await;
+                task_state.rounds_not_in_external_api += 1;
+            }
         }
     }
     
@@ -524,9 +537,10 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
     task_state.last_updated = chrono::Utc::now();
     
     tracing::info!(
-        "Backfill complete: {} fetched, {} skipped, {} pages in {:?}",
+        "Backfill complete: {} fetched, {} skipped, {} not in external API, {} pages in {:?}",
         task_state.rounds_fetched,
         task_state.rounds_skipped,
+        task_state.rounds_not_in_external_api,
         pages_fetched,
         start_time.elapsed()
     );

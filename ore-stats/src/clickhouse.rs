@@ -744,6 +744,44 @@ impl ClickHouseClient {
         Ok(result)
     }
     
+    /// Find the next (highest) round_id that doesn't exist in ClickHouse within the given range,
+    /// excluding a set of round IDs that we've already tried and know don't exist in the external API.
+    pub async fn find_next_missing_round_in_range_excluding(
+        &self,
+        min_round: u64,
+        max_round: u64,
+        exclude: &std::collections::HashSet<u64>,
+    ) -> Result<Option<u64>, ClickHouseError> {
+        if min_round > max_round {
+            return Ok(None);
+        }
+        
+        // If we have exclusions, add them to the query
+        let exclude_clause = if exclude.is_empty() {
+            String::new()
+        } else {
+            let exclude_list: Vec<String> = exclude.iter().map(|r| r.to_string()).collect();
+            format!(" AND n.number NOT IN ({})", exclude_list.join(","))
+        };
+        
+        let query = format!(r#"
+            SELECT n.number as missing_round
+            FROM numbers({}, {}) n
+            WHERE n.number NOT IN (
+                SELECT round_id FROM rounds WHERE round_id >= {} AND round_id <= {}
+            ){}
+            ORDER BY n.number DESC
+            LIMIT 1
+        "#, min_round, max_round - min_round + 1, min_round, max_round, exclude_clause);
+        
+        let result: Option<u64> = self.client
+            .query(&query)
+            .fetch_optional()
+            .await?;
+        
+        Ok(result)
+    }
+    
     /// Get total count of rounds in database.
     pub async fn get_rounds_count(&self) -> Result<u64, ClickHouseError> {
         let result: u64 = self.client
@@ -883,6 +921,7 @@ impl ClickHouseClient {
                 total_motherlode
             FROM rounds_hourly
             WHERE hour >= now() - INTERVAL {} HOUR
+              AND hour < toStartOfHour(now())
             ORDER BY hour ASC"#,
             hours
         );
@@ -932,6 +971,7 @@ impl ClickHouseClient {
                 total_refined
             FROM treasury_hourly FINAL
             WHERE hour >= now() - INTERVAL {} HOUR
+              AND hour < toStartOfHour(now())
             ORDER BY hour ASC"#,
             hours
         );
@@ -953,6 +993,7 @@ impl ClickHouseClient {
                 round_count
             FROM mint_hourly FINAL
             WHERE hour >= now() - INTERVAL {} HOUR
+              AND hour < toStartOfHour(now())
             ORDER BY hour ASC"#,
             hours
         );
@@ -1000,6 +1041,7 @@ impl ClickHouseClient {
                 rounds_count
             FROM inflation_hourly FINAL
             WHERE hour >= now() - INTERVAL {} HOUR
+              AND hour < toStartOfHour(now())
             ORDER BY hour ASC"#,
             hours
         );
@@ -1044,12 +1086,10 @@ impl ClickHouseClient {
                 rounds_count,
                 total_vaulted,
                 ore_minted_total,
-                cost_per_ore_lamports,
-                cumulative_vaulted,
-                cumulative_ore,
-                cumulative_cost_per_ore
+                cost_per_ore_lamports
             FROM cost_per_ore_daily FINAL
             WHERE day >= today() - INTERVAL {} DAY
+              AND day < today()
             ORDER BY day ASC"#,
             days
         );
@@ -1080,6 +1120,275 @@ impl ClickHouseClient {
         
         let rows = self.client.query(&query).fetch_all().await?;
         Ok(rows)
+    }
+    
+    // ========== Direct/Round-based Chart Queries ==========
+    
+    /// Get direct round data by round range.
+    pub async fn get_rounds_direct(
+        &self,
+        start_round: Option<u64>,
+        end_round: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<RoundDirectRow>, ClickHouseError> {
+        let query = match (start_round, end_round) {
+            (Some(start), Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, total_deployments, unique_miners,
+                    total_deployed, total_vaulted, total_winnings,
+                    motherlode_hit, motherlode
+                FROM rounds
+                WHERE round_id >= {} AND round_id <= {}
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, end, limit
+            ),
+            (Some(start), None) => format!(
+                r#"SELECT 
+                    round_id, created_at, total_deployments, unique_miners,
+                    total_deployed, total_vaulted, total_winnings,
+                    motherlode_hit, motherlode
+                FROM rounds
+                WHERE round_id >= {}
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, limit
+            ),
+            (None, Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, total_deployments, unique_miners,
+                    total_deployed, total_vaulted, total_winnings,
+                    motherlode_hit, motherlode
+                FROM rounds
+                WHERE round_id <= {}
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                end, limit
+            ),
+            (None, None) => format!(
+                r#"SELECT 
+                    round_id, created_at, total_deployments, unique_miners,
+                    total_deployed, total_vaulted, total_winnings,
+                    motherlode_hit, motherlode
+                FROM rounds
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                limit
+            ),
+        };
+        
+        let mut rows: Vec<RoundDirectRow> = self.client.query(&query).fetch_all().await?;
+        // Ensure ascending order for display
+        rows.sort_by_key(|r| r.round_id);
+        Ok(rows)
+    }
+    
+    /// Get direct treasury snapshots by round range.
+    pub async fn get_treasury_direct(
+        &self,
+        start_round: Option<u64>,
+        end_round: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<TreasuryDirectRow>, ClickHouseError> {
+        let query = match (start_round, end_round) {
+            (Some(start), Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, balance, motherlode,
+                    total_staked, total_unclaimed, total_refined
+                FROM treasury_snapshots
+                WHERE round_id >= {} AND round_id <= {} AND round_id > 0
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, end, limit
+            ),
+            (Some(start), None) => format!(
+                r#"SELECT 
+                    round_id, created_at, balance, motherlode,
+                    total_staked, total_unclaimed, total_refined
+                FROM treasury_snapshots
+                WHERE round_id >= {} AND round_id > 0
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, limit
+            ),
+            (None, Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, balance, motherlode,
+                    total_staked, total_unclaimed, total_refined
+                FROM treasury_snapshots
+                WHERE round_id <= {} AND round_id > 0
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                end, limit
+            ),
+            (None, None) => format!(
+                r#"SELECT 
+                    round_id, created_at, balance, motherlode,
+                    total_staked, total_unclaimed, total_refined
+                FROM treasury_snapshots
+                WHERE round_id > 0
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                limit
+            ),
+        };
+        
+        let mut rows: Vec<TreasuryDirectRow> = self.client.query(&query).fetch_all().await?;
+        rows.sort_by_key(|r| r.round_id);
+        Ok(rows)
+    }
+    
+    /// Get direct mint snapshots by round range.
+    pub async fn get_mint_direct(
+        &self,
+        start_round: Option<u64>,
+        end_round: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<MintDirectRow>, ClickHouseError> {
+        let query = match (start_round, end_round) {
+            (Some(start), Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change
+                FROM mint_snapshots
+                WHERE round_id >= {} AND round_id <= {}
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, end, limit
+            ),
+            (Some(start), None) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change
+                FROM mint_snapshots
+                WHERE round_id >= {}
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, limit
+            ),
+            (None, Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change
+                FROM mint_snapshots
+                WHERE round_id <= {}
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                end, limit
+            ),
+            (None, None) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change
+                FROM mint_snapshots
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                limit
+            ),
+        };
+        
+        let mut rows: Vec<MintDirectRow> = self.client.query(&query).fetch_all().await?;
+        rows.sort_by_key(|r| r.round_id);
+        Ok(rows)
+    }
+    
+    /// Get direct inflation data by round range.
+    pub async fn get_inflation_direct(
+        &self,
+        start_round: Option<u64>,
+        end_round: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<InflationDirectRow>, ClickHouseError> {
+        let query = match (start_round, end_round) {
+            (Some(start), Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change,
+                    unclaimed, circulating, market_inflation
+                FROM inflation_per_round
+                WHERE round_id >= {} AND round_id <= {}
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, end, limit
+            ),
+            (Some(start), None) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change,
+                    unclaimed, circulating, market_inflation
+                FROM inflation_per_round
+                WHERE round_id >= {}
+                ORDER BY round_id ASC
+                LIMIT {}"#,
+                start, limit
+            ),
+            (None, Some(end)) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change,
+                    unclaimed, circulating, market_inflation
+                FROM inflation_per_round
+                WHERE round_id <= {}
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                end, limit
+            ),
+            (None, None) => format!(
+                r#"SELECT 
+                    round_id, created_at, supply, supply_change,
+                    unclaimed, circulating, market_inflation
+                FROM inflation_per_round
+                ORDER BY round_id DESC
+                LIMIT {}"#,
+                limit
+            ),
+        };
+        
+        let mut rows: Vec<InflationDirectRow> = self.client.query(&query).fetch_all().await?;
+        rows.sort_by_key(|r| r.round_id);
+        Ok(rows)
+    }
+    
+    /// Get direct cost per ORE by round range (calculated from rounds table).
+    pub async fn get_cost_per_ore_direct(
+        &self,
+        start_round: Option<u64>,
+        end_round: Option<u64>,
+        limit: u32,
+    ) -> Result<Vec<CostPerOreDirectRow>, ClickHouseError> {
+        // Calculate cost per ORE per round:
+        // ore_minted = 1 ORE (100000000000) + motherlode if hit
+        // cost_per_ore = total_vaulted * 10^11 / ore_minted
+        let base_query = r#"SELECT 
+                round_id, created_at, total_vaulted,
+                100000000000 + (motherlode * motherlode_hit) AS ore_minted,
+                if(100000000000 + (motherlode * motherlode_hit) > 0,
+                   toUInt64(total_vaulted * 100000000000 / (100000000000 + (motherlode * motherlode_hit))),
+                   0) AS cost_per_ore_lamports
+            FROM rounds"#;
+        
+        let query = match (start_round, end_round) {
+            (Some(start), Some(end)) => format!(
+                "{} WHERE round_id >= {} AND round_id <= {} ORDER BY round_id ASC LIMIT {}",
+                base_query, start, end, limit
+            ),
+            (Some(start), None) => format!(
+                "{} WHERE round_id >= {} ORDER BY round_id ASC LIMIT {}",
+                base_query, start, limit
+            ),
+            (None, Some(end)) => format!(
+                "{} WHERE round_id <= {} ORDER BY round_id DESC LIMIT {}",
+                base_query, end, limit
+            ),
+            (None, None) => format!(
+                "{} ORDER BY round_id DESC LIMIT {}",
+                base_query, limit
+            ),
+        };
+        
+        let mut rows: Vec<CostPerOreDirectRow> = self.client.query(&query).fetch_all().await?;
+        rows.sort_by_key(|r| r.round_id);
+        Ok(rows)
+    }
+    
+    /// Get the latest round_id.
+    pub async fn get_latest_round_id(&self) -> Result<Option<u64>, ClickHouseError> {
+        let query = "SELECT max(round_id) FROM rounds";
+        let result: Option<u64> = self.client.query(query).fetch_optional().await?;
+        Ok(result.filter(|&r| r > 0))
     }
     
     // ========== Miner Snapshots ==========
@@ -2898,6 +3207,33 @@ impl RoundInsert {
         }
     }
     
+    /// Create a placeholder RoundInsert for rounds not found in external API.
+    /// This prevents repeatedly trying to find the same missing round.
+    pub fn from_placeholder(round_id: u64) -> Self {
+        let now_ms = chrono::Utc::now().timestamp_millis();
+        
+        Self {
+            round_id,
+            expires_at: 0,
+            start_slot: 0,
+            end_slot: 0,
+            slot_hash: [0u8; 32],
+            winning_square: 255,  // Invalid value to indicate placeholder
+            rent_payer: String::new(),
+            top_miner: String::new(),
+            top_miner_reward: 0,
+            total_deployed: 0,
+            total_vaulted: 0,
+            total_winnings: 0,
+            motherlode: 0,
+            motherlode_hit: 0,
+            total_deployments: 0,
+            unique_miners: 0,
+            source: "not_in_external_api".to_string(),
+            created_at: now_ms,
+        }
+    }
+    
     /// Create a RoundInsert for live tracking (uses current time)
     pub fn new_live(
         round_id: u64,
@@ -3758,9 +4094,6 @@ pub struct CostPerOreDailyRow {
     pub total_vaulted: u64,
     pub ore_minted_total: u64,
     pub cost_per_ore_lamports: u64,
-    pub cumulative_vaulted: u64,
-    pub cumulative_ore: u64,
-    pub cumulative_cost_per_ore: u64,
 }
 
 /// Miner activity daily chart data.
@@ -3771,6 +4104,67 @@ pub struct MinerActivityDailyRow {
     pub total_deployments: u64,
     pub total_deployed: u64,
     pub total_won: u64,
+}
+
+// ============================================================================
+// Direct/Round-based Chart Data Rows
+// ============================================================================
+
+/// Direct round data row (from rounds table).
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RoundDirectRow {
+    pub round_id: u64,
+    pub created_at: i64,  // DateTime64(3) as milliseconds
+    pub total_deployments: u32,
+    pub unique_miners: u32,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub motherlode_hit: u8,  // Boolean as u8
+    pub motherlode: u64,
+}
+
+/// Direct treasury snapshot row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct TreasuryDirectRow {
+    pub round_id: u64,
+    pub created_at: i64,  // DateTime64(3) as milliseconds
+    pub balance: u64,
+    pub motherlode: u64,
+    pub total_staked: u64,
+    pub total_unclaimed: u64,
+    pub total_refined: u64,
+}
+
+/// Direct mint snapshot row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct MintDirectRow {
+    pub round_id: u64,
+    pub created_at: i64,  // DateTime64(3) as milliseconds
+    pub supply: u64,
+    pub supply_change: i64,
+}
+
+/// Direct inflation per round row.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct InflationDirectRow {
+    pub round_id: u64,
+    pub created_at: i64,  // DateTime64(3) as milliseconds
+    pub supply: u64,
+    pub supply_change: i64,
+    pub unclaimed: u64,
+    pub circulating: u64,
+    pub market_inflation: i64,
+}
+
+/// Direct cost per ORE row (calculated from rounds).
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct CostPerOreDirectRow {
+    pub round_id: u64,
+    pub created_at: i64,  // DateTime64(3) as milliseconds
+    pub total_vaulted: u64,
+    pub ore_minted: u64,
+    pub cost_per_ore_lamports: u64,
 }
 
 #[cfg(test)]

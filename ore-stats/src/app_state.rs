@@ -168,6 +168,8 @@ pub struct BackfillRoundsTaskState {
     pub rounds_fetched: u32,
     /// Rounds skipped (already exist in ClickHouse)
     pub rounds_skipped: u32,
+    /// Rounds not found in external API (gaps in their data)
+    pub rounds_not_in_external_api: u32,
     /// Last round ID that was processed
     pub last_round_id_processed: Option<u64>,
     /// First round ID seen (highest round from first page)

@@ -35,7 +35,14 @@ import {
   InflationDailyData,
   CostPerOreDailyData,
   MinerActivityDailyData,
+  RoundDirectData,
+  TreasuryDirectData,
+  MintDirectData,
+  InflationDirectData,
+  CostPerOreDirectData,
+  DirectResponse,
 } from "@/lib/api";
+import Link from "next/link";
 
 // ============================================================================
 // Types
@@ -52,6 +59,7 @@ type ChartType =
 type TimeRange = "24h" | "7d" | "30d" | "90d" | "1y";
 type ScaleType = "linear" | "log";
 type ChartStyle = "area" | "line";
+type ViewMode = "aggregate" | "direct";
 
 interface SeriesConfig {
   key: string;
@@ -71,14 +79,25 @@ interface ChartConfig {
   style: ChartStyle;
   showGrid: boolean;
   showBrush: boolean;
+  // View mode: aggregate (time-based) or direct (round-based)
+  viewMode: ViewMode;
+  // For direct mode: round range
+  roundStart?: number;
+  roundEnd?: number | "live";
+  // Brush/zoom range (indices into data array)
+  brushStart?: number;
+  brushEnd?: number | "live";
 }
 
 interface ChartData {
   type: ChartType;
   range: TimeRange;
+  viewMode: ViewMode;
   data: unknown[];
   loading: boolean;
   error: string | null;
+  // For direct mode
+  latestRoundId?: number;
 }
 
 // ============================================================================
@@ -93,6 +112,7 @@ const CHART_SERIES: Record<ChartType, SeriesConfig[]> = {
     { key: "rounds_count", name: "Rounds Count", color: colors.primary, yAxisId: "right", type: "line" },
     { key: "unique_miners", name: "Unique Miners", color: colors.cyan, yAxisId: "right", type: "line" },
     { key: "motherlode_hits", name: "Motherlode Hits", color: colors.orange, yAxisId: "right", type: "bar" },
+    { key: "total_motherlode", name: "Motherlode Amount", color: "#f97316", unit: "ORE", type: "area" },
   ],
   treasury: [
     { key: "balance", name: "Balance", color: colors.primary, unit: "SOL", type: "area" },
@@ -109,7 +129,6 @@ const CHART_SERIES: Record<ChartType, SeriesConfig[]> = {
   ],
   cost_per_ore: [
     { key: "cost_per_ore_sol", name: "Daily Cost/ORE", color: colors.primary, unit: "SOL", type: "bar" },
-    { key: "cumulative_cost_sol", name: "Cumulative Avg", color: colors.positive, unit: "SOL", type: "line" },
     { key: "total_vaulted_sol", name: "Total Vaulted", color: colors.blue, unit: "SOL", yAxisId: "right", type: "line" },
     { key: "ore_minted_ore", name: "ORE Minted", color: colors.purple, unit: "ORE", yAxisId: "right", type: "line" },
   ],
@@ -130,7 +149,7 @@ const DEFAULT_SERIES: Record<ChartType, string[]> = {
   rounds: ["total_deployed", "total_winnings"],
   treasury: ["balance", "motherlode"],
   miners: ["active_miners", "total_deployments"],
-  cost_per_ore: ["cost_per_ore_sol", "cumulative_cost_sol"],
+  cost_per_ore: ["cost_per_ore_sol", "total_vaulted_sol"],
   mint: ["supply", "supply_change_total"],
   inflation: ["circulating_end", "market_inflation_total"],
 };
@@ -162,13 +181,20 @@ const MAX_CHARTS = 6;
 // URL State Management
 // ============================================================================
 
-// Format: c=type:range:series1,series2:scale:style:grid:brush|type:range:...
+// Format: c=type:range:series:scale:style:grid:brush:viewMode:roundRange:brushRange|...
+// roundRange = start-end (e.g., 100-live or 100-200)
+// brushRange = startIdx-endIdx (e.g., 0-live or 50-100)
 function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
   const chartsParam = searchParams.get("c");
+  const defaultConfig = (): ChartConfig => ({
+    id: "1", type: "rounds", range: "7d", enabledSeries: DEFAULT_SERIES.rounds, 
+    scale: "linear", style: "area", showGrid: true, showBrush: false, viewMode: "aggregate"
+  });
+  
   if (!chartsParam) {
     return [
-      { id: "1", type: "rounds", range: "7d", enabledSeries: DEFAULT_SERIES.rounds, scale: "linear", style: "area", showGrid: true, showBrush: false },
-      { id: "2", type: "treasury", range: "7d", enabledSeries: DEFAULT_SERIES.treasury, scale: "linear", style: "area", showGrid: true, showBrush: false },
+      defaultConfig(),
+      { ...defaultConfig(), id: "2", type: "treasury", enabledSeries: DEFAULT_SERIES.treasury },
     ];
   }
 
@@ -177,9 +203,9 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
     const chartParts = chartsParam.split("|");
     
     chartParts.forEach((part, idx) => {
-      const [type, range, seriesStr, scale, style, grid, brush] = part.split(":");
+      const [type, range, seriesStr, scale, style, grid, brush, viewMode, roundRange, brushRange] = part.split(":");
       
-      if (!CHART_TYPES.some(ct => ct.value === type) || !TIME_RANGES.some(tr => tr.value === range)) {
+      if (!CHART_TYPES.some(ct => ct.value === type)) {
         return;
       }
 
@@ -189,25 +215,52 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
         ? seriesStr.split(",").filter(s => availableSeries.includes(s))
         : DEFAULT_SERIES[chartType];
 
+      // Parse round range (for direct mode)
+      let roundStart: number | undefined;
+      let roundEnd: number | "live" | undefined;
+      if (roundRange) {
+        const [rs, re] = roundRange.split("-");
+        if (rs) roundStart = parseInt(rs, 10);
+        if (re === "live") roundEnd = "live";
+        else if (re) roundEnd = parseInt(re, 10);
+      }
+
+      // Parse brush range
+      let brushStart: number | undefined;
+      let brushEnd: number | "live" | undefined;
+      if (brushRange) {
+        const [bs, be] = brushRange.split("-");
+        if (bs) brushStart = parseInt(bs, 10);
+        if (be === "live") brushEnd = "live";
+        else if (be) brushEnd = parseInt(be, 10);
+      }
+
+      const isDirectMode = viewMode === "direct";
+      const validRange = TIME_RANGES.some(tr => tr.value === range) ? range as TimeRange : "7d";
+
       configs.push({
         id: String(idx + 1),
         type: chartType,
-        range: range as TimeRange,
+        range: validRange,
         enabledSeries: enabledSeries.length > 0 ? enabledSeries : DEFAULT_SERIES[chartType],
         scale: (scale === "log" ? "log" : "linear") as ScaleType,
         style: (style === "line" ? "line" : "area") as ChartStyle,
         showGrid: grid !== "0",
         showBrush: brush === "1",
+        viewMode: isDirectMode ? "direct" : "aggregate",
+        roundStart,
+        roundEnd,
+        brushStart,
+        brushEnd,
       });
     });
     
-    return configs.length > 0 ? configs : [
-      { id: "1", type: "rounds", range: "7d", enabledSeries: DEFAULT_SERIES.rounds, scale: "linear", style: "area", showGrid: true, showBrush: false },
-    ];
+    return configs.length > 0 ? configs : [defaultConfig()];
   } catch {
-    return [
-      { id: "1", type: "rounds", range: "7d", enabledSeries: DEFAULT_SERIES.rounds, scale: "linear", style: "area", showGrid: true, showBrush: false },
-    ];
+    return [{ 
+      id: "1", type: "rounds", range: "7d", enabledSeries: DEFAULT_SERIES.rounds, 
+      scale: "linear", style: "area", showGrid: true, showBrush: false, viewMode: "aggregate" 
+    }];
   }
 }
 
@@ -218,7 +271,19 @@ function chartsToUrlParam(charts: ChartConfig[]): string {
     const style = c.style === "line" ? "line" : "area";
     const grid = c.showGrid ? "1" : "0";
     const brush = c.showBrush ? "1" : "0";
-    return `${c.type}:${c.range}:${series}:${scale}:${style}:${grid}:${brush}`;
+    const viewMode = c.viewMode === "direct" ? "direct" : "agg";
+    
+    // Round range (for direct mode)
+    const roundRange = c.roundStart !== undefined || c.roundEnd !== undefined
+      ? `${c.roundStart ?? ""}-${c.roundEnd ?? "live"}`
+      : "";
+    
+    // Brush range
+    const brushRange = c.brushStart !== undefined || c.brushEnd !== undefined
+      ? `${c.brushStart ?? ""}-${c.brushEnd ?? "live"}`
+      : "";
+    
+    return `${c.type}:${c.range}:${series}:${scale}:${style}:${grid}:${brush}:${viewMode}:${roundRange}:${brushRange}`;
   }).join("|");
 }
 
@@ -226,7 +291,7 @@ function chartsToUrlParam(charts: ChartConfig[]): string {
 // Data Fetching
 // ============================================================================
 
-async function fetchChartData(type: ChartType, range: TimeRange): Promise<unknown[]> {
+async function fetchAggregateChartData(type: ChartType, range: TimeRange): Promise<unknown[]> {
   const rangeConfig = TIME_RANGES.find(r => r.value === range);
   const hours = rangeConfig?.hours || (rangeConfig?.days || 30) * 24;
   const days = rangeConfig?.days || Math.ceil(hours / 24);
@@ -258,19 +323,64 @@ async function fetchChartData(type: ChartType, range: TimeRange): Promise<unknow
   }
 }
 
+interface DirectFetchResult {
+  data: unknown[];
+  latestRoundId: number;
+}
+
+async function fetchDirectChartData(
+  type: ChartType, 
+  startRound?: number, 
+  endRound?: number | "live",
+  limit: number = 1000
+): Promise<DirectFetchResult> {
+  const end = endRound === "live" ? undefined : endRound;
+  
+  switch (type) {
+    case "rounds": {
+      const result = await api.getChartRoundsDirect(startRound, end, limit);
+      return { data: result.data, latestRoundId: result.meta.latest_round_id };
+    }
+    case "treasury": {
+      const result = await api.getChartTreasuryDirect(startRound, end, limit);
+      return { data: result.data, latestRoundId: result.meta.latest_round_id };
+    }
+    case "mint": {
+      const result = await api.getChartMintDirect(startRound, end, limit);
+      return { data: result.data, latestRoundId: result.meta.latest_round_id };
+    }
+    case "inflation": {
+      const result = await api.getChartInflationDirect(startRound, end, limit);
+      return { data: result.data, latestRoundId: result.meta.latest_round_id };
+    }
+    case "cost_per_ore": {
+      const result = await api.getChartCostPerOreDirect(startRound, end, limit);
+      return { data: result.data, latestRoundId: result.meta.latest_round_id };
+    }
+    case "miners":
+      // Miners doesn't have a direct mode - fall back to aggregate
+      return { data: [], latestRoundId: 0 };
+    default:
+      return { data: [], latestRoundId: 0 };
+  }
+}
+
 // ============================================================================
 // Data Transformers
 // ============================================================================
 
-function transformChartData(type: ChartType, data: unknown[], range: TimeRange): Record<string, unknown>[] {
-  const isHourly = range === "24h" || range === "7d";
+function transformChartData(type: ChartType, data: unknown[], range: TimeRange, viewMode: ViewMode = "aggregate"): Record<string, unknown>[] {
+  // Direct mode transformations
+  if (viewMode === "direct") {
+    return transformDirectData(type, data);
+  }
   
+  // Aggregate mode transformations
   switch (type) {
     case "cost_per_ore":
       return (data as CostPerOreDailyData[]).map(d => ({
         ...d,
         cost_per_ore_sol: d.cost_per_ore_lamports / 1e9,
-        cumulative_cost_sol: d.cumulative_cost_per_ore / 1e9,
         total_vaulted_sol: d.total_vaulted / 1e9,
         ore_minted_ore: d.ore_minted_total / 1e11,
       }));
@@ -303,6 +413,7 @@ function transformChartData(type: ChartType, data: unknown[], range: TimeRange):
         total_deployed: (d.total_deployed || 0) / 1e9,
         total_winnings: (d.total_winnings || 0) / 1e9,
         total_vaulted: (d.total_vaulted || 0) / 1e9,
+        total_motherlode: (d.total_motherlode || 0) / 1e11,
       }));
     case "miners":
       return (data as MinerActivityDailyData[]).map(d => ({
@@ -315,14 +426,80 @@ function transformChartData(type: ChartType, data: unknown[], range: TimeRange):
   }
 }
 
-function getXKey(type: ChartType, range: TimeRange): string {
+function transformDirectData(type: ChartType, data: unknown[]): Record<string, unknown>[] {
+  switch (type) {
+    case "rounds":
+      return (data as RoundDirectData[]).map(d => ({
+        ...d,
+        total_deployed: (d.total_deployed || 0) / 1e9,
+        total_winnings: (d.total_winnings || 0) / 1e9,
+        total_vaulted: (d.total_vaulted || 0) / 1e9,
+        motherlode: (d.motherlode || 0) / 1e11,
+        // Map fields to match aggregate series keys
+        unique_miners: d.unique_miners,
+        total_deployments: d.total_deployments,
+        motherlode_hit: d.motherlode_hit ? 1 : 0,
+        total_motherlode: (d.motherlode || 0) / 1e11,
+      }));
+    case "treasury":
+      return (data as TreasuryDirectData[]).map(d => ({
+        ...d,
+        balance: (d.balance || 0) / 1e9,
+        motherlode: (d.motherlode || 0) / 1e11,
+        total_unclaimed: (d.total_unclaimed || 0) / 1e11,
+        total_staked: (d.total_staked || 0) / 1e11,
+        total_refined: (d.total_refined || 0) / 1e11,
+      }));
+    case "mint":
+      return (data as MintDirectData[]).map(d => ({
+        ...d,
+        supply: (d.supply || 0) / 1e11,
+        supply_change: (d.supply_change || 0) / 1e11,
+        supply_change_total: (d.supply_change || 0) / 1e11,  // Alias for chart
+      }));
+    case "inflation":
+      return (data as InflationDirectData[]).map(d => ({
+        ...d,
+        supply: (d.supply || 0) / 1e11,
+        supply_change: (d.supply_change || 0) / 1e11,
+        supply_change_total: (d.supply_change || 0) / 1e11,
+        unclaimed: (d.unclaimed || 0) / 1e11,
+        circulating: (d.circulating || 0) / 1e11,
+        circulating_end: (d.circulating || 0) / 1e11,  // Alias for chart
+        market_inflation: (d.market_inflation || 0) / 1e11,
+        market_inflation_total: (d.market_inflation || 0) / 1e11,  // Alias
+      }));
+    case "cost_per_ore":
+      return (data as CostPerOreDirectData[]).map(d => ({
+        ...d,
+        cost_per_ore_sol: d.cost_per_ore_lamports / 1e9,
+        total_vaulted_sol: d.total_vaulted / 1e9,
+        ore_minted_ore: d.ore_minted / 1e11,
+        ore_minted_total: d.ore_minted,  // Alias
+      }));
+    default:
+      return data as Record<string, unknown>[];
+  }
+}
+
+function getXKey(type: ChartType, range: TimeRange, viewMode: ViewMode = "aggregate"): string {
+  // Direct mode always uses round_id
+  if (viewMode === "direct") {
+    return "round_id";
+  }
+  
   const isHourly = range === "24h" || range === "7d";
   if (type === "cost_per_ore" || type === "miners") return "day";
   if (type === "treasury") return "hour";
   return isHourly ? "hour" : "day";
 }
 
-function getXFormatter(type: ChartType, range: TimeRange): (value: number) => string {
+function getXFormatter(type: ChartType, range: TimeRange, viewMode: ViewMode = "aggregate"): (value: number) => string {
+  // Direct mode shows round IDs
+  if (viewMode === "direct") {
+    return (value: number) => `#${value.toLocaleString()}`;
+  }
+  
   const isHourly = range === "24h" || range === "7d";
   if (type === "treasury" || (isHourly && type !== "cost_per_ore" && type !== "miners")) {
     return formatters.dateTime;
@@ -546,14 +723,35 @@ function ChartOptions({
 function DynamicChart({
   config,
   data,
+  onBrushChange,
 }: {
   config: ChartConfig;
   data: Record<string, unknown>[];
+  onBrushChange?: (startIndex: number, endIndex: number | "live") => void;
 }) {
+  const router = useRouter();
   const seriesConfigs = CHART_SERIES[config.type];
   const enabledConfigs = seriesConfigs.filter(s => config.enabledSeries.includes(s.key));
-  const xKey = getXKey(config.type, config.range);
-  const xFormatter = getXFormatter(config.type, config.range);
+  const xKey = getXKey(config.type, config.range, config.viewMode);
+  const xFormatter = getXFormatter(config.type, config.range, config.viewMode);
+
+  // Handle click on data point in direct mode - navigate to round explorer
+  const handleChartClick = useCallback((clickData: unknown) => {
+    if (config.viewMode !== "direct") return;
+    const payload = clickData as { activePayload?: Array<{ payload: { round_id?: number } }> };
+    const roundId = payload?.activePayload?.[0]?.payload?.round_id;
+    if (roundId) {
+      router.push(`/rounds/${roundId}`);
+    }
+  }, [config.viewMode, router]);
+
+  // Handle brush/zoom changes
+  const handleBrushChange = useCallback((brushData: { startIndex?: number; endIndex?: number }) => {
+    if (!onBrushChange || brushData.startIndex === undefined || brushData.endIndex === undefined) return;
+    // If end is at the last data point, treat as "live"
+    const isLive = brushData.endIndex === data.length - 1;
+    onBrushChange(brushData.startIndex, isLive ? "live" : brushData.endIndex);
+  }, [onBrushChange, data.length]);
 
   const hasRightAxis = enabledConfigs.some(s => s.yAxisId === "right");
   const hasBars = enabledConfigs.some(s => s.type === "bar");
@@ -622,7 +820,11 @@ function DynamicChart({
 
   return (
     <ResponsiveContainer width="100%" height={320}>
-      <ChartComponent {...commonProps}>
+      <ChartComponent 
+        {...commonProps}
+        onClick={config.viewMode === "direct" ? handleChartClick : undefined}
+        style={config.viewMode === "direct" ? { cursor: "pointer" } : undefined}
+      >
         <defs>
           {enabledConfigs.map(s => (
             <linearGradient key={`grad-${s.key}`} id={`gradient-${s.key}`} x1="0" y1="0" x2="0" y2="1">
@@ -696,6 +898,10 @@ function DynamicChart({
             stroke={colors.grid}
             fill={colors.backgroundDark}
             tickFormatter={xFormatter}
+            startIndex={typeof config.brushStart === "number" ? config.brushStart : undefined}
+            endIndex={config.brushEnd === "live" ? data.length - 1 : 
+                      typeof config.brushEnd === "number" ? config.brushEnd : undefined}
+            onChange={handleBrushChange}
           />
         )}
       </ChartComponent>
@@ -712,6 +918,7 @@ function ChartCard({
   data,
   loading,
   error,
+  latestRoundId,
   onRemove,
   onUpdate,
 }: {
@@ -719,6 +926,7 @@ function ChartCard({
   data: unknown[];
   loading: boolean;
   error: string | null;
+  latestRoundId?: number;
   onRemove: () => void;
   onUpdate: (updates: Partial<ChartConfig>) => void;
 }) {
@@ -727,8 +935,8 @@ function ChartCard({
   
   const transformedData = useMemo(() => {
     if (data.length === 0) return [];
-    return transformChartData(config.type, data, config.range);
-  }, [data, config.type, config.range]);
+    return transformChartData(config.type, data, config.range, config.viewMode);
+  }, [data, config.type, config.range, config.viewMode]);
 
   const toggleSeries = (key: string) => {
     const newEnabled = config.enabledSeries.includes(key)
@@ -740,6 +948,9 @@ function ChartCard({
       onUpdate({ enabledSeries: newEnabled });
     }
   };
+
+  // Check if this chart type supports direct mode (miners doesn't)
+  const supportsDirectMode = config.type !== "miners";
 
   return (
     <div className="bg-slate-900/50 border border-slate-800/50 rounded-xl overflow-hidden">
@@ -754,7 +965,9 @@ function ChartCard({
                 const newType = e.target.value as ChartType;
                 onUpdate({ 
                   type: newType, 
-                  enabledSeries: DEFAULT_SERIES[newType] 
+                  enabledSeries: DEFAULT_SERIES[newType],
+                  // Reset to aggregate if new type doesn't support direct
+                  viewMode: newType === "miners" ? "aggregate" : config.viewMode,
                 });
               }}
               className="bg-slate-800 border border-slate-700 rounded-lg px-3 py-1.5 text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50 cursor-pointer"
@@ -766,22 +979,94 @@ function ChartCard({
               ))}
             </select>
 
-            {/* Time Range Selector */}
-            <div className="flex items-center gap-0.5 bg-slate-800/50 rounded-lg p-0.5">
-              {TIME_RANGES.map(tr => (
+            {/* View Mode Toggle */}
+            {supportsDirectMode && (
+              <div className="flex items-center gap-0.5 bg-slate-800/50 rounded-lg p-0.5">
                 <button
-                  key={tr.value}
-                  onClick={() => onUpdate({ range: tr.value })}
+                  onClick={() => onUpdate({ viewMode: "aggregate" })}
                   className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
-                    config.range === tr.value
-                      ? "bg-amber-500/20 text-amber-400"
+                    config.viewMode === "aggregate"
+                      ? "bg-blue-500/20 text-blue-400"
                       : "text-slate-500 hover:text-slate-400"
                   }`}
+                  title="Aggregate view (time-based)"
                 >
-                  {tr.label}
+                  ⏱️ Time
                 </button>
-              ))}
-            </div>
+                <button
+                  onClick={() => onUpdate({ viewMode: "direct", roundEnd: "live" })}
+                  className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
+                    config.viewMode === "direct"
+                      ? "bg-purple-500/20 text-purple-400"
+                      : "text-slate-500 hover:text-slate-400"
+                  }`}
+                  title="Direct view (by round)"
+                >
+                  🎯 Rounds
+                </button>
+              </div>
+            )}
+
+            {/* Time Range Selector - only in aggregate mode */}
+            {config.viewMode === "aggregate" && (
+              <div className="flex items-center gap-0.5 bg-slate-800/50 rounded-lg p-0.5">
+                {TIME_RANGES.map(tr => (
+                  <button
+                    key={tr.value}
+                    onClick={() => onUpdate({ range: tr.value })}
+                    className={`px-2 py-1 text-xs font-medium rounded transition-colors ${
+                      config.range === tr.value
+                        ? "bg-amber-500/20 text-amber-400"
+                        : "text-slate-500 hover:text-slate-400"
+                    }`}
+                  >
+                    {tr.label}
+                  </button>
+                ))}
+              </div>
+            )}
+
+            {/* Round Range Inputs - only in direct mode */}
+            {config.viewMode === "direct" && (
+              <div className="flex items-center gap-2 text-xs">
+                <span className="text-slate-500">Rounds:</span>
+                <input
+                  type="number"
+                  placeholder="Start"
+                  value={config.roundStart ?? ""}
+                  onChange={(e) => {
+                    const val = e.target.value ? parseInt(e.target.value, 10) : undefined;
+                    onUpdate({ roundStart: val });
+                  }}
+                  className="w-24 bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white text-xs focus:outline-none focus:ring-1 focus:ring-purple-500"
+                />
+                <span className="text-slate-500">to</span>
+                <select
+                  value={config.roundEnd === "live" ? "live" : (config.roundEnd ?? "")}
+                  onChange={(e) => {
+                    const val = e.target.value;
+                    if (val === "live") {
+                      onUpdate({ roundEnd: "live" });
+                    } else if (val) {
+                      onUpdate({ roundEnd: parseInt(val, 10) });
+                    } else {
+                      onUpdate({ roundEnd: "live" });
+                    }
+                  }}
+                  className="bg-slate-800 border border-slate-700 rounded px-2 py-1 text-white text-xs focus:outline-none focus:ring-1 focus:ring-purple-500"
+                >
+                  <option value="live">🔴 Live</option>
+                  {typeof config.roundEnd === "number" && (
+                    <option value={config.roundEnd}>{config.roundEnd.toLocaleString()}</option>
+                  )}
+                </select>
+                {latestRoundId && (
+                  <span className="text-slate-600 text-xs">
+                    (latest: #{latestRoundId.toLocaleString()})
+                  </span>
+                )}
+              </div>
+            )}
           </div>
 
           <div className="flex items-center gap-1">
@@ -833,7 +1118,13 @@ function ChartCard({
             </div>
           </div>
         ) : (
-          <DynamicChart config={config} data={transformedData} />
+          <DynamicChart 
+            config={config} 
+            data={transformedData} 
+            onBrushChange={(startIndex, endIndex) => {
+              onUpdate({ brushStart: startIndex, brushEnd: endIndex });
+            }}
+          />
         )}
       </div>
     </div>
@@ -885,7 +1176,10 @@ function ChartsContent() {
   // Fetch data for all charts
   useEffect(() => {
     charts.forEach(async (config) => {
-      const key = `${config.type}:${config.range}`;
+      // Include viewMode and round range in cache key for direct mode
+      const key = config.viewMode === "direct"
+        ? `${config.type}:direct:${config.roundStart ?? ""}-${config.roundEnd ?? "live"}`
+        : `${config.type}:${config.range}`;
       
       const existing = chartData.get(key);
       if (existing && (existing.loading || existing.data.length > 0)) {
@@ -894,23 +1188,47 @@ function ChartsContent() {
 
       setChartData(prev => {
         const next = new Map(prev);
-        next.set(key, { type: config.type, range: config.range, data: [], loading: true, error: null });
+        next.set(key, { type: config.type, range: config.range, viewMode: config.viewMode, data: [], loading: true, error: null });
         return next;
       });
 
       try {
-        const data = await fetchChartData(config.type, config.range);
-        setChartData(prev => {
-          const next = new Map(prev);
-          next.set(key, { type: config.type, range: config.range, data, loading: false, error: null });
-          return next;
-        });
+        if (config.viewMode === "direct") {
+          // Direct mode: fetch by round range
+          const result = await fetchDirectChartData(
+            config.type, 
+            config.roundStart, 
+            config.roundEnd
+          );
+          setChartData(prev => {
+            const next = new Map(prev);
+            next.set(key, { 
+              type: config.type, 
+              range: config.range, 
+              viewMode: "direct",
+              data: result.data, 
+              loading: false, 
+              error: null,
+              latestRoundId: result.latestRoundId,
+            });
+            return next;
+          });
+        } else {
+          // Aggregate mode: fetch by time range
+          const data = await fetchAggregateChartData(config.type, config.range);
+          setChartData(prev => {
+            const next = new Map(prev);
+            next.set(key, { type: config.type, range: config.range, viewMode: "aggregate", data, loading: false, error: null });
+            return next;
+          });
+        }
       } catch (err) {
         setChartData(prev => {
           const next = new Map(prev);
           next.set(key, { 
             type: config.type, 
             range: config.range, 
+            viewMode: config.viewMode,
             data: [], 
             loading: false, 
             error: err instanceof Error ? err.message : "Failed to load data" 
@@ -935,6 +1253,7 @@ function ChartsContent() {
       style: "area",
       showGrid: true,
       showBrush: false,
+      viewMode: "aggregate",
     }]);
   }, [charts]);
 
@@ -996,7 +1315,10 @@ function ChartsContent() {
         {/* Charts Grid */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
           {charts.map(config => {
-            const key = `${config.type}:${config.range}`;
+            // Match the cache key format from data fetching
+            const key = config.viewMode === "direct"
+              ? `${config.type}:direct:${config.roundStart ?? ""}-${config.roundEnd ?? "live"}`
+              : `${config.type}:${config.range}`;
             const data = chartData.get(key);
             return (
               <ChartCard
@@ -1005,6 +1327,7 @@ function ChartsContent() {
                 data={data?.data || []}
                 loading={data?.loading || false}
                 error={data?.error || null}
+                latestRoundId={data?.latestRoundId}
                 onRemove={() => removeChart(config.id)}
                 onUpdate={(updates) => updateChart(config.id, updates)}
               />
@@ -1048,6 +1371,7 @@ function ChartsContent() {
                           style: "area",
                           showGrid: true,
                           showBrush: false,
+                          viewMode: "aggregate",
                         }]);
                       }}
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 rounded-lg text-xs text-slate-400 hover:text-slate-300 transition-colors"
