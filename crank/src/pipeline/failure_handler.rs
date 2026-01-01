@@ -255,3 +255,4 @@ fn extract_instruction_index(error_msg: &str) -> Option<u32> {
 
     None
 }
+

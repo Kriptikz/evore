@@ -241,3 +241,4 @@ pub struct FailedBatch {
     /// Error message if available
     pub error: Option<String>,
 }
+

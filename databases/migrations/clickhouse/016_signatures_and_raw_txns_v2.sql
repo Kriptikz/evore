@@ -33,3 +33,4 @@ ORDER BY signature;
 ALTER TABLE ore_stats.raw_transactions_v2 
 ADD INDEX IF NOT EXISTS idx_txn_accounts accounts TYPE bloom_filter GRANULARITY 4;
 
+

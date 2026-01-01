@@ -134,3 +134,4 @@ async fn fetch_board_state(rpc_client: &RpcClient) -> Result<(Board, u64), Strin
 
     Ok((*board, current_slot))
 }
+

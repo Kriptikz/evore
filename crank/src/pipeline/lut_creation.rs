@@ -245,3 +245,4 @@ async fn extend_lut(
     debug!("[LUTCreation] Extended LUT {} with {} addresses", lut_address, 5);
     Ok(())
 }
+
