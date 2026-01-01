@@ -278,6 +278,7 @@ pub async fn backfill_rounds(
             per_page: 0,
             rounds_fetched: 0,
             rounds_skipped: 0,
+            rounds_not_in_external_api: 0,
             last_round_id_processed: None,
             first_round_id_seen: None,
             estimated_total_rounds: None,
