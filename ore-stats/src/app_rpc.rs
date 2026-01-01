@@ -237,7 +237,11 @@ impl AppRpc {
     // ========== ORE Account Fetching (with retry) ==========
     
     /// Get the Board account (with retry across providers)
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_board(&self) -> Result<Board> {
+        use solana_client::rpc_config::RpcAccountInfoConfig;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        
         let address = board_pda().0;
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
@@ -247,18 +251,30 @@ impl AppRpc {
             batch_size: 1,
         };
         
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+            min_context_slot: None,
+        };
+        
         let mut last_error = String::new();
         for attempt in 0..MAX_RETRIES {
             let provider = self.provider(attempt);
             provider.rate_limit().await;
             let start = Instant::now();
             
-            match provider.client.get_account_data(&address).await {
-            Ok(data) => {
+            match provider.client.get_account_with_config(&address, config.clone()).await {
+                Ok(response) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                let board = Board::try_from_bytes(&data)?;
-                    return Ok(*board);
+                    if let Some(account) = response.value {
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        let board = Board::try_from_bytes(&account.data)?;
+                        return Ok(*board);
+                    } else {
+                        last_error = "Account not found".to_string();
+                        self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    }
             }
             Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
@@ -274,7 +290,11 @@ impl AppRpc {
     }
     
     /// Get a Round account by ID (with retry across providers)
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_round(&self, round_id: u64) -> Result<Round> {
+        use solana_client::rpc_config::RpcAccountInfoConfig;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        
         let address = round_pda(round_id).0;
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
@@ -284,18 +304,30 @@ impl AppRpc {
             batch_size: 1,
         };
         
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+            min_context_slot: None,
+        };
+        
         let mut last_error = String::new();
         for attempt in 0..MAX_RETRIES {
             let provider = self.provider(attempt);
             provider.rate_limit().await;
             let start = Instant::now();
             
-            match provider.client.get_account_data(&address).await {
-            Ok(data) => {
+            match provider.client.get_account_with_config(&address, config.clone()).await {
+                Ok(response) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                let round = Round::try_from_bytes(&data)?;
-                    return Ok(*round);
+                    if let Some(account) = response.value {
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        let round = Round::try_from_bytes(&account.data)?;
+                        return Ok(*round);
+                    } else {
+                        last_error = "Account not found".to_string();
+                        self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    }
             }
             Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
@@ -311,7 +343,11 @@ impl AppRpc {
     }
     
     /// Get the Treasury account (with retry across providers)
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_treasury(&self) -> Result<Treasury> {
+        use solana_client::rpc_config::RpcAccountInfoConfig;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
             target_type: "treasury".to_string(),
@@ -320,20 +356,32 @@ impl AppRpc {
             batch_size: 1,
         };
         
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+            min_context_slot: None,
+        };
+        
         let mut last_error = String::new();
         for attempt in 0..MAX_RETRIES {
             let provider = self.provider(attempt);
             provider.rate_limit().await;
             let start = Instant::now();
             
-            match provider.client.get_account_data(&TREASURY_ADDRESS).await {
-            Ok(data) => {
-                    let duration_ms = start.elapsed().as_millis() as u32;
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                let treasury = Treasury::try_from_bytes(&data)?;
-                    return Ok(*treasury);
-            }
-            Err(e) => {
+            match provider.client.get_account_with_config(&TREASURY_ADDRESS, config.clone()).await {
+                Ok(response) => {
+        let duration_ms = start.elapsed().as_millis() as u32;
+                    if let Some(account) = response.value {
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        let treasury = Treasury::try_from_bytes(&account.data)?;
+                        return Ok(*treasury);
+                    } else {
+                        last_error = "Account not found".to_string();
+                        self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    }
+                }
+                Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -348,7 +396,11 @@ impl AppRpc {
     
     /// Get the ORE Mint supply (with retry across providers)
     /// Returns the total supply of ORE tokens in atomic units (11 decimals)
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_mint_supply(&self) -> Result<u64> {
+        use solana_client::rpc_config::RpcAccountInfoConfig;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
             target_type: "mint".to_string(),
@@ -357,25 +409,37 @@ impl AppRpc {
             batch_size: 1,
         };
         
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+            min_context_slot: None,
+        };
+        
         let mut last_error = String::new();
         for attempt in 0..MAX_RETRIES {
             let provider = self.provider(attempt);
             provider.rate_limit().await;
-        let start = Instant::now();
+            let start = Instant::now();
         
-            match provider.client.get_account_data(&MINT_ADDRESS).await {
-                Ok(data) => {
+            match provider.client.get_account_with_config(&MINT_ADDRESS, config.clone()).await {
+                Ok(response) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
-                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                    // SPL Token Mint account layout:
-                    // - 36..44: supply (8 bytes, little-endian u64)
-                    if data.len() < 44 {
-                        return Err(anyhow::anyhow!("Mint account data too short: {} bytes", data.len()));
+                    if let Some(account) = response.value {
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                        // SPL Token Mint account layout:
+                        // - 36..44: supply (8 bytes, little-endian u64)
+                        if account.data.len() < 44 {
+                            return Err(anyhow::anyhow!("Mint account data too short: {} bytes", account.data.len()));
+                        }
+                        let supply = u64::from_le_bytes(account.data[36..44].try_into()?);
+                        return Ok(supply);
+                    } else {
+                        last_error = "Mint account not found".to_string();
+                        self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
                     }
-                    let supply = u64::from_le_bytes(data[36..44].try_into()?);
-                    return Ok(supply);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -390,7 +454,11 @@ impl AppRpc {
     
     /// Get a Miner account by authority (with retry across providers)
     /// Returns None if miner account doesn't exist
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_miner(&self, authority: &Pubkey) -> Result<Option<Miner>> {
+        use solana_client::rpc_config::RpcAccountInfoConfig;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        
         let address = miner_pda(*authority).0;
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
@@ -400,19 +468,32 @@ impl AppRpc {
             batch_size: 1,
         };
         
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+            min_context_slot: None,
+        };
+        
         // Use manual retry loop for special "not found" handling
         let provider = self.primary_provider();
         provider.rate_limit().await;
         let start = Instant::now();
         
-        let result = provider.client.get_account_data(&address).await;
+        let result = provider.client.get_account_with_config(&address, config).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
-            Ok(data) => {
-                self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                let miner = Miner::try_from_bytes(&data)?;
+            Ok(response) => {
+                if let Some(account) = response.value {
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, account.data.len() as u32).await;
+                    let miner = Miner::try_from_bytes(&account.data)?;
                 Ok(Some(*miner))
+                } else {
+                    // Account not found - return None
+                    self.log_not_found(&provider.name, &provider.api_key_id, &ctx, duration_ms).await;
+                    Ok(None)
+                }
             }
             Err(e) => {
                 // Account not found is not an error for optional miner
@@ -500,7 +581,11 @@ impl AppRpc {
     }
     
     /// Get multiple accounts at once (with retry across providers - GMA)
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_multiple_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<Option<Vec<u8>>>> {
+        use solana_client::rpc_config::RpcAccountInfoConfig;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        
         let ctx = RpcContext {
             method: "getMultipleAccounts".to_string(),
             target_type: "batch".to_string(),
@@ -509,16 +594,24 @@ impl AppRpc {
             batch_size: pubkeys.len() as u16,
         };
         
+        let config = RpcAccountInfoConfig {
+            encoding: Some(UiAccountEncoding::Base64Zstd),
+            data_slice: None,
+            commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+            min_context_slot: None,
+        };
+        
         let mut last_error = String::new();
         for attempt in 0..MAX_RETRIES {
             let provider = self.provider(attempt);
             provider.rate_limit().await;
             let start = Instant::now();
             
-            match provider.client.get_multiple_accounts(pubkeys).await {
-            Ok(accounts) => {
+            match provider.client.get_multiple_accounts_with_config(pubkeys, config.clone()).await {
+                Ok(response) => {
+                    let accounts = response.value;
                     let duration_ms = start.elapsed().as_millis() as u32;
-                let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
+                    let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
                     let total_size: u32 = accounts.iter().filter_map(|a| a.as_ref()).map(|a| a.data.len() as u32).sum();
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, found_count, total_size).await;
                     return Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect());
@@ -658,10 +751,11 @@ impl AppRpc {
         // Filter for Miner accounts by size (size_of::<Miner>() + 8 for discriminator)
         let miner_size = std::mem::size_of::<Miner>() as u64 + 8;
         
+        // Use Base64Zstd for compression - reduces bandwidth significantly
         let config = RpcProgramAccountsConfig {
             filters: Some(vec![RpcFilterType::DataSize(miner_size)]),
             account_config: RpcAccountInfoConfig {
-                encoding: Some(UiAccountEncoding::Base64),
+                encoding: Some(UiAccountEncoding::Base64Zstd),
                 data_slice: None,
                 commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
                 min_context_slot: None,
@@ -717,7 +811,7 @@ impl AppRpc {
                             tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
                         }
                         continue;
-                    }
+                }
                 
                 tracing::info!(
                         "GPA miners snapshot ({}): {} accounts fetched, {} miners parsed in {}ms",
@@ -746,6 +840,7 @@ impl AppRpc {
     
     /// Get all EVORE Manager accounts via GPA (with retry)
     /// Returns Vec of (address, account_data) tuples
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_evore_managers_gpa(&self) -> Result<Vec<(Pubkey, Vec<u8>)>> {
         use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
         use solana_client::rpc_filter::RpcFilterType;
@@ -760,10 +855,11 @@ impl AppRpc {
             batch_size: 0,
         };
         
+        // Use Base64Zstd for compression - reduces bandwidth significantly
         let config = RpcProgramAccountsConfig {
             filters: Some(vec![RpcFilterType::DataSize(MANAGER_SIZE as u64)]),
             account_config: RpcAccountInfoConfig {
-                encoding: Some(UiAccountEncoding::Base64),
+                encoding: Some(UiAccountEncoding::Base64Zstd),
                 data_slice: None,
                 commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
                 min_context_slot: None,
@@ -820,6 +916,7 @@ impl AppRpc {
     
     /// Get all EVORE Deployer accounts via GPA (with retry)
     /// Returns Vec of (address, account_data) tuples
+    /// Uses Base64Zstd encoding for bandwidth efficiency
     pub async fn get_evore_deployers_gpa(&self) -> Result<Vec<(Pubkey, Vec<u8>)>> {
         use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
         use solana_client::rpc_filter::RpcFilterType;
@@ -834,10 +931,11 @@ impl AppRpc {
             batch_size: 0,
         };
         
+        // Use Base64Zstd for compression - reduces bandwidth significantly
         let config = RpcProgramAccountsConfig {
             filters: Some(vec![RpcFilterType::DataSize(DEPLOYER_SIZE as u64)]),
             account_config: RpcAccountInfoConfig {
-                encoding: Some(UiAccountEncoding::Base64),
+                encoding: Some(UiAccountEncoding::Base64Zstd),
                 data_slice: None,
                 commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
                 min_context_slot: None,
