@@ -2,7 +2,8 @@
 //!
 //! All RPC calls from ore-stats should go through this module.
 //! Provides:
-//! - Rate limiting
+//! - Rate limiting per provider
+//! - Round-robin retry with fallback across providers
 //! - Request/response timing
 //! - Metrics logging to ClickHouse
 //! - Error tracking
@@ -26,8 +27,13 @@ use evore::ore_api::{
 use crate::app_state::apply_refined_ore_fix;
 use crate::clickhouse::{ClickHouseClient, RpcRequestInsert};
 
-/// Minimum time between RPC requests (rate limiting)
-const MIN_REQUEST_INTERVAL_MS: u64 = 40; // 25 req/s max
+/// Retry configuration
+const MAX_RETRIES: usize = 10;
+const RETRY_DELAY_MS: u64 = 500;
+
+/// Rate limits per provider (milliseconds between requests)
+const FLUX_MIN_INTERVAL_MS: u64 = 33;    // ~30 rps
+const HELIUS_MIN_INTERVAL_MS: u64 = 40;  // ~25 rps
 
 /// RPC metrics context for a single request
 #[derive(Debug, Clone)]
@@ -48,25 +54,64 @@ pub struct SignatureStatus {
     pub confirmation_status: Option<String>, // "processed", "confirmed", "finalized"
 }
 
+/// An RPC provider with its own client and rate limiter
+pub struct RpcProvider {
+    pub name: String,
+    pub url: String,
+    pub api_key_id: String,
+    pub client: RpcClient,
+    pub last_request_at: RwLock<Instant>,
+    pub min_request_interval_ms: u64,
+}
+
+impl RpcProvider {
+    /// Create a new RPC provider
+    pub fn new(name: &str, url: &str, min_interval_ms: u64) -> Self {
+        // Normalize URL
+        let normalized_url = if url.starts_with("http") {
+            url.to_string()
+        } else {
+            format!("https://{}", url)
+        };
+        
+        let client = RpcClient::new_with_commitment(
+            normalized_url.clone(),
+            CommitmentConfig { commitment: CommitmentLevel::Confirmed },
+        );
+        
+        let api_key_id = extract_api_key_id(&normalized_url);
+        
+        Self {
+            name: name.to_string(),
+            url: normalized_url,
+            api_key_id,
+            client,
+            last_request_at: RwLock::new(Instant::now()),
+            min_request_interval_ms: min_interval_ms,
+        }
+    }
+    
+    /// Rate limit: wait if we're calling too fast
+    pub async fn rate_limit(&self) {
+        let mut last = self.last_request_at.write().await;
+        let elapsed = last.elapsed().as_millis() as u64;
+        if elapsed < self.min_request_interval_ms {
+            let wait = self.min_request_interval_ms - elapsed;
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+        }
+        *last = Instant::now();
+    }
+}
+
 /// Central RPC gateway with metrics tracking
 /// 
-/// Uses two RPC clients:
-/// - `flux_client` - for getAccountInfo, getMultipleAccounts (GMA), getProgramAccounts (GPA)
-/// - `helius_client` - for getBalance, getSlot, getSignatureStatuses, and as backup
+/// Uses multiple RPC providers with round-robin retry on failure:
+/// - First attempt always uses provider[0] (Flux)
+/// - On failure, rotates to next provider (Helius, then back to Flux, etc.)
+/// - 10 total attempts with 500ms delay between retries
 pub struct AppRpc {
-    /// Flux RPC client for account data fetching (GMA, GPA, getAccountInfo)
-    flux_client: RpcClient,
-    flux_url: String,
-    flux_provider_name: String,
-    flux_api_key_id: String,
-    flux_last_request_at: RwLock<Instant>,
-    
-    /// Helius RPC client for other calls (getBalance, getSlot, etc.)
-    helius_client: RpcClient,
-    helius_url: String,
-    helius_provider_name: String,
-    helius_api_key_id: String,
-    helius_last_request_at: RwLock<Instant>,
+    /// RPC providers in priority order: [Flux, Helius, ...]
+    providers: Vec<RpcProvider>,
     
     // Metrics tracking
     clickhouse: Option<Arc<ClickHouseClient>>,
@@ -74,100 +119,45 @@ pub struct AppRpc {
 }
 
 impl AppRpc {
-    /// Create a new AppRpc instance with both Helius and Flux RPC clients.
+    /// Create a new AppRpc instance with Flux as primary and Helius as backup.
     /// 
     /// # Arguments
     /// * `helius_rpc_url` - The Helius RPC URL (with or without https:// prefix)
     /// * `flux_rpc_url` - The Flux RPC URL (with or without https:// prefix)
     /// * `clickhouse` - Optional ClickHouse client for metrics logging
     pub fn new(helius_rpc_url: String, flux_rpc_url: String, clickhouse: Option<Arc<ClickHouseClient>>) -> Self {
-        // Normalize Helius URL
-        let helius_url = if helius_rpc_url.starts_with("http") {
-            helius_rpc_url.clone()
-        } else {
-            format!("https://{}", helius_rpc_url)
-        };
-        
-        // Normalize Flux URL
-        let flux_url = if flux_rpc_url.starts_with("http") {
-            flux_rpc_url.clone()
-        } else {
-            format!("https://{}", flux_rpc_url)
-        };
-        
-        // Extract provider names and API keys for metrics
-        let helius_provider_name = extract_provider_name(&helius_url);
-        let helius_api_key_id = extract_api_key_id(&helius_url);
-        let flux_provider_name = extract_provider_name(&flux_url);
-        let flux_api_key_id = extract_api_key_id(&flux_url);
-        
-        // Create Helius client
-        let helius_client = RpcClient::new_with_commitment(
-            helius_url.clone(),
-            CommitmentConfig { commitment: CommitmentLevel::Confirmed },
-        );
-        
-        // Create Flux client
-        let flux_client = RpcClient::new_with_commitment(
-            flux_url.clone(),
-            CommitmentConfig { commitment: CommitmentLevel::Confirmed },
-        );
+        // Create providers in priority order: Flux first, then Helius
+        let flux_provider = RpcProvider::new("flux", &flux_rpc_url, FLUX_MIN_INTERVAL_MS);
+        let helius_provider = RpcProvider::new("helius", &helius_rpc_url, HELIUS_MIN_INTERVAL_MS);
         
         tracing::info!(
-            "AppRpc initialized: Helius={} ({}), Flux={} ({})",
-            helius_provider_name, helius_url, flux_provider_name, flux_url
+            "AppRpc initialized with {} providers: Flux={} ({}ms), Helius={} ({}ms)",
+            2,
+            flux_provider.url,
+            FLUX_MIN_INTERVAL_MS,
+            helius_provider.url,
+            HELIUS_MIN_INTERVAL_MS
         );
         
         Self {
-            flux_client,
-            flux_url,
-            flux_provider_name,
-            flux_api_key_id,
-            flux_last_request_at: RwLock::new(Instant::now()),
-            helius_client,
-            helius_url,
-            helius_provider_name,
-            helius_api_key_id,
-            helius_last_request_at: RwLock::new(Instant::now()),
+            providers: vec![flux_provider, helius_provider],
             clickhouse,
             program_name: "ore-stats".to_string(),
         }
     }
     
-    /// Rate limit for Flux client: wait if we're calling too fast
-    async fn rate_limit_flux(&self) {
-        let mut last = self.flux_last_request_at.write().await;
-        let elapsed = last.elapsed().as_millis() as u64;
-        if elapsed < MIN_REQUEST_INTERVAL_MS {
-            let wait = MIN_REQUEST_INTERVAL_MS - elapsed;
-            tokio::time::sleep(Duration::from_millis(wait)).await;
-        }
-        *last = Instant::now();
+    /// Get the primary provider (Flux)
+    fn primary_provider(&self) -> &RpcProvider {
+        &self.providers[0]
     }
     
-    /// Rate limit for Helius client: wait if we're calling too fast
-    async fn rate_limit_helius(&self) {
-        let mut last = self.helius_last_request_at.write().await;
-        let elapsed = last.elapsed().as_millis() as u64;
-        if elapsed < MIN_REQUEST_INTERVAL_MS {
-            let wait = MIN_REQUEST_INTERVAL_MS - elapsed;
-            tokio::time::sleep(Duration::from_millis(wait)).await;
-        }
-        *last = Instant::now();
+    /// Get provider by index (wraps around)
+    fn provider(&self, index: usize) -> &RpcProvider {
+        &self.providers[index % self.providers.len()]
     }
     
-    /// Log successful RPC call to ClickHouse for Flux
-    async fn log_flux_success(&self, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
-        self.log_success_internal(&self.flux_provider_name, &self.flux_api_key_id, ctx, duration_ms, result_count, response_size).await;
-    }
-    
-    /// Log successful RPC call to ClickHouse for Helius
-    async fn log_helius_success(&self, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
-        self.log_success_internal(&self.helius_provider_name, &self.helius_api_key_id, ctx, duration_ms, result_count, response_size).await;
-    }
-    
-    /// Internal log success implementation
-    async fn log_success_internal(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
+    /// Log successful RPC call to ClickHouse
+    async fn log_success(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32, result_count: u32, response_size: u32) {
         if let Some(ref ch) = self.clickhouse {
             let insert = RpcRequestInsert::new(
                 &self.program_name,
@@ -198,18 +188,8 @@ impl AppRpc {
         }
     }
     
-    /// Log error RPC call to ClickHouse for Flux
-    async fn log_flux_error(&self, ctx: &RpcContext, duration_ms: u32, error: &str) {
-        self.log_error_internal(&self.flux_provider_name, &self.flux_api_key_id, ctx, duration_ms, error).await;
-    }
-    
-    /// Log error RPC call to ClickHouse for Helius
-    async fn log_helius_error(&self, ctx: &RpcContext, duration_ms: u32, error: &str) {
-        self.log_error_internal(&self.helius_provider_name, &self.helius_api_key_id, ctx, duration_ms, error).await;
-    }
-    
-    /// Internal log error implementation
-    async fn log_error_internal(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32, error: &str) {
+    /// Log error RPC call to ClickHouse
+    async fn log_error(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32, error: &str) {
         if let Some(ref ch) = self.clickhouse {
             let insert = RpcRequestInsert::new(
                 &self.program_name,
@@ -231,18 +211,8 @@ impl AppRpc {
         }
     }
     
-    /// Log not found RPC call to ClickHouse for Flux
-    async fn log_flux_not_found(&self, ctx: &RpcContext, duration_ms: u32) {
-        self.log_not_found_internal(&self.flux_provider_name, &self.flux_api_key_id, ctx, duration_ms).await;
-    }
-    
-    /// Log not found RPC call to ClickHouse for Helius
-    async fn log_helius_not_found(&self, ctx: &RpcContext, duration_ms: u32) {
-        self.log_not_found_internal(&self.helius_provider_name, &self.helius_api_key_id, ctx, duration_ms).await;
-    }
-    
-    /// Internal log not found implementation
-    async fn log_not_found_internal(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32) {
+    /// Log not found RPC call to ClickHouse
+    async fn log_not_found(&self, provider_name: &str, api_key_id: &str, ctx: &RpcContext, duration_ms: u32) {
         if let Some(ref ch) = self.clickhouse {
             let insert = RpcRequestInsert::new(
                 &self.program_name,
@@ -264,13 +234,10 @@ impl AppRpc {
         }
     }
     
-    // ========== ORE Account Fetching (via Flux RPC) ==========
+    // ========== ORE Account Fetching (with retry) ==========
     
-    /// Get the Board account (uses Flux RPC)
+    /// Get the Board account (with retry across providers)
     pub async fn get_board(&self) -> Result<Board> {
-        self.rate_limit_flux().await;
-        let start = Instant::now();
-        
         let address = board_pda().0;
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
@@ -280,27 +247,34 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.flux_client.get_account_data(&address).await;
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(data) => {
-                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
-                let board = Board::try_from_bytes(&data)?;
-                Ok(*board)
-            }
-            Err(e) => {
-                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+        let mut last_error = String::new();
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            match provider.client.get_account_data(&address).await {
+                Ok(data) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
+                    let board = Board::try_from_bytes(&data)?;
+                    return Ok(*board);
+                }
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        Err(anyhow::anyhow!("All {} attempts failed for get_board: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get a Round account by ID (uses Flux RPC)
+    /// Get a Round account by ID (with retry across providers)
     pub async fn get_round(&self, round_id: u64) -> Result<Round> {
-        self.rate_limit_flux().await;
-        let start = Instant::now();
-        
         let address = round_pda(round_id).0;
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
@@ -310,27 +284,34 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.flux_client.get_account_data(&address).await;
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(data) => {
-                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
-                let round = Round::try_from_bytes(&data)?;
-                Ok(*round)
-            }
-            Err(e) => {
-                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+        let mut last_error = String::new();
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            match provider.client.get_account_data(&address).await {
+                Ok(data) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
+                    let round = Round::try_from_bytes(&data)?;
+                    return Ok(*round);
+                }
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        Err(anyhow::anyhow!("All {} attempts failed for get_round: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get the Treasury account (uses Flux RPC)
+    /// Get the Treasury account (with retry across providers)
     pub async fn get_treasury(&self) -> Result<Treasury> {
-        self.rate_limit_flux().await;
-        let start = Instant::now();
-        
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
             target_type: "treasury".to_string(),
@@ -339,28 +320,35 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.flux_client.get_account_data(&TREASURY_ADDRESS).await;
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(data) => {
-                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
-                let treasury = Treasury::try_from_bytes(&data)?;
-                Ok(*treasury)
-            }
-            Err(e) => {
-                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+        let mut last_error = String::new();
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            match provider.client.get_account_data(&TREASURY_ADDRESS).await {
+                Ok(data) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
+                    let treasury = Treasury::try_from_bytes(&data)?;
+                    return Ok(*treasury);
+                }
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        Err(anyhow::anyhow!("All {} attempts failed for get_treasury: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get the ORE Mint supply (uses Flux RPC)
+    /// Get the ORE Mint supply (with retry across providers)
     /// Returns the total supply of ORE tokens in atomic units (11 decimals)
     pub async fn get_mint_supply(&self) -> Result<u64> {
-        self.rate_limit_flux().await;
-        let start = Instant::now();
-        
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
             target_type: "mint".to_string(),
@@ -369,38 +357,40 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.flux_client.get_account_data(&MINT_ADDRESS).await;
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(data) => {
-                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
-                // SPL Token Mint account layout:
-                // - 0..4: mint_authority_option (4 bytes)
-                // - 4..36: mint_authority (32 bytes, if option = 1)
-                // - 36..44: supply (8 bytes, little-endian u64)
-                // - 44..45: decimals (1 byte)
-                // - 45..46: is_initialized (1 byte)
-                // - 46..50: freeze_authority_option (4 bytes)
-                // - 50..82: freeze_authority (32 bytes, if option = 1)
-                if data.len() < 44 {
-                    return Err(anyhow::anyhow!("Mint account data too short: {} bytes", data.len()));
+        let mut last_error = String::new();
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            match provider.client.get_account_data(&MINT_ADDRESS).await {
+                Ok(data) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
+                    // SPL Token Mint account layout:
+                    // - 36..44: supply (8 bytes, little-endian u64)
+                    if data.len() < 44 {
+                        return Err(anyhow::anyhow!("Mint account data too short: {} bytes", data.len()));
+                    }
+                    let supply = u64::from_le_bytes(data[36..44].try_into()?);
+                    return Ok(supply);
                 }
-                let supply = u64::from_le_bytes(data[36..44].try_into()?);
-                Ok(supply)
-            }
-            Err(e) => {
-                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        Err(anyhow::anyhow!("All {} attempts failed for get_mint_supply: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get a Miner account by authority (uses Flux RPC)
+    /// Get a Miner account by authority (with retry across providers)
+    /// Returns None if miner account doesn't exist
     pub async fn get_miner(&self, authority: &Pubkey) -> Result<Option<Miner>> {
-        self.rate_limit_flux().await;
-        let start = Instant::now();
-        
         let address = miner_pda(*authority).0;
         let ctx = RpcContext {
             method: "getAccountInfo".to_string(),
@@ -410,35 +400,37 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.flux_client.get_account_data(&address).await;
+        // Use manual retry loop for special "not found" handling
+        let provider = self.primary_provider();
+        provider.rate_limit().await;
+        let start = Instant::now();
+        
+        let result = provider.client.get_account_data(&address).await;
         let duration_ms = start.elapsed().as_millis() as u32;
         
         match result {
             Ok(data) => {
-                self.log_flux_success(&ctx, duration_ms, 1, data.len() as u32).await;
+                self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
                 let miner = Miner::try_from_bytes(&data)?;
                 Ok(Some(*miner))
             }
             Err(e) => {
                 // Account not found is not an error for optional miner
                 if e.to_string().contains("AccountNotFound") {
-                    self.log_flux_not_found(&ctx, duration_ms).await;
+                    self.log_not_found(&provider.name, &provider.api_key_id, &ctx, duration_ms).await;
                     Ok(None)
                 } else {
-                    self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &e.to_string()).await;
                     Err(e.into())
                 }
             }
         }
     }
     
-    // ========== Other RPC calls (via Helius RPC) ==========
+    // ========== Other RPC calls (with retry) ==========
     
-    /// Get SOL balance for an account (uses Helius RPC)
+    /// Get SOL balance for an account (with retry across providers)
     pub async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64> {
-        self.rate_limit_helius().await;
-        let start = Instant::now();
-        
         let ctx = RpcContext {
             method: "getBalance".to_string(),
             target_type: "balance".to_string(),
@@ -447,26 +439,33 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.helius_client.get_balance(pubkey).await;
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(balance) => {
-                self.log_helius_success(&ctx, duration_ms, 1, 8).await;
-                Ok(balance)
-            }
-            Err(e) => {
-                self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+        let mut last_error = String::new();
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            match provider.client.get_balance(pubkey).await {
+                Ok(balance) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, 8).await;
+                    return Ok(balance);
+                }
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        Err(anyhow::anyhow!("All {} attempts failed for get_balance: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get current slot (uses Helius RPC)
+    /// Get current slot (with retry across providers)
     pub async fn get_slot(&self) -> Result<u64> {
-        self.rate_limit_helius().await;
-        let start = Instant::now();
-        
         let ctx = RpcContext {
             method: "getSlot".to_string(),
             target_type: "slot".to_string(),
@@ -475,26 +474,33 @@ impl AppRpc {
             batch_size: 1,
         };
         
-        let result = self.helius_client.get_slot().await;
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(slot) => {
-                self.log_helius_success(&ctx, duration_ms, 1, 8).await;
-                Ok(slot)
-            }
-            Err(e) => {
-                self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+        let mut last_error = String::new();
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            match provider.client.get_slot().await {
+                Ok(slot) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, 8).await;
+                    return Ok(slot);
+                }
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        Err(anyhow::anyhow!("All {} attempts failed for get_slot: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get multiple accounts at once (uses Flux RPC - GMA)
+    /// Get multiple accounts at once (with retry across providers - GMA)
     pub async fn get_multiple_accounts(&self, pubkeys: &[Pubkey]) -> Result<Vec<Option<Vec<u8>>>> {
-        self.rate_limit_flux().await;
-        let start = Instant::now();
-        
         let ctx = RpcContext {
             method: "getMultipleAccounts".to_string(),
             target_type: "batch".to_string(),
@@ -503,36 +509,38 @@ impl AppRpc {
             batch_size: pubkeys.len() as u16,
         };
         
-        let result = self.flux_client.get_multiple_accounts(pubkeys).await;
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(accounts) => {
-                let response_size: u32 = accounts.iter()
-                    .filter_map(|a| a.as_ref())
-                    .map(|a| a.data.len() as u32)
-                    .sum();
-                let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
-                    
-                self.log_flux_success(&ctx, duration_ms, found_count, response_size).await;
-                
-                Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect())
-            }
-            Err(e) => {
-                self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+        let mut last_error = String::new();
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            match provider.client.get_multiple_accounts(pubkeys).await {
+                Ok(accounts) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
+                    let total_size: u32 = accounts.iter().filter_map(|a| a.as_ref()).map(|a| a.data.len() as u32).sum();
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, found_count, total_size).await;
+                    return Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect());
+                }
+                Err(e) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        Err(anyhow::anyhow!("All {} attempts failed for get_multiple_accounts: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get signature statuses for transaction confirmations (uses Helius RPC)
+    /// Get signature statuses for transaction confirmations (with retry across providers)
     /// Returns Vec<Option<SignatureStatus>> where:
     /// - None = not found yet
     /// - Some(status) = found with confirmation details
     pub async fn get_signature_statuses(&self, signatures: &[String]) -> Result<Vec<Option<SignatureStatus>>> {
-        self.rate_limit_helius().await;
-        let start = Instant::now();
-        
         let ctx = RpcContext {
             method: "getSignatureStatuses".to_string(),
             target_type: "signature".to_string(),
@@ -545,7 +553,7 @@ impl AppRpc {
             batch_size: signatures.len() as u16,
         };
         
-        // Use direct JSON-RPC call like the crank does
+        // Use direct JSON-RPC call
         let body = serde_json::json!({
             "jsonrpc": "2.0",
             "id": 1,
@@ -556,79 +564,88 @@ impl AppRpc {
             ]
         });
         
-        let client = reqwest::Client::new();
-        let response = client
-            .post(&self.helius_url)
-            .json(&body)
-            .send()
-            .await;
+        let mut last_error = String::new();
+        let http_client = reqwest::Client::new();
         
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match response {
-            Ok(res) => {
-                let json: serde_json::Value = res.json().await
-                    .map_err(|e| anyhow::anyhow!("Failed to parse response: {}", e))?;
-                
-                if let Some(error) = json.get("error") {
-                    let error_msg = error.to_string();
-                    self.log_helius_error(&ctx, duration_ms, &error_msg).await;
-                    return Err(anyhow::anyhow!("RPC error: {}", error_msg));
-                }
-                
-                let statuses: Vec<Option<SignatureStatus>> = json["result"]["value"]
-                    .as_array()
-                    .map(|arr| {
-                        arr.iter().map(|v| {
-                            if v.is_null() {
-                                None
-                            } else {
-                                Some(SignatureStatus {
-                                    slot: v["slot"].as_u64(),
-                                    confirmations: v["confirmations"].as_u64().map(|c| c as usize),
-                                    err: v["err"].as_str().map(|s| s.to_string()),
-                                    confirmation_status: v["confirmationStatus"].as_str().map(|s| s.to_string()),
-                                })
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            let response = http_client
+                .post(&provider.url)
+                .json(&body)
+                .send()
+                .await;
+            
+            let duration_ms = start.elapsed().as_millis() as u32;
+            
+            match response {
+                Ok(res) => {
+                    let json: serde_json::Value = match res.json().await {
+                        Ok(j) => j,
+                        Err(e) => {
+                            last_error = format!("Failed to parse response: {}", e);
+                            self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                            if attempt < MAX_RETRIES - 1 {
+                                tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
                             }
-                        }).collect()
-                    })
-                    .unwrap_or_default();
-                
-                let confirmed_count = statuses.iter().filter(|s| s.is_some()).count() as u32;
-                self.log_helius_success(&ctx, duration_ms, confirmed_count, 0).await;
-                Ok(statuses)
-            }
-            Err(e) => {
-                self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
-                Err(e.into())
+                            continue;
+                        }
+                    };
+                    
+                    if let Some(error) = json.get("error") {
+                        last_error = error.to_string();
+                        self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                        if attempt < MAX_RETRIES - 1 {
+                            tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        }
+                        continue;
+                    }
+                    
+                    let statuses: Vec<Option<SignatureStatus>> = json["result"]["value"]
+                        .as_array()
+                        .map(|arr| {
+                            arr.iter().map(|v| {
+                                if v.is_null() {
+                                    None
+                                } else {
+                                    Some(SignatureStatus {
+                                        slot: v["slot"].as_u64(),
+                                        confirmations: v["confirmations"].as_u64().map(|c| c as usize),
+                                        err: v["err"].as_str().map(|s| s.to_string()),
+                                        confirmation_status: v["confirmationStatus"].as_str().map(|s| s.to_string()),
+                                    })
+                                }
+                            }).collect()
+                        })
+                        .unwrap_or_default();
+                    
+                    let confirmed_count = statuses.iter().filter(|s| s.is_some()).count() as u32;
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, confirmed_count, 0).await;
+                    return Ok(statuses);
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
             }
         }
+        
+        Err(anyhow::anyhow!("All {} RPC attempts failed for getSignatureStatuses: {}", MAX_RETRIES, last_error))
     }
     
-    /// Get all ORE Miner accounts using standard getProgramAccounts RPC (uses Flux RPC - GPA)
+    /// Get all ORE Miner accounts using standard getProgramAccounts RPC (with retry)
     /// This is the source of truth for miner data - more reliable than v2 endpoint
     /// Returns a HashMap keyed by authority pubkey string
     /// If treasury is provided, applies refined_ore calculation immediately
     pub async fn get_all_miners_gpa(&self, treasury: Option<&Treasury>) -> Result<std::collections::HashMap<String, Miner>> {
-        self.get_all_miners_gpa_with_client(treasury, false).await
-    }
-    
-    /// Get all ORE Miner accounts using either Flux or Helius RPC
-    /// `use_helius` - if true, uses Helius client; if false, uses Flux client
-    pub async fn get_all_miners_gpa_with_client(&self, treasury: Option<&Treasury>, use_helius: bool) -> Result<std::collections::HashMap<String, Miner>> {
         use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
         use solana_client::rpc_filter::RpcFilterType;
         use solana_account_decoder_client_types::UiAccountEncoding;
-        
-        let (client, provider_name) = if use_helius {
-            self.rate_limit_helius().await;
-            (&self.helius_client, "Helius")
-        } else {
-            self.rate_limit_flux().await;
-            (&self.flux_client, "Flux")
-        };
-        
-        let start = Instant::now();
         
         let ctx = RpcContext {
             method: "getProgramAccounts".to_string(),
@@ -653,52 +670,226 @@ impl AppRpc {
             sort_results: None,
         };
         
-        let result = client
-            .get_program_accounts_with_config(&evore::ore_api::PROGRAM_ID, config)
-            .await;
+        let mut last_error = String::new();
         
-        let duration_ms = start.elapsed().as_millis() as u32;
-        
-        match result {
-            Ok(accounts) => {
-                let mut miners = std::collections::HashMap::new();
-                let mut total_size = 0u32;
-                
-                for (_pubkey, account) in &accounts {
-                    total_size += account.data.len() as u32;
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            let result = provider.client
+                .get_program_accounts_with_config(&evore::ore_api::PROGRAM_ID, config.clone())
+                .await;
+            
+            let duration_ms = start.elapsed().as_millis() as u32;
+            
+            match result {
+                Ok(accounts) => {
+                    let mut miners = std::collections::HashMap::new();
+                    let mut total_size = 0u32;
                     
-                    if let Ok(miner) = Miner::try_from_bytes(&account.data) {
-                        // Apply refined_ore fix if treasury is available
-                        let fixed_miner = if let Some(t) = treasury {
-                            apply_refined_ore_fix(miner, t)
-                        } else {
-                            *miner
-                        };
-                        miners.insert(fixed_miner.authority.to_string(), fixed_miner);
+                    for (_pubkey, account) in &accounts {
+                        total_size += account.data.len() as u32;
+                        
+                        if let Ok(miner) = Miner::try_from_bytes(&account.data) {
+                            // Apply refined_ore fix if treasury is available
+                            let fixed_miner = if let Some(t) = treasury {
+                                apply_refined_ore_fix(miner, t)
+                            } else {
+                                *miner
+                            };
+                            miners.insert(fixed_miner.authority.to_string(), fixed_miner);
+                        }
+                    }
+                    
+                    // Validate: must have at least 10,000 miners to be a successful snapshot
+                    if miners.len() < 10_000 {
+                        last_error = format!(
+                            "Insufficient miners: got {} but need at least 10,000",
+                            miners.len()
+                        );
+                        tracing::warn!(
+                            "GPA miners snapshot ({}) failed validation: {} (attempt {}/{})",
+                            provider.name, last_error, attempt + 1, MAX_RETRIES
+                        );
+                        self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                        if attempt < MAX_RETRIES - 1 {
+                            tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                        }
+                        continue;
+                    }
+                    
+                    tracing::info!(
+                        "GPA miners snapshot ({}): {} accounts fetched, {} miners parsed in {}ms",
+                        provider.name, accounts.len(), miners.len(), duration_ms
+                    );
+                    
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, miners.len() as u32, total_size).await;
+                    return Ok(miners);
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    tracing::warn!(
+                        "GPA miners snapshot ({}) failed (attempt {}/{}): {}",
+                        provider.name, attempt + 1, MAX_RETRIES, last_error
+                    );
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
                     }
                 }
-                
-                tracing::info!(
-                    "GPA miners snapshot ({}): {} accounts fetched, {} miners parsed in {}ms",
-                    provider_name, accounts.len(), miners.len(), duration_ms
-                );
-                
-                if use_helius {
-                    self.log_helius_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
-                } else {
-                    self.log_flux_success(&ctx, duration_ms, miners.len() as u32, total_size).await;
-                }
-                Ok(miners)
-            }
-            Err(e) => {
-                if use_helius {
-                    self.log_helius_error(&ctx, duration_ms, &e.to_string()).await;
-                } else {
-                    self.log_flux_error(&ctx, duration_ms, &e.to_string()).await;
-                }
-                Err(e.into())
             }
         }
+        
+        Err(anyhow::anyhow!("All {} GPA attempts failed: {}", MAX_RETRIES, last_error))
+    }
+    
+    /// Get all EVORE Manager accounts via GPA (with retry)
+    /// Returns Vec of (address, account_data) tuples
+    pub async fn get_evore_managers_gpa(&self) -> Result<Vec<(Pubkey, Vec<u8>)>> {
+        use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
+        use solana_client::rpc_filter::RpcFilterType;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        use crate::evore_cache::MANAGER_SIZE;
+        
+        let ctx = RpcContext {
+            method: "getProgramAccounts".to_string(),
+            target_type: "evore_manager".to_string(),
+            target_address: evore::ID.to_string(),
+            is_batch: true,
+            batch_size: 0,
+        };
+        
+        let config = RpcProgramAccountsConfig {
+            filters: Some(vec![RpcFilterType::DataSize(MANAGER_SIZE as u64)]),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                data_slice: None,
+                commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+                min_context_slot: None,
+            },
+            with_context: None,
+            sort_results: None,
+        };
+        
+        let mut last_error = String::new();
+        
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            let result = provider.client
+                .get_program_accounts_with_config(&evore::ID, config.clone())
+                .await;
+            
+            let duration_ms = start.elapsed().as_millis() as u32;
+            
+            match result {
+                Ok(accounts) => {
+                    let total_size: u32 = accounts.iter().map(|(_, a)| a.data.len() as u32).sum();
+                    let result: Vec<(Pubkey, Vec<u8>)> = accounts
+                        .into_iter()
+                        .map(|(pk, acc)| (pk, acc.data))
+                        .collect();
+                    
+                    tracing::info!(
+                        "GPA EVORE managers ({}): {} accounts in {}ms",
+                        provider.name, result.len(), duration_ms
+                    );
+                    
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, result.len() as u32, total_size).await;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    tracing::warn!(
+                        "GPA EVORE managers ({}) failed (attempt {}/{}): {}",
+                        provider.name, attempt + 1, MAX_RETRIES, last_error
+                    );
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("All {} EVORE managers GPA attempts failed: {}", MAX_RETRIES, last_error))
+    }
+    
+    /// Get all EVORE Deployer accounts via GPA (with retry)
+    /// Returns Vec of (address, account_data) tuples
+    pub async fn get_evore_deployers_gpa(&self) -> Result<Vec<(Pubkey, Vec<u8>)>> {
+        use solana_client::rpc_config::{RpcProgramAccountsConfig, RpcAccountInfoConfig};
+        use solana_client::rpc_filter::RpcFilterType;
+        use solana_account_decoder_client_types::UiAccountEncoding;
+        use crate::evore_cache::DEPLOYER_SIZE;
+        
+        let ctx = RpcContext {
+            method: "getProgramAccounts".to_string(),
+            target_type: "evore_deployer".to_string(),
+            target_address: evore::ID.to_string(),
+            is_batch: true,
+            batch_size: 0,
+        };
+        
+        let config = RpcProgramAccountsConfig {
+            filters: Some(vec![RpcFilterType::DataSize(DEPLOYER_SIZE as u64)]),
+            account_config: RpcAccountInfoConfig {
+                encoding: Some(UiAccountEncoding::Base64),
+                data_slice: None,
+                commitment: Some(CommitmentConfig { commitment: CommitmentLevel::Confirmed }),
+                min_context_slot: None,
+            },
+            with_context: None,
+            sort_results: None,
+        };
+        
+        let mut last_error = String::new();
+        
+        for attempt in 0..MAX_RETRIES {
+            let provider = self.provider(attempt);
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            let result = provider.client
+                .get_program_accounts_with_config(&evore::ID, config.clone())
+                .await;
+            
+            let duration_ms = start.elapsed().as_millis() as u32;
+            
+            match result {
+                Ok(accounts) => {
+                    let total_size: u32 = accounts.iter().map(|(_, a)| a.data.len() as u32).sum();
+                    let result: Vec<(Pubkey, Vec<u8>)> = accounts
+                        .into_iter()
+                        .map(|(pk, acc)| (pk, acc.data))
+                        .collect();
+                    
+                    tracing::info!(
+                        "GPA EVORE deployers ({}): {} accounts in {}ms",
+                        provider.name, result.len(), duration_ms
+                    );
+                    
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, result.len() as u32, total_size).await;
+                    return Ok(result);
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    tracing::warn!(
+                        "GPA EVORE deployers ({}) failed (attempt {}/{}): {}",
+                        provider.name, attempt + 1, MAX_RETRIES, last_error
+                    );
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("All {} EVORE deployers GPA attempts failed: {}", MAX_RETRIES, last_error))
     }
 }
 

@@ -6,7 +6,6 @@
 //! - RPC proxy for frontend
 //! - Metrics tracking to ClickHouse
 
-use std::collections::HashMap;
 use std::env;
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -175,17 +174,27 @@ async fn main() -> anyhow::Result<()> {
     let polling_handle = tasks::spawn_rpc_polling(state.clone());
     tracing::info!("RPC polling started");
     
-    // Miners polling task (full load then incremental every 30 seconds)
-    let miners_handle = tasks::spawn_miners_polling(state.clone());
-    tracing::info!("Miners polling started");
+    // Initial miners cache load via GPA (will be refreshed each round via GPA snapshot)
+    tracing::info!("Loading initial miners cache via GPA...");
+    match state.rpc.get_all_miners_gpa(None).await {
+        Ok(miners) => {
+            let count = miners.len();
+            let mut cache = state.miners_cache.write().await;
+            *cache = miners.into_iter().collect();
+            tracing::info!("Initial miners cache loaded: {} miners", count);
+        }
+        Err(e) => {
+            tracing::warn!("Failed to load initial miners cache: {} (will be populated on first round snapshot)", e);
+        }
+    }
     
     // Metrics snapshot task
     let metrics_handle = tasks::spawn_metrics_snapshot(state.clone());
     tracing::info!("Metrics snapshot task started");
     
-    // EVORE accounts polling task
-    let evore_handle = tasks::spawn_evore_polling(state.clone());
-    tracing::info!("EVORE polling started");
+    // Initial EVORE cache load via GPA (will be refreshed once per round)
+    tracing::info!("Loading initial EVORE cache via GPA...");
+    evore_cache::refresh_evore_cache(&state).await;
     
     // Automation state reconstruction background task
     automation_states::spawn_automation_task(state.clone());
@@ -284,9 +293,7 @@ async fn main() -> anyhow::Result<()> {
     program_sub_handle.abort();
     token_cache_handle.abort();
     polling_handle.abort();
-    miners_handle.abort();
     metrics_handle.abort();
-    evore_handle.abort();
 
     Ok(())
 }

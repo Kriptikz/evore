@@ -4,13 +4,9 @@
 //! so the frontend can get all read data from the API without its own RPC connection.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use steel::Pubkey;
-use tokio::sync::RwLock;
-
-use crate::helius_api::{HeliusApi, ProgramAccountV2, ProgramAccountFilter, GetProgramAccountsV2Options};
 
 // ============================================================================
 // EVORE Program Constants
@@ -253,5 +249,70 @@ pub struct MinerInfo {
     pub rewards_sol: u64,
     pub rewards_ore: u64,
     pub refined_ore: u64,
+}
+
+// ============================================================================
+// EVORE Cache Refresh (via GPA)
+// ============================================================================
+
+use crate::app_state::AppState;
+
+/// Refresh the EVORE cache using GPA
+/// Called once per round after finalization
+pub async fn refresh_evore_cache(state: &AppState) {
+    tracing::info!("Refreshing EVORE cache via GPA...");
+    
+    // Fetch managers
+    match state.rpc.get_evore_managers_gpa().await {
+        Ok(accounts) => {
+            let mut cache = state.evore_cache.write().await;
+            let mut count = 0;
+            
+            for (pubkey, data) in accounts {
+                if let Some(manager) = parse_manager(&pubkey.to_string(), &data) {
+                    cache.upsert_manager(manager);
+                    count += 1;
+                }
+            }
+            
+            tracing::info!("EVORE cache: {} managers loaded", count);
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch EVORE managers via GPA: {}", e);
+        }
+    }
+    
+    // Fetch deployers
+    match state.rpc.get_evore_deployers_gpa().await {
+        Ok(accounts) => {
+            let mut cache = state.evore_cache.write().await;
+            let mut count = 0;
+            
+            for (pubkey, data) in accounts {
+                if let Some(deployer) = parse_deployer(&pubkey.to_string(), &data) {
+                    cache.upsert_deployer(deployer);
+                    count += 1;
+                }
+            }
+            
+            tracing::info!("EVORE cache: {} deployers loaded", count);
+        }
+        Err(e) => {
+            tracing::error!("Failed to fetch EVORE deployers via GPA: {}", e);
+        }
+    }
+    
+    // Update last_updated_slot
+    {
+        let mut cache = state.evore_cache.write().await;
+        cache.last_updated_slot = *state.slot_cache.read().await;
+    }
+    
+    let cache = state.evore_cache.read().await;
+    let stats = cache.stats();
+    tracing::info!(
+        "EVORE cache refreshed: {} managers, {} deployers",
+        stats.managers_count, stats.deployers_count
+    );
 }
 

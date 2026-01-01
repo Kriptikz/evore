@@ -476,16 +476,16 @@ pub struct LiveDeploymentsResponse {
 }
 
 /// GET /live/deployments - Get all current deployments for the live round
-/// Returns cached deployments from miner polling (updated every ~2s)
+/// Returns real-time deployments from WebSocket pending_deployments
 pub async fn get_live_deployments(
     State(state): State<Arc<AppState>>,
 ) -> Json<LiveDeploymentsResponse> {
-    let round_id = *state.deployments_cache_round_id.read().await;
-    let cache = state.deployments_cache.read().await;
+    let round_id = *state.pending_round_id.read().await;
+    let pending = state.pending_deployments.read().await;
     
     let mut deployments = Vec::new();
     
-    for (miner_pubkey, squares) in cache.iter() {
+    for (miner_pubkey, squares) in pending.iter() {
         let mut amounts = [0u64; 25];
         let mut total_amount = 0u64;
         let mut max_slot = 0u64;

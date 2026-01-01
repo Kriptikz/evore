@@ -141,6 +141,46 @@ impl ClickHouseClient {
         Ok(1)
     }
     
+    // ========== Partial Rounds ==========
+    
+    /// Insert a partial round (finalization timeout).
+    /// Used when top_miner was not populated before reset.
+    pub async fn insert_partial_round(&self, round: PartialRoundInsert) -> Result<(), ClickHouseError> {
+        let mut insert = self.client.insert("partial_rounds")?;
+        insert.write(&round).await?;
+        insert.end().await?;
+        Ok(())
+    }
+    
+    /// Get all partial rounds needing backfill.
+    pub async fn get_partial_rounds(&self) -> Result<Vec<PartialRound>, ClickHouseError> {
+        let rows: Vec<PartialRound> = self.client
+            .query("SELECT * FROM partial_rounds ORDER BY round_id ASC")
+            .fetch_all()
+            .await?;
+        Ok(rows)
+    }
+    
+    /// Check if a partial round exists.
+    pub async fn partial_round_exists(&self, round_id: u64) -> Result<bool, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count() FROM partial_rounds WHERE round_id = ?")
+            .bind(round_id)
+            .fetch_one()
+            .await?;
+        Ok(count > 0)
+    }
+    
+    /// Delete a partial round after successful backfill to rounds table.
+    pub async fn delete_partial_round(&self, round_id: u64) -> Result<(), ClickHouseError> {
+        self.client
+            .query("ALTER TABLE partial_rounds DELETE WHERE round_id = ?")
+            .bind(round_id)
+            .execute()
+            .await?;
+        Ok(())
+    }
+    
     /// Delete all deployments for a round (for re-backfill).
     pub async fn delete_deployments_for_round(&self, round_id: u64) -> Result<u64, ClickHouseError> {
         self.client
@@ -3273,6 +3313,97 @@ impl RoundInsert {
             created_at: now_ms(),
         }
     }
+}
+
+/// Partial round insert data.
+/// Used when finalization times out (top_miner not populated).
+/// Contains everything except top_miner so it can be backfilled later.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct PartialRoundInsert {
+    pub round_id: u64,
+    
+    // Timing
+    pub start_slot: u64,
+    pub end_slot: u64,
+    
+    // Hash data
+    pub slot_hash: [u8; 32],
+    pub winning_square: u8,
+    
+    // Totals
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub top_miner_reward: u64,
+    
+    // Motherlode
+    pub motherlode: u64,
+    pub motherlode_hit: u8,
+    
+    // Stats
+    pub unique_miners: u32,
+    pub total_deployments: u32,
+    
+    // Metadata
+    pub created_at: i64,
+    pub failure_reason: String,
+}
+
+impl PartialRoundInsert {
+    /// Create a PartialRoundInsert from snapshot data when finalization times out.
+    pub fn from_snapshot(
+        round_id: u64,
+        start_slot: u64,
+        end_slot: u64,
+        slot_hash: [u8; 32],
+        winning_square: u8,
+        total_deployed: u64,
+        total_vaulted: u64,
+        total_winnings: u64,
+        top_miner_reward: u64,
+        motherlode: u64,
+        unique_miners: u32,
+        total_deployments: u32,
+        failure_reason: String,
+    ) -> Self {
+        Self {
+            round_id,
+            start_slot,
+            end_slot,
+            slot_hash,
+            winning_square,
+            total_deployed,
+            total_vaulted,
+            total_winnings,
+            top_miner_reward,
+            motherlode,
+            motherlode_hit: if motherlode > 0 { 1 } else { 0 },
+            unique_miners,
+            total_deployments,
+            created_at: now_ms(),
+            failure_reason,
+        }
+    }
+}
+
+/// Partial round row returned from query.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct PartialRound {
+    pub round_id: u64,
+    pub start_slot: u64,
+    pub end_slot: u64,
+    pub slot_hash: [u8; 32],
+    pub winning_square: u8,
+    pub total_deployed: u64,
+    pub total_vaulted: u64,
+    pub total_winnings: u64,
+    pub top_miner_reward: u64,
+    pub motherlode: u64,
+    pub motherlode_hit: u8,
+    pub unique_miners: u32,
+    pub total_deployments: u32,
+    pub created_at: i64,
+    pub failure_reason: String,
 }
 
 /// Deployment insert data.

@@ -5,10 +5,10 @@
 //!
 //! Uses a multi-source approach for data accuracy:
 //! 1. GPA miners snapshot (getProgramAccounts) - source of truth for miner counts & amounts
-//! 2. Miners cache (v2 endpoint) - provides slot timing data from polling
-//! 3. WebSocket pending_deployments - provides real-time slot data
+//! 2. WebSocket pending_deployments - provides real-time slot data for deployments
 //!
-//! We combine all three to get the most accurate deployment data with slots.
+//! The GPA snapshot is taken 10 seconds after round ending is detected to allow
+//! all transactions to settle before capturing the final state.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -20,19 +20,17 @@ use tracing;
 
 use crate::app_state::{AppState, LiveBroadcastData, RoundSnapshot};
 use crate::clickhouse::{
-    ClickHouseClient, DeploymentInsert, MinerSnapshot, MintSnapshot, RoundInsert, TreasurySnapshot,
+    DeploymentInsert, MinerSnapshot, MintSnapshot, PartialRoundInsert, RoundInsert, TreasurySnapshot,
 };
-use crate::tasks::fetch_all_miners;
 
 /// Capture a snapshot of the current round state
 /// 
 /// Process:
-/// 1. IMMEDIATELY take a GPA miners snapshot (source of truth - this worked 100% in old system)
-/// 2. Log WebSocket pending_deployments count for debugging
-/// 3. Wait 5 seconds for v2 endpoint to settle
-/// 4. Refresh miners_cache (v2 endpoint) for slot timing data
-/// 5. Compare GPA vs miners_cache and log differences
-/// 6. Use GPA as source of truth, merge slot data from cache/websocket
+/// 1. Wait 10 seconds for all transactions to settle
+/// 2. Take a GPA miners snapshot (source of truth)
+/// 3. Update miners_cache with GPA data
+/// 4. Log WebSocket pending_deployments count for debugging
+/// 5. Use GPA as source of truth, merge slot data from WebSocket
 pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // Get current round info
     let round_cache = state.round_cache.read().await;
@@ -42,93 +40,32 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     let end_slot = live_round.end_slot;
     drop(round_cache);
     
-    // === STEP 1: IMMEDIATELY take GPA miners snapshot (source of truth) ===
-    // This is CRITICAL - we have ~15 seconds before the next round starts
-    // and miners deploy again (updating their round_id). Use the full window!
-    tracing::info!("Round {} ending - taking GPA miners snapshot IMMEDIATELY...", round_id);
+    // === STEP 1: Wait 10 seconds for transactions to settle ===
+    tracing::info!("Round {} ending - waiting 10 seconds for transactions to settle...", round_id);
+    tokio::time::sleep(Duration::from_secs(10)).await;
+    
+    // === STEP 2: Take GPA miners snapshot (source of truth) ===
+    tracing::info!("Round {} - taking GPA miners snapshot...", round_id);
     
     // Get treasury for refined_ore calculation
     let treasury_cache = state.treasury_cache.read().await;
     let treasury_for_gpa = treasury_cache.clone();
     drop(treasury_cache);
     
-    // Store ALL miners from GPA (for full historical tracking ~1/min)
-    // and also filter for round deployers for deployment processing
-    // 
-    // Retry strategy:
-    // 1. Try Flux first (3 attempts)
-    // 2. If Flux fails 3 times, switch to Helius
-    // 3. Round robin between Flux and Helius until success or time runs out
-    // We have ~15 seconds during intermission to get the snapshot
-    let mut gpa_result: Option<HashMap<String, Miner>> = None;
-    let max_total_attempts = 10;
-    let flux_first_attempts = 3;
-    let min_miner_count = 10_000; // Minimum miners for a valid snapshot
-    
-    for attempt in 1..=max_total_attempts {
-        // Use Flux for first 3 attempts, then round robin
-        let use_helius = if attempt <= flux_first_attempts {
-            false // Use Flux for first 3 attempts
-        } else {
-            // Round robin: attempts 4,6,8,10 use Helius; 5,7,9 use Flux
-            (attempt - flux_first_attempts) % 2 == 1
-        };
-        
-        let provider = if use_helius { "Helius" } else { "Flux" };
-        
-        match state.rpc.get_all_miners_gpa_with_client(treasury_for_gpa.as_ref(), use_helius).await {
-            Ok(miners) => {
-                let miner_count = miners.len();
-                
-                // Validate we got a complete snapshot (at least 10k miners)
-                if miner_count < min_miner_count {
-                    tracing::warn!(
-                        "GPA snapshot attempt {}/{} ({}): only {} miners (need at least {}), treating as incomplete",
-                        attempt, max_total_attempts, provider, miner_count, min_miner_count
-                    );
-                    
-                    if attempt < max_total_attempts {
-                        let delay = if attempt < flux_first_attempts {
-                            Duration::from_millis(500)
-                        } else {
-                            Duration::from_secs(1)
-                        };
-                        tracing::info!("Retrying GPA snapshot with {} in {:?}...", 
-                            if use_helius { "Flux" } else { "Helius" }, delay);
-                        tokio::time::sleep(delay).await;
-                    }
-                    continue;
-                }
-                
-                tracing::info!(
-                    "GPA snapshot attempt {}/{} ({}): fetched {} miners",
-                    attempt, max_total_attempts, provider, miner_count
-                );
-                gpa_result = Some(miners);
-                break;
-            }
-            Err(e) => {
-                tracing::error!(
-                    "GPA snapshot attempt {}/{} ({}) failed: {}",
-                    attempt, max_total_attempts, provider, e
-                );
-                
-                if attempt < max_total_attempts {
-                    // Short delays to maximize attempts within ~15 second window
-                    // First 3 Flux attempts: 500ms delay
-                    // After that: 1s delay for round robin
-                    let delay = if attempt < flux_first_attempts {
-                        Duration::from_millis(500)
-                    } else {
-                        Duration::from_secs(1)
-                    };
-                    tracing::info!("Retrying GPA snapshot with {} in {:?}...", 
-                        if use_helius { "Flux" } else { "Helius" }, delay);
-                    tokio::time::sleep(delay).await;
-                }
-            }
+    // Fetch all miners via GPA with built-in retry/fallback logic:
+    // - 10 retries with 500ms delays
+    // - Round-robin across providers (Flux first, then Helius, etc.)
+    // - Validates at least 10,000 miners for a complete snapshot
+    let gpa_result = match state.rpc.get_all_miners_gpa(treasury_for_gpa.as_ref()).await {
+        Ok(miners) => {
+            tracing::info!("GPA miners snapshot: {} miners fetched", miners.len());
+            Some(miners)
         }
-    }
+        Err(e) => {
+            tracing::error!("GPA miners snapshot failed after all retries: {}", e);
+            None
+        }
+    };
     
     let (all_gpa_miners, gpa_miners, gpa_failed) = match gpa_result {
         Some(miners) => {
@@ -148,17 +85,23 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         }
         None => {
             tracing::error!(
-                "CRITICAL: All {} GPA snapshot attempts failed for round {}! \
-                 (tried Flux {} times, then round robin with Helius) \
+                "CRITICAL: GPA snapshot failed for round {}! \
                  Will still store round/treasury snapshots. Deployments need backfill via admin.",
-                max_total_attempts, round_id, flux_first_attempts
+                round_id
             );
             // Continue with empty miners - we'll still store round and treasury
             (HashMap::new(), HashMap::new(), true)
         }
     };
     
-    // === STEP 2: Log WebSocket pending_deployments count ===
+    // === STEP 3: Update miners_cache with GPA data ===
+    if !all_gpa_miners.is_empty() {
+        let mut cache = state.miners_cache.write().await;
+        *cache = all_gpa_miners.clone().into_iter().collect();
+        tracing::info!("Updated miners_cache with {} miners from GPA", cache.len());
+    }
+    
+    // === STEP 4: Log WebSocket pending_deployments count ===
     let ws_deployments = state.pending_deployments.read().await.clone();
     let ws_unique_miners = ws_deployments.len();
     let ws_total_squares: usize = ws_deployments.values().map(|s| s.len()).sum();
@@ -168,87 +111,19 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
         round_id, ws_unique_miners, ws_total_squares
     );
     
-    // === STEP 3: Wait 5 seconds for v2 endpoint to settle ===
-    tracing::info!("Waiting 5 seconds before refreshing miners cache (v2 endpoint)...");
-    tokio::time::sleep(Duration::from_secs(5)).await;
+    // === STEP 5: Build combined snapshot ===
+    // Use GPA as source of truth for miners/amounts, merge slot data from WebSocket
     
-    // === STEP 4: Refresh miners_cache (v2 endpoint) for slot timing ===
-    tracing::info!("Refreshing miners cache (v2 endpoint) for slot timing data...");
-    match fetch_all_miners(state).await {
-        Ok(count) => {
-            tracing::info!("V2 miners cache refreshed: {} miners", count);
-        }
-        Err(e) => {
-            tracing::error!("Failed to refresh miners cache: {}", e);
-        }
-    }
-    
-    // Get miners from v2 cache (for slot timing from deployments_cache)
-    let all_miners = state.miners_cache.read().await;
-    let cache_round_miners: HashMap<String, Miner> = all_miners
-        .iter()
-        .filter(|(_, m)| m.round_id == round_id)
-        .map(|(k, v)| (k.clone(), *v))
-        .collect();
-    drop(all_miners);
-    
-    // Get deployments cache (has slot timing from polling)
-    let deployments_cache = state.deployments_cache.read().await.clone();
-    
-    // === STEP 5: Compare GPA vs miners_cache and log differences ===
-    let gpa_count = gpa_miners.len();
-    let cache_count = cache_round_miners.len();
-    
-    if gpa_count != cache_count {
-        tracing::warn!(
-            "DATA MISMATCH - Round {}: GPA has {} miners, v2 cache has {} miners (diff={})",
-            round_id, gpa_count, cache_count, 
-            (gpa_count as i64 - cache_count as i64).abs()
-        );
-        
-        // Find miners in GPA but not in cache
-        let gpa_only: Vec<&String> = gpa_miners.keys()
-            .filter(|k| !cache_round_miners.contains_key(*k))
-            .collect();
-        if !gpa_only.is_empty() {
-            tracing::warn!(
-                "  Miners in GPA but NOT in v2 cache ({}): {:?}",
-                gpa_only.len(),
-                gpa_only.iter().take(5).collect::<Vec<_>>()
-            );
-        }
-        
-        // Find miners in cache but not in GPA
-        let cache_only: Vec<&String> = cache_round_miners.keys()
-            .filter(|k| !gpa_miners.contains_key(*k))
-            .collect();
-        if !cache_only.is_empty() {
-            tracing::warn!(
-                "  Miners in v2 cache but NOT in GPA ({}): {:?}",
-                cache_only.len(),
-                cache_only.iter().take(5).collect::<Vec<_>>()
-            );
-        }
-    } else {
-        tracing::info!(
-            "Round {}: GPA and v2 cache agree on {} miners",
-            round_id, gpa_count
-        );
-    }
-    
-    // === STEP 6: Build combined snapshot ===
-    // Use GPA as source of truth for miners/amounts, merge slot data from cache/websocket
-    
-    // Source of truth: GPA miners (if available), fallback to cache
+    // Source of truth: GPA miners
     let source_miners = if !gpa_miners.is_empty() {
         tracing::info!("Using GPA miners as source of truth ({} miners)", gpa_miners.len());
         gpa_miners
     } else {
-        tracing::warn!("GPA empty, falling back to v2 cache ({} miners)", cache_round_miners.len());
-        cache_round_miners.clone()
+        tracing::warn!("GPA empty - no miners to process");
+        HashMap::new()
     };
     
-    // Build combined deployments: amounts from source_miners, slots from cache/websocket
+    // Build combined deployments: amounts from GPA, slots from WebSocket
     let mut combined_deployments: HashMap<String, HashMap<u8, (u64, u64)>> = HashMap::new();
     
     for (miner_pubkey, miner) in &source_miners {
@@ -261,22 +136,13 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
             
             let square_id_u8 = square_id as u8;
             
-            // Try to find slot from:
-            // 1. WebSocket pending_deployments (most accurate if available)
-            // 2. Deployments cache (from polling)
-            // 3. Default to start_slot if no slot data found
-            
+            // Try to find slot from WebSocket pending_deployments
+            // Default to start_slot if no slot data found
             let slot = ws_deployments
                 .get(miner_pubkey)
                 .and_then(|squares| squares.get(&square_id_u8))
                 .map(|(_, slot)| *slot)
-                .or_else(|| {
-                    deployments_cache
-                        .get(miner_pubkey)
-                        .and_then(|squares| squares.get(&square_id_u8))
-                        .map(|(_, slot)| *slot)
-                })
-                .unwrap_or(start_slot); // Default to start_slot if no slot data
+                .unwrap_or(start_slot);
             
             miner_squares.insert(square_id_u8, (amount, slot));
         }
@@ -352,7 +218,17 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
 
 /// Finalize a round after reset
 /// Called after detecting board.round_id has incremented
-/// Waits until both slot_hash AND top_miner are populated
+/// 
+/// Key principle: Snapshots are stored BEFORE waiting for top_miner.
+/// This ensures miner and treasury data is preserved even if finalization times out.
+/// 
+/// Process:
+/// 1. ALWAYS store miner snapshots (from GPA data)
+/// 2. ALWAYS store treasury snapshot
+/// 3. ALWAYS store mint supply snapshot
+/// 4. TRY to wait for top_miner and finalize:
+///    - SUCCESS: Store round + deployments to `rounds` table
+///    - TIMEOUT: Store to `partial_rounds` table for later backfill
 pub async fn finalize_round(
     state: &AppState,
     snapshot: RoundSnapshot,
@@ -361,13 +237,97 @@ pub async fn finalize_round(
     
     tracing::info!("Finalizing round {}...", round_id);
     
-    // Poll until round has both slot_hash AND top_miner populated
-    let finalized_round = wait_for_round_finalization(state, round_id, &snapshot).await?;
+    // ========== STEP 1: Store miner snapshots FIRST (always) ==========
+    // This ensures we have historical miner data even if finalization fails
+    if !snapshot.gpa_failed {
+        let miner_snapshots: Vec<MinerSnapshot> = snapshot
+            .all_miners
+            .values()
+            .map(|m| MinerSnapshot {
+                round_id,
+                miner_pubkey: m.authority.to_string(),
+                unclaimed_ore: m.rewards_ore,
+                refined_ore: m.refined_ore,
+                lifetime_sol: m.lifetime_rewards_sol,
+                lifetime_ore: m.lifetime_rewards_ore,
+            })
+            .collect();
+        
+        state.clickhouse.insert_miner_snapshots(miner_snapshots.clone()).await?;
+        tracing::info!("Stored {} miner snapshots for round {} (BEFORE finalization)", miner_snapshots.len(), round_id);
+    } else {
+        tracing::warn!("Skipping miner snapshots for round {} - GPA failed", round_id);
+    }
     
-    // Verify we have the slot_hash
-    let rng = finalized_round.rng().ok_or_else(|| {
-        anyhow::anyhow!("Round {} still has no slot_hash after waiting", round_id)
-    })?;
+    // ========== STEP 2: Store treasury snapshot FIRST (always) ==========
+    let treasury_snapshot = TreasurySnapshot {
+        balance: snapshot.treasury.balance,
+        motherlode: snapshot.treasury.motherlode,
+        total_staked: snapshot.treasury.total_staked,
+        total_unclaimed: snapshot.treasury.total_unclaimed,
+        total_refined: snapshot.treasury.total_refined,
+        round_id,
+    };
+    state.clickhouse.insert_treasury_snapshot(treasury_snapshot).await?;
+    tracing::info!("Stored treasury snapshot for round {} (BEFORE finalization)", round_id);
+    
+    // ========== STEP 3: Store mint supply snapshot (always) ==========
+    if let Some(supply) = snapshot.mint_supply {
+        let previous_supply = state.clickhouse.get_latest_mint_supply().await
+            .ok()
+            .flatten()
+            .unwrap_or(0);
+        
+        let supply_change = if previous_supply > 0 {
+            supply as i64 - previous_supply as i64
+        } else {
+            0
+        };
+        
+        let mint_snapshot = MintSnapshot {
+            round_id,
+            supply,
+            decimals: 11,
+            supply_change,
+        };
+        
+        state.clickhouse.insert_mint_snapshot(mint_snapshot).await?;
+        tracing::info!("Stored mint snapshot for round {} (BEFORE finalization)", round_id);
+    }
+    
+    // ========== STEP 4: Try to wait for top_miner and finalize ==========
+    match wait_for_round_finalization(state, round_id, &snapshot).await {
+        Ok(finalized_round) => {
+            // SUCCESS: Full finalization with top_miner
+            let rng = finalized_round.rng().ok_or_else(|| {
+                anyhow::anyhow!("Round {} still has no slot_hash after waiting", round_id)
+            })?;
+            
+            store_finalized_round(state, &snapshot, &finalized_round, rng).await?;
+            tracing::info!("Round {} finalized successfully", round_id);
+        }
+        Err(e) => {
+            // TIMEOUT: Store partial round for later backfill
+            tracing::warn!(
+                "Round {} finalization timeout: {}. Storing to partial_rounds.",
+                round_id, e
+            );
+            store_partial_round(state, &snapshot, &e.to_string()).await?;
+            tracing::info!("Round {} stored as partial round (needs backfill)", round_id);
+        }
+    }
+    
+    Ok(())
+}
+
+/// Store a fully finalized round (has top_miner)
+async fn store_finalized_round(
+    state: &AppState,
+    snapshot: &RoundSnapshot,
+    finalized_round: &Round,
+    rng: u64,
+) -> anyhow::Result<()> {
+    let round_id = snapshot.round_id;
     
     let winning_square = finalized_round.winning_square(rng) as u8;
     let total_winnings = finalized_round.total_winnings;
@@ -458,15 +418,15 @@ pub async fn finalize_round(
         top_miner_pubkey
     );
     
-    // Build round insert - uses ClickHouse DEFAULT now64(3) for created_at
+    // Build round insert
     let round_insert = RoundInsert {
         round_id,
-        expires_at: snapshot.end_slot, // Using end_slot as expiry
+        expires_at: snapshot.end_slot,
         start_slot: snapshot.start_slot,
         end_slot: snapshot.end_slot,
         slot_hash: finalized_round.slot_hash,
         winning_square,
-        rent_payer: Pubkey::default().to_string(), // Not tracked
+        rent_payer: Pubkey::default().to_string(),
         top_miner: top_miner_pubkey.clone(),
         top_miner_reward: finalized_round.top_miner_reward,
         total_deployed: finalized_round.total_deployed,
@@ -477,88 +437,25 @@ pub async fn finalize_round(
         total_deployments: all_deployments.len() as u32,
         unique_miners: miners_with_deployments,
         source: "live".to_string(),
-        // Live rounds: current time is correct (round is happening now)
         created_at: std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64,
     };
     
-    // Build treasury snapshot
-    let treasury_snapshot = TreasurySnapshot {
-        balance: snapshot.treasury.balance,
-        motherlode: snapshot.treasury.motherlode,
-        total_staked: snapshot.treasury.total_staked,
-        total_unclaimed: snapshot.treasury.total_unclaimed,
-        total_refined: snapshot.treasury.total_refined,
-        round_id,
-    };
-    
-    // Build miner snapshots - store ALL miners for complete historical tracking (~1/min)
-    // This tracks every miner account state at the end of each round
-    let miner_snapshots: Vec<MinerSnapshot> = snapshot
-        .all_miners
-        .values()
-        .map(|m| MinerSnapshot {
-            round_id,
-            miner_pubkey: m.authority.to_string(),
-            unclaimed_ore: m.rewards_ore,
-            refined_ore: m.refined_ore,
-            lifetime_sol: m.lifetime_rewards_sol,
-            lifetime_ore: m.lifetime_rewards_ore,
-        })
-        .collect();
-    
-    // Store to ClickHouse
+    // Store round to ClickHouse
     state.clickhouse.insert_round(round_insert).await?;
     tracing::debug!("Stored round {} to ClickHouse", round_id);
     
-    state.clickhouse.insert_treasury_snapshot(treasury_snapshot).await?;
-    tracing::debug!("Stored treasury snapshot for round {}", round_id);
-    
-    // Store mint supply snapshot if available
-    if let Some(supply) = snapshot.mint_supply {
-        // Get previous supply to calculate change
-        let previous_supply = state.clickhouse.get_latest_mint_supply().await
-            .ok()
-            .flatten()
-            .unwrap_or(0);
-        
-        let supply_change = if previous_supply > 0 {
-            supply as i64 - previous_supply as i64
-        } else {
-            0 // First snapshot, no change to calculate
-        };
-        
-        let mint_snapshot = MintSnapshot {
-            round_id,
-            supply,
-            decimals: 11, // ORE has 11 decimals
-            supply_change,
-        };
-        
-        state.clickhouse.insert_mint_snapshot(mint_snapshot).await?;
-        tracing::debug!(
-            "Stored mint snapshot for round {}: supply={}, change={}",
-            round_id, supply, supply_change
-        );
+    // Store deployments (only if GPA succeeded)
+    if !snapshot.gpa_failed {
+        state.clickhouse.insert_deployments(all_deployments.clone()).await?;
+        tracing::info!("Stored {} deployments for round {}", all_deployments.len(), round_id);
     } else {
-        tracing::warn!("No mint supply available for round {} - skipping mint snapshot", round_id);
-    }
-    
-    // Only store deployments and miner snapshots if GPA succeeded
-    if snapshot.gpa_failed {
         tracing::warn!(
-            "Round {} GPA snapshot failed - skipping deployments and miner snapshots. \
-             Use admin backfill to reconstruct deployments.",
+            "Round {} GPA snapshot failed - skipping deployments. Use admin backfill.",
             round_id
         );
-    } else {
-        state.clickhouse.insert_deployments(all_deployments.clone()).await?;
-        tracing::debug!("Stored {} deployments to ClickHouse", all_deployments.len());
-        
-        state.clickhouse.insert_miner_snapshots(miner_snapshots.clone()).await?;
-        tracing::debug!("Stored {} miner snapshots for round {}", miner_snapshots.len(), round_id);
     }
     
     // Broadcast winning square announcement
@@ -568,21 +465,74 @@ pub async fn finalize_round(
         motherlode_hit: finalized_round.motherlode > 0,
     });
     
-    if snapshot.gpa_failed {
-        tracing::info!(
-            "Round {} finalized (PARTIAL - no deployments): winning_square={}, needs backfill",
-            round_id,
-            winning_square
-        );
+    Ok(())
+}
+
+/// Store a partial round when finalization times out (top_miner not populated)
+/// The partial round can be backfilled later via admin panel
+async fn store_partial_round(
+    state: &AppState,
+    snapshot: &RoundSnapshot,
+    failure_reason: &str,
+) -> anyhow::Result<()> {
+    let round_id = snapshot.round_id;
+    
+    // Fetch the round to get slot_hash and other data (even without top_miner)
+    let round = match state.rpc.get_round(round_id).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!("Failed to fetch round {} for partial storage: {}", round_id, e);
+            // Create placeholder partial round
+            let partial = PartialRoundInsert::from_snapshot(
+                round_id,
+                snapshot.start_slot,
+                snapshot.end_slot,
+                [0u8; 32], // No slot_hash available
+                255, // Invalid winning square
+                0, 0, 0, 0, 0, // No round data
+                snapshot.miners.len() as u32,
+                snapshot.deployments.len() as u32,
+                format!("Round fetch failed: {}; Original: {}", e, failure_reason),
+            );
+            state.clickhouse.insert_partial_round(partial).await?;
+            return Ok(());
+        }
+    };
+    
+    // Calculate stats from snapshot
+    let unique_miners = snapshot.miners.len() as u32;
+    let total_deployments = snapshot.deployments.values()
+        .map(|squares| squares.len())
+        .sum::<usize>() as u32;
+    
+    // Get winning_square if slot_hash is available
+    let winning_square = if let Some(rng) = round.rng() {
+        round.winning_square(rng) as u8
     } else {
-        tracing::info!(
-            "Round {} finalized: winning_square={}, {} deployments, {} miner snapshots",
-            round_id,
-            winning_square,
-            all_deployments.len(),
-            miner_snapshots.len()
-        );
-    }
+        255 // Invalid - slot_hash not available
+    };
+    
+    let partial = PartialRoundInsert::from_snapshot(
+        round_id,
+        snapshot.start_slot,
+        snapshot.end_slot,
+        round.slot_hash,
+        winning_square,
+        round.total_deployed,
+        round.total_vaulted,
+        round.total_winnings,
+        round.top_miner_reward,
+        round.motherlode,
+        unique_miners,
+        total_deployments,
+        failure_reason.to_string(),
+    );
+    
+    state.clickhouse.insert_partial_round(partial).await?;
+    tracing::info!(
+        "Stored partial round {}: winning_square={}, {} miners, {} deployments, reason={}",
+        round_id, winning_square, unique_miners, total_deployments, failure_reason
+    );
     
     Ok(())
 }
