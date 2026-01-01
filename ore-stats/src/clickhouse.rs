@@ -2280,6 +2280,176 @@ impl ClickHouseClient {
         Ok(count)
     }
     
+    // ========== Signatures Table (v2) ==========
+    
+    /// Insert multiple signatures (for batch processing).
+    pub async fn insert_signatures(&self, sigs: Vec<SignatureRow>) -> Result<(), ClickHouseError> {
+        if sigs.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("signatures")?;
+        for sig in sigs {
+            insert.write(&sig).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+    
+    /// Check if a signature exists in the signatures table.
+    pub async fn signature_exists(&self, sig: &str) -> Result<bool, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count() FROM signatures FINAL WHERE signature = ?")
+            .bind(sig)
+            .fetch_one()
+            .await?;
+        Ok(count > 0)
+    }
+    
+    /// Get the latest signature for an account (for incremental fetching).
+    pub async fn get_latest_signature_for_account(&self, account: &str) -> Result<Option<String>, ClickHouseError> {
+        let result: Option<String> = self.client
+            .query(r#"
+                SELECT signature 
+                FROM signatures FINAL 
+                WHERE has(accounts, ?)
+                ORDER BY slot DESC
+                LIMIT 1
+            "#)
+            .bind(account)
+            .fetch_optional()
+            .await?;
+        Ok(result)
+    }
+    
+    /// Delete a signature by signature string.
+    pub async fn delete_signature(&self, sig: &str) -> Result<(), ClickHouseError> {
+        self.client
+            .query("ALTER TABLE signatures DELETE WHERE signature = ?")
+            .bind(sig)
+            .execute()
+            .await?;
+        Ok(())
+    }
+    
+    // ========== Raw Transactions V2 ==========
+    
+    /// Insert multiple raw transactions v2 (for batch processing).
+    pub async fn insert_raw_transactions_v2(&self, txs: Vec<RawTransactionV2>) -> Result<(), ClickHouseError> {
+        if txs.is_empty() {
+            return Ok(());
+        }
+        let mut insert = self.client.insert("raw_transactions_v2")?;
+        for tx in txs {
+            insert.write(&tx).await?;
+        }
+        insert.end().await?;
+        Ok(())
+    }
+    
+    /// Check if a transaction exists in raw_transactions_v2.
+    pub async fn transaction_exists_v2(&self, sig: &str) -> Result<bool, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count() FROM raw_transactions_v2 FINAL WHERE signature = ?")
+            .bind(sig)
+            .fetch_one()
+            .await?;
+        Ok(count > 0)
+    }
+    
+    /// Get transactions by account (queries the accounts array).
+    pub async fn get_transactions_by_account(&self, account: &str) -> Result<Vec<RawTransactionV2>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT signature, slot, block_time, accounts, raw_json
+                FROM raw_transactions_v2 FINAL
+                WHERE has(accounts, ?)
+                ORDER BY slot ASC
+            "#)
+            .bind(account)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get transactions by account with pagination.
+    pub async fn get_transactions_by_account_paginated(
+        &self, 
+        account: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Result<Vec<RawTransactionV2>, ClickHouseError> {
+        let results = self.client
+            .query(r#"
+                SELECT signature, slot, block_time, accounts, raw_json
+                FROM raw_transactions_v2 FINAL
+                WHERE has(accounts, ?)
+                ORDER BY slot ASC
+                LIMIT ? OFFSET ?
+            "#)
+            .bind(account)
+            .bind(limit as u64)
+            .bind(offset as u64)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get a single transaction by signature from v2 table.
+    pub async fn get_transaction_by_signature_v2(&self, sig: &str) -> Result<Option<RawTransactionV2>, ClickHouseError> {
+        let result = self.client
+            .query(r#"
+                SELECT signature, slot, block_time, accounts, raw_json
+                FROM raw_transactions_v2 FINAL
+                WHERE signature = ?
+                LIMIT 1
+            "#)
+            .bind(sig)
+            .fetch_optional()
+            .await?;
+        Ok(result)
+    }
+    
+    /// Get transaction count for an account.
+    pub async fn get_transaction_count_by_account(&self, account: &str) -> Result<u32, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count() FROM raw_transactions_v2 FINAL WHERE has(accounts, ?)")
+            .bind(account)
+            .fetch_one()
+            .await?;
+        Ok(count as u32)
+    }
+    
+    /// Delete a transaction by signature from v2 table.
+    pub async fn delete_transaction_v2(&self, sig: &str) -> Result<(), ClickHouseError> {
+        self.client
+            .query("ALTER TABLE raw_transactions_v2 DELETE WHERE signature = ?")
+            .bind(sig)
+            .execute()
+            .await?;
+        Ok(())
+    }
+    
+    /// Get the next unmigrated round (for backfill from old raw_transactions).
+    /// Returns the earliest round_id that exists in raw_transactions but has 
+    /// transactions not yet in raw_transactions_v2.
+    pub async fn get_next_unmigrated_round(&self) -> Result<Option<u64>, ClickHouseError> {
+        // Find rounds in old table that have transactions not in v2
+        let result: Option<u64> = self.client
+            .query(r#"
+                SELECT DISTINCT round_id 
+                FROM raw_transactions rt
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM raw_transactions_v2 v2 
+                    WHERE v2.signature = rt.signature
+                )
+                ORDER BY round_id ASC
+                LIMIT 1
+            "#)
+            .fetch_optional()
+            .await?;
+        Ok(result)
+    }
+    
     // ========== Automation States ==========
     
     /// Insert an automation state snapshot.
@@ -3720,6 +3890,27 @@ pub struct RoundTransactionInfo {
     pub transaction_count: u64,
     pub min_slot: u64,
     pub max_slot: u64,
+}
+
+/// Signature row for the new signatures table.
+/// Used for quick existence checks and incremental fetching.
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct SignatureRow {
+    pub signature: String,
+    pub slot: u64,
+    pub block_time: i64,
+    pub accounts: Vec<String>,
+}
+
+/// Raw transaction v2 with account-based indexing.
+/// Signer is always accounts[0] (first account in the array).
+#[derive(Debug, Clone, Row, Serialize, Deserialize)]
+pub struct RawTransactionV2 {
+    pub signature: String,
+    pub slot: u64,
+    pub block_time: i64,
+    pub accounts: Vec<String>,
+    pub raw_json: String,
 }
 
 /// Automation state snapshot.

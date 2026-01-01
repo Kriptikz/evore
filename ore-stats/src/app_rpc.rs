@@ -254,13 +254,13 @@ impl AppRpc {
             let start = Instant::now();
             
             match provider.client.get_account_data(&address).await {
-                Ok(data) => {
+            Ok(data) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                    let board = Board::try_from_bytes(&data)?;
+                let board = Board::try_from_bytes(&data)?;
                     return Ok(*board);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -291,13 +291,13 @@ impl AppRpc {
             let start = Instant::now();
             
             match provider.client.get_account_data(&address).await {
-                Ok(data) => {
+            Ok(data) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                    let round = Round::try_from_bytes(&data)?;
+                let round = Round::try_from_bytes(&data)?;
                     return Ok(*round);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -327,13 +327,13 @@ impl AppRpc {
             let start = Instant::now();
             
             match provider.client.get_account_data(&TREASURY_ADDRESS).await {
-                Ok(data) => {
+            Ok(data) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, data.len() as u32).await;
-                    let treasury = Treasury::try_from_bytes(&data)?;
+                let treasury = Treasury::try_from_bytes(&data)?;
                     return Ok(*treasury);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -361,8 +361,8 @@ impl AppRpc {
         for attempt in 0..MAX_RETRIES {
             let provider = self.provider(attempt);
             provider.rate_limit().await;
-            let start = Instant::now();
-            
+        let start = Instant::now();
+        
             match provider.client.get_account_data(&MINT_ADDRESS).await {
                 Ok(data) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
@@ -428,7 +428,7 @@ impl AppRpc {
     }
     
     // ========== Other RPC calls (with retry) ==========
-    
+        
     /// Get SOL balance for an account (with retry across providers)
     pub async fn get_balance(&self, pubkey: &Pubkey) -> Result<u64> {
         let ctx = RpcContext {
@@ -446,12 +446,12 @@ impl AppRpc {
             let start = Instant::now();
             
             match provider.client.get_balance(pubkey).await {
-                Ok(balance) => {
+            Ok(balance) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, 8).await;
                     return Ok(balance);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -481,12 +481,12 @@ impl AppRpc {
             let start = Instant::now();
             
             match provider.client.get_slot().await {
-                Ok(slot) => {
+            Ok(slot) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, 8).await;
                     return Ok(slot);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -516,14 +516,14 @@ impl AppRpc {
             let start = Instant::now();
             
             match provider.client.get_multiple_accounts(pubkeys).await {
-                Ok(accounts) => {
+            Ok(accounts) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
-                    let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
+                let found_count = accounts.iter().filter(|a| a.is_some()).count() as u32;
                     let total_size: u32 = accounts.iter().filter_map(|a| a.as_ref()).map(|a| a.data.len() as u32).sum();
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, found_count, total_size).await;
                     return Ok(accounts.into_iter().map(|a| a.map(|acc| acc.data)).collect());
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     let duration_ms = start.elapsed().as_millis() as u32;
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
@@ -574,14 +574,14 @@ impl AppRpc {
             
             let response = http_client
                 .post(&provider.url)
-                .json(&body)
-                .send()
-                .await;
-            
-            let duration_ms = start.elapsed().as_millis() as u32;
-            
-            match response {
-                Ok(res) => {
+            .json(&body)
+            .send()
+            .await;
+        
+        let duration_ms = start.elapsed().as_millis() as u32;
+        
+        match response {
+            Ok(res) => {
                     let json: serde_json::Value = match res.json().await {
                         Ok(j) => j,
                         Err(e) => {
@@ -593,39 +593,39 @@ impl AppRpc {
                             continue;
                         }
                     };
-                    
-                    if let Some(error) = json.get("error") {
+                
+                if let Some(error) = json.get("error") {
                         last_error = error.to_string();
                         self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
                         if attempt < MAX_RETRIES - 1 {
                             tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
                         }
                         continue;
-                    }
-                    
-                    let statuses: Vec<Option<SignatureStatus>> = json["result"]["value"]
-                        .as_array()
-                        .map(|arr| {
-                            arr.iter().map(|v| {
-                                if v.is_null() {
-                                    None
-                                } else {
-                                    Some(SignatureStatus {
-                                        slot: v["slot"].as_u64(),
-                                        confirmations: v["confirmations"].as_u64().map(|c| c as usize),
-                                        err: v["err"].as_str().map(|s| s.to_string()),
-                                        confirmation_status: v["confirmationStatus"].as_str().map(|s| s.to_string()),
-                                    })
-                                }
-                            }).collect()
-                        })
-                        .unwrap_or_default();
-                    
-                    let confirmed_count = statuses.iter().filter(|s| s.is_some()).count() as u32;
+                }
+                
+                let statuses: Vec<Option<SignatureStatus>> = json["result"]["value"]
+                    .as_array()
+                    .map(|arr| {
+                        arr.iter().map(|v| {
+                            if v.is_null() {
+                                None
+                            } else {
+                                Some(SignatureStatus {
+                                    slot: v["slot"].as_u64(),
+                                    confirmations: v["confirmations"].as_u64().map(|c| c as usize),
+                                    err: v["err"].as_str().map(|s| s.to_string()),
+                                    confirmation_status: v["confirmationStatus"].as_str().map(|s| s.to_string()),
+                                })
+                            }
+                        }).collect()
+                    })
+                    .unwrap_or_default();
+                
+                let confirmed_count = statuses.iter().filter(|s| s.is_some()).count() as u32;
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, confirmed_count, 0).await;
                     return Ok(statuses);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     last_error = e.to_string();
                     self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
                     if attempt < MAX_RETRIES - 1 {
@@ -679,28 +679,28 @@ impl AppRpc {
             
             let result = provider.client
                 .get_program_accounts_with_config(&evore::ore_api::PROGRAM_ID, config.clone())
-                .await;
-            
-            let duration_ms = start.elapsed().as_millis() as u32;
-            
-            match result {
-                Ok(accounts) => {
-                    let mut miners = std::collections::HashMap::new();
-                    let mut total_size = 0u32;
-                    
+            .await;
+        
+        let duration_ms = start.elapsed().as_millis() as u32;
+        
+        match result {
+            Ok(accounts) => {
+                let mut miners = std::collections::HashMap::new();
+                let mut total_size = 0u32;
+                
                     for (_pubkey, account) in &accounts {
-                        total_size += account.data.len() as u32;
-                        
-                        if let Ok(miner) = Miner::try_from_bytes(&account.data) {
-                            // Apply refined_ore fix if treasury is available
-                            let fixed_miner = if let Some(t) = treasury {
-                                apply_refined_ore_fix(miner, t)
-                            } else {
-                                *miner
-                            };
-                            miners.insert(fixed_miner.authority.to_string(), fixed_miner);
-                        }
+                    total_size += account.data.len() as u32;
+                    
+                    if let Ok(miner) = Miner::try_from_bytes(&account.data) {
+                        // Apply refined_ore fix if treasury is available
+                        let fixed_miner = if let Some(t) = treasury {
+                            apply_refined_ore_fix(miner, t)
+                        } else {
+                            *miner
+                        };
+                        miners.insert(fixed_miner.authority.to_string(), fixed_miner);
                     }
+                }
                     
                     // Validate: must have at least 10,000 miners to be a successful snapshot
                     if miners.len() < 10_000 {
@@ -718,16 +718,16 @@ impl AppRpc {
                         }
                         continue;
                     }
-                    
-                    tracing::info!(
+                
+                tracing::info!(
                         "GPA miners snapshot ({}): {} accounts fetched, {} miners parsed in {}ms",
                         provider.name, accounts.len(), miners.len(), duration_ms
-                    );
-                    
+                );
+                
                     self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, miners.len() as u32, total_size).await;
                     return Ok(miners);
-                }
-                Err(e) => {
+            }
+            Err(e) => {
                     last_error = e.to_string();
                     tracing::warn!(
                         "GPA miners snapshot ({}) failed (attempt {}/{}): {}",
@@ -891,6 +891,240 @@ impl AppRpc {
         
         Err(anyhow::anyhow!("All {} EVORE deployers GPA attempts failed: {}", MAX_RETRIES, last_error))
     }
+    
+    // ========== Transaction Fetching ==========
+    
+    /// Get signatures for an address with pagination
+    /// Returns up to 1000 signatures per call
+    /// Uses Confirmed commitment
+    pub async fn get_signatures_for_address(
+        &self,
+        address: &Pubkey,
+        before: Option<&str>,
+        _until: Option<&str>,
+        limit: Option<usize>,
+    ) -> Result<Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature>> {
+        use solana_sdk::signature::Signature;
+        
+        let ctx = RpcContext {
+            method: "getSignaturesForAddress".to_string(),
+            target_type: "signatures".to_string(),
+            target_address: address.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
+        
+        let before_sig = before.and_then(|s| s.parse::<Signature>().ok());
+        
+        let mut last_error = String::new();
+        
+        for attempt in 0..MAX_RETRIES {
+            let provider_idx = attempt % self.providers.len();
+            let provider = &self.providers[provider_idx];
+            
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            // Use the simpler method that accepts (address, before, limit, commitment)
+            // Note: until is not used as most RPCs don't support it consistently
+            let result = match (before_sig, limit) {
+                (Some(before), Some(limit)) => {
+                    provider.client.get_signatures_for_address_with_config(
+                        address,
+                        solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
+                            before: Some(before),
+                            until: None,
+                            limit: Some(limit),
+                            commitment: Some(CommitmentConfig {
+                                commitment: CommitmentLevel::Confirmed,
+                            }),
+                        },
+                    ).await
+                }
+                (None, Some(limit)) => {
+                    provider.client.get_signatures_for_address_with_config(
+                        address,
+                        solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
+                            before: None,
+                            until: None,
+                            limit: Some(limit),
+                            commitment: Some(CommitmentConfig {
+                                commitment: CommitmentLevel::Confirmed,
+                            }),
+                        },
+                    ).await
+                }
+                _ => {
+                    provider.client.get_signatures_for_address(address).await
+                }
+            };
+            
+            match result {
+                Ok(sigs) => {
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    self.log_success(
+                        &provider.name, 
+                        &provider.api_key_id, 
+                        &ctx, 
+                        duration_ms,
+                        sigs.len() as u32, 
+                        0
+                    ).await;
+                    return Ok(sigs);
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    tracing::warn!(
+                        "getSignaturesForAddress ({}) failed (attempt {}/{}): {}",
+                        provider.name, attempt + 1, MAX_RETRIES, last_error
+                    );
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("All {} getSignaturesForAddress attempts failed: {}", MAX_RETRIES, last_error))
+    }
+    
+    /// Get all signatures for an address (handles pagination automatically)
+    /// Fetches up to 1000 signatures per call, continues until no more pages
+    pub async fn get_all_signatures_for_address(
+        &self,
+        address: &Pubkey,
+    ) -> Result<Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature>> {
+        let mut all_sigs = Vec::new();
+        let mut before: Option<String> = None;
+        
+        loop {
+            let sigs = self.get_signatures_for_address(
+                address,
+                before.as_deref(),
+                None,
+                Some(1000),
+            ).await?;
+            
+            let count = sigs.len();
+            if let Some(last) = sigs.last() {
+                before = Some(last.signature.clone());
+            }
+            all_sigs.extend(sigs);
+            
+            if count < 1000 {
+                break; // No more pages
+            }
+        }
+        
+        Ok(all_sigs)
+    }
+    
+    /// Get a full transaction by signature
+    /// Uses Confirmed commitment
+    /// Returns the raw JSON transaction
+    pub async fn get_transaction(&self, signature: &str) -> Result<Option<TransactionResult>> {
+        use solana_sdk::signature::Signature;
+        
+        let sig = signature.parse::<Signature>()
+            .map_err(|e| anyhow::anyhow!("Invalid signature: {}", e))?;
+        
+        let ctx = RpcContext {
+            method: "getTransaction".to_string(),
+            target_type: "transaction".to_string(),
+            target_address: signature.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
+        
+        let mut last_error = String::new();
+        
+        for attempt in 0..MAX_RETRIES {
+            let provider_idx = attempt % self.providers.len();
+            let provider = &self.providers[provider_idx];
+            
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            // Use send to call getTransaction RPC directly to avoid crate version conflicts
+            use solana_client::rpc_request::RpcRequest;
+            use serde_json::json;
+            
+            let params = json!([
+                sig.to_string(),
+                {
+                    "encoding": "json",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0
+                }
+            ]);
+            
+            let result: Result<serde_json::Value, _> = provider.client
+                .send(RpcRequest::GetTransaction, params)
+                .await;
+            
+            match result {
+                Ok(tx_json) => {
+                    // Check if transaction was found (null response means not found)
+                    if tx_json.is_null() {
+                        let duration_ms = start.elapsed().as_millis() as u32;
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 0, 0).await;
+                        return Ok(None);
+                    }
+                    
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    
+                    // Extract slot and block_time from JSON
+                    let slot = tx_json.get("slot").and_then(|s| s.as_u64()).unwrap_or(0);
+                    let block_time = tx_json.get("blockTime").and_then(|t| t.as_i64());
+                    
+                    // Serialize to JSON string for storage
+                    let raw_json = serde_json::to_string(&tx_json)
+                        .map_err(|e| anyhow::anyhow!("Failed to serialize transaction: {}", e))?;
+                    
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, raw_json.len() as u32).await;
+                    
+                    return Ok(Some(TransactionResult {
+                        signature: signature.to_string(),
+                        slot,
+                        block_time,
+                        raw_json,
+                    }));
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    
+                    // If transaction not found, that's not an error for retrying
+                    if last_error.contains("not found") || last_error.contains("Transaction version") {
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 0, 0).await;
+                        return Ok(None);
+                    }
+                    
+                    tracing::warn!(
+                        "getTransaction ({}) failed (attempt {}/{}): {}",
+                        provider.name, attempt + 1, MAX_RETRIES, last_error
+                    );
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("All {} getTransaction attempts failed: {}", MAX_RETRIES, last_error))
+    }
+}
+
+/// Result from get_transaction containing the raw JSON and metadata
+#[derive(Debug, Clone)]
+pub struct TransactionResult {
+    pub signature: String,
+    pub slot: u64,
+    pub block_time: Option<i64>,
+    pub raw_json: String,
 }
 
 /// Extract provider name from RPC URL for metrics

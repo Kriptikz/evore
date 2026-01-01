@@ -136,6 +136,15 @@ pub fn spawn_rpc_polling(state: Arc<AppState>) -> tokio::task::JoinHandle<()> {
                                         
                                         // Refresh EVORE cache once per round after finalization
                                         crate::evore_cache::refresh_evore_cache(&state_clone).await;
+                                        
+                                        // Fetch and store transactions for the finalized round
+                                        let state_for_txns = state_clone.clone();
+                                        let round_for_txns = last_round_id;
+                                        tokio::spawn(async move {
+                                            if let Err(e) = crate::finalization::fetch_and_store_round_transactions(&state_for_txns, round_for_txns).await {
+                                                tracing::warn!("Failed to fetch transactions for round {}: {}", round_for_txns, e);
+                                            }
+                                        });
                                     }
                                     Err(e) => {
                                         tracing::error!("Failed to finalize round {}: {}", last_round_id, e);

@@ -1734,9 +1734,10 @@ async fn process_next_parse_item(state: &AppState) -> Result<bool, String> {
     
     tracing::info!("Processing transaction parse for round {}", round_id);
     
-    // Get transactions from ClickHouse
+    // Get transactions from ClickHouse (query by round PDA for v2 tables)
+    let round_pda = evore::ore_api::round_pda(round_id as u64).0.to_string();
     let raw_txns = state.clickhouse
-        .get_raw_transactions_for_round(round_id as u64)
+        .get_transactions_by_account(&round_pda)
         .await
         .map_err(|e| e.to_string())?;
     

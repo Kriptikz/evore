@@ -20,8 +20,10 @@ use tracing;
 
 use crate::app_state::{AppState, LiveBroadcastData, RoundSnapshot};
 use crate::clickhouse::{
-    DeploymentInsert, MinerSnapshot, MintSnapshot, PartialRoundInsert, RoundInsert, TreasurySnapshot,
+    DeploymentInsert, MinerSnapshot, MintSnapshot, PartialRoundInsert, RawTransactionV2, 
+    RoundInsert, SignatureRow, TreasurySnapshot,
 };
+use crate::txn_backfill::parse_transaction_accounts;
 
 /// Capture a snapshot of the current round state
 /// 
@@ -464,6 +466,101 @@ async fn store_finalized_round(
         winning_square,
         motherlode_hit: finalized_round.motherlode > 0,
     });
+    
+    Ok(())
+}
+
+/// Fetch and store transactions for a finalized round
+/// Runs in background after round finalization
+/// Takes Arc<AppState> to be called from spawned tasks
+pub async fn fetch_and_store_round_transactions(state: &std::sync::Arc<crate::app_state::AppState>, round_id: u64) -> anyhow::Result<()> {
+    use evore::ore_api::round_pda;
+    
+    let round_pda_pubkey = round_pda(round_id).0;
+    let round_pda_str = round_pda_pubkey.to_string();
+    
+    tracing::info!("Fetching transactions for round {} (PDA: {})", round_id, round_pda_str);
+    
+    // Get all signatures for this round
+    let signatures = state.rpc.get_all_signatures_for_address(&round_pda_pubkey).await?;
+    
+    tracing::info!("Round {}: fetched {} signatures", round_id, signatures.len());
+    
+    if signatures.is_empty() {
+        tracing::warn!("Round {}: no transactions found", round_id);
+        return Ok(());
+    }
+    
+    // Store signatures with round PDA as initial account
+    let sig_rows: Vec<SignatureRow> = signatures.iter().map(|s| SignatureRow {
+        signature: s.signature.clone(),
+        slot: s.slot,
+        block_time: s.block_time.unwrap_or(0),
+        accounts: vec![round_pda_str.clone()], // Will be updated when full tx fetched
+    }).collect();
+    state.clickhouse.insert_signatures(sig_rows).await?;
+    
+    // Fetch and store full transactions
+    let mut stored_count = 0;
+    let mut tx_rows = Vec::new();
+    
+    for sig_info in &signatures {
+        // Check if already stored
+        if state.clickhouse.transaction_exists_v2(&sig_info.signature).await? {
+            continue;
+        }
+        
+        // Fetch full transaction
+        match state.rpc.get_transaction(&sig_info.signature).await {
+            Ok(Some(tx)) => {
+                // Parse accounts from raw JSON
+                let accounts = match parse_transaction_accounts(&tx.raw_json) {
+                    Ok(acc) => acc,
+                    Err(e) => {
+                        tracing::warn!(
+                            "Failed to parse accounts for tx {}: {}. Using round PDA only.",
+                            sig_info.signature, e
+                        );
+                        vec![round_pda_str.clone()]
+                    }
+                };
+                
+                tx_rows.push(RawTransactionV2 {
+                    signature: sig_info.signature.clone(),
+                    slot: sig_info.slot,
+                    block_time: tx.block_time.unwrap_or(0),
+                    accounts,
+                    raw_json: tx.raw_json,
+                });
+                
+                stored_count += 1;
+                
+                // Batch insert every 50 transactions
+                if tx_rows.len() >= 50 {
+                    state.clickhouse.insert_raw_transactions_v2(tx_rows.drain(..).collect()).await?;
+                }
+            }
+            Ok(None) => {
+                tracing::debug!("Transaction {} not found (may be too old)", sig_info.signature);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to fetch transaction {}: {}", sig_info.signature, e);
+            }
+        }
+        
+        // Small delay to respect rate limits
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    
+    // Insert remaining transactions
+    if !tx_rows.is_empty() {
+        state.clickhouse.insert_raw_transactions_v2(tx_rows).await?;
+    }
+    
+    tracing::info!(
+        "Round {}: stored {} transactions ({} signatures total)",
+        round_id, stored_count, signatures.len()
+    );
     
     Ok(())
 }

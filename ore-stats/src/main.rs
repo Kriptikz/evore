@@ -52,6 +52,7 @@ mod tx_analyzer;
 // - app_state_old.rs
 // - old_rpc.rs
 mod account_tracker;
+mod txn_backfill;
 
 use app_state::AppState;
 use app_rpc::AppRpc;
