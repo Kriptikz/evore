@@ -10,6 +10,7 @@
 //! - Restart-safe: checks what's already populated
 //! - Throttled: doesn't overload CPU, inserts slowly
 //! - Self-terminating: stops when all data is backfilled
+//! - Incremental: can pick up new transactions added later
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -22,8 +23,8 @@ use crate::app_state::AppState;
 /// 
 /// This task will:
 /// 1. First, fill in all missing round_addresses from 1 to current live round
-/// 2. Then, backfill round_transaction_stats for rounds that have v2 transactions
-/// 3. Stop when both are complete
+/// 2. Then, backfill round_transaction_stats sequentially from round 1
+/// 3. Stop when we reach the current live round
 pub fn spawn_round_addresses_backfill(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
         tracing::info!("Starting round addresses/stats backfill task...");
@@ -32,7 +33,7 @@ pub fn spawn_round_addresses_backfill(state: Arc<AppState>) -> JoinHandle<()> {
         tokio::time::sleep(Duration::from_secs(10)).await;
         
         let mut addresses_complete = false;
-        let mut stats_complete = false;
+        let mut stats_current_round: u64 = 1;
         
         loop {
             // Phase 1: Backfill round_addresses
@@ -53,32 +54,31 @@ pub fn spawn_round_addresses_backfill(state: Arc<AppState>) -> JoinHandle<()> {
                 }
             }
             
-            // Phase 2: Backfill round_transaction_stats (only after addresses are done)
-            if addresses_complete && !stats_complete {
-                match backfill_round_transaction_stats(&state).await {
+            // Phase 2: Backfill round_transaction_stats sequentially
+            if addresses_complete {
+                match backfill_round_stats_sequential(&state, &mut stats_current_round).await {
                     Ok(BackfillResult::Complete) => {
-                        tracing::info!("Round transaction stats backfill complete!");
-                        stats_complete = true;
+                        tracing::info!("Round transaction stats backfill complete at round {}!", stats_current_round);
+                        // Don't break - keep running to pick up new rounds
+                        // Sleep longer since we're caught up
+                        tokio::time::sleep(Duration::from_secs(60)).await;
+                        continue;
                     }
                     Ok(BackfillResult::Progress(count)) => {
-                        tracing::debug!("Backfilled stats for {} rounds", count);
+                        if count > 0 {
+                            tracing::debug!("Round {} stats: {} transactions", stats_current_round - 1, count);
+                        }
                     }
                     Err(e) => {
-                        tracing::error!("Round transaction stats backfill error: {}", e);
+                        tracing::error!("Round {} stats backfill error: {}", stats_current_round, e);
                         tokio::time::sleep(Duration::from_secs(30)).await;
                         continue;
                     }
                 }
             }
             
-            // Both complete - exit the loop
-            if addresses_complete && stats_complete {
-                tracing::info!("All round backfills complete!");
-                break;
-            }
-            
-            // Slow down to avoid overloading - wait between batches
-            tokio::time::sleep(Duration::from_millis(500)).await;
+            // Small delay between rounds
+            tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
 }
@@ -135,38 +135,75 @@ async fn backfill_round_addresses(state: &AppState) -> anyhow::Result<BackfillRe
     Ok(BackfillResult::Progress(count))
 }
 
-async fn backfill_round_transaction_stats(state: &AppState) -> anyhow::Result<BackfillResult> {
-    tracing::info!("Checking round transaction stats backfill...");
+/// Backfill stats for a single round, then increment the round counter.
+/// 
+/// For each round:
+/// 1. Check if round exists in round_addresses (if not, we're caught up)
+/// 2. Get current stats for the round (if any)
+/// 3. Query v2 transactions for that round
+/// 4. Update stats based on what we find
+async fn backfill_round_stats_sequential(
+    state: &AppState,
+    current_round: &mut u64,
+) -> anyhow::Result<BackfillResult> {
+    let round_id = *current_round;
     
-    // Get round_ids that need stats
-    let round_ids = state.clickhouse.get_rounds_needing_stats_backfill().await?;
+    // Check if this round exists in round_addresses
+    let round_address = match state.clickhouse.get_round_address(round_id).await? {
+        Some(addr) => addr,
+        None => {
+            // Round doesn't exist in addresses yet - we're caught up
+            return Ok(BackfillResult::Complete);
+        }
+    };
     
-    tracing::info!("Found {} rounds needing stats backfill", round_ids.len());
+    // Get current stats for this round (if any)
+    let current_stats = state.clickhouse.get_round_stats(round_id).await?;
     
-    if round_ids.is_empty() {
-        tracing::info!("No rounds needing stats, marking complete");
-        return Ok(BackfillResult::Complete);
-    }
+    // Determine what to query based on current stats
+    let (txn_count, min_slot, max_slot) = if let Some(stats) = &current_stats {
+        if stats.transaction_count > 0 {
+            // Already have stats - check for new transactions after max_slot
+            let new_txns = state.clickhouse
+                .get_v2_txn_stats_after_slot(&round_address, stats.max_slot)
+                .await?;
+            
+            if new_txns.count == 0 {
+                // No new transactions - move to next round
+                *current_round += 1;
+                return Ok(BackfillResult::Progress(0));
+            }
+            
+            // Have new transactions - add to existing stats
+            (
+                stats.transaction_count + new_txns.count,
+                stats.min_slot,
+                new_txns.max_slot,
+            )
+        } else {
+            // Stats exist but count is 0 - get all transactions
+            let txn_stats = state.clickhouse
+                .get_v2_txn_stats_for_round(&round_address)
+                .await?;
+            (txn_stats.count, txn_stats.min_slot, txn_stats.max_slot)
+        }
+    } else {
+        // No stats yet - get all transactions
+        let txn_stats = state.clickhouse
+            .get_v2_txn_stats_for_round(&round_address)
+            .await?;
+        (txn_stats.count, txn_stats.min_slot, txn_stats.max_slot)
+    };
     
-    // Process in smaller batches to avoid timeouts
-    let batch_size = 10.min(round_ids.len());
-    let batch_ids = &round_ids[..batch_size];
+    // Insert/update stats
+    state.clickhouse
+        .upsert_round_transaction_stats(round_id, &round_address, txn_count, min_slot, max_slot)
+        .await?;
     
-    // Convert round_ids to (round_id, address) tuples
-    let batch: Vec<(u64, String)> = batch_ids.iter()
-        .map(|&round_id| {
-            let (pda, _) = evore::ore_api::round_pda(round_id);
-            (round_id, pda.to_string())
-        })
-        .collect();
+    // Move to next round
+    *current_round += 1;
     
-    tracing::info!("Backfilling stats for rounds: {:?}", batch_ids);
-    
-    let count = state.clickhouse.backfill_round_transaction_stats(&batch).await?;
-    
-    tracing::info!("Backfilled stats for {} rounds", count);
-    
-    Ok(BackfillResult::Progress(count))
+    Ok(BackfillResult::Progress(txn_count as usize))
 }
 
 /// Insert a single round address (called during finalization).
@@ -182,4 +219,3 @@ pub async fn insert_round_address(state: &AppState, round_id: u64) -> anyhow::Re
     tracing::debug!("Inserted round address for round {}: {}", round_id, pda);
     Ok(())
 }
-

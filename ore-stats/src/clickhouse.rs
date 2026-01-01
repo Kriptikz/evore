@@ -27,6 +27,14 @@ pub struct ClickHouseClient {
     pub client: Client,
 }
 
+/// Stats returned from v2 transaction queries
+#[derive(Debug, Default, Clone)]
+pub struct V2TxnStats {
+    pub count: u64,
+    pub min_slot: u64,
+    pub max_slot: u64,
+}
+
 impl ClickHouseClient {
     /// Create a new ClickHouse client.
     /// 
@@ -2667,81 +2675,108 @@ impl ClickHouseClient {
     
     // ========== Round Transaction Stats Backfill ==========
     
-    /// Get round_ids that don't have stats yet.
-    /// Returns up to 100 round_ids per call, ordered by round_id ASC.
-    /// We don't check if they have v2 transactions - we'll try to compute stats
-    /// and if there are none, it's just a no-op INSERT.
-    pub async fn get_rounds_needing_stats_backfill(&self) -> Result<Vec<u64>, ClickHouseError> {
-        let results: Vec<u64> = self.client
+    /// Get current stats for a specific round
+    pub async fn get_round_stats(&self, round_id: u64) -> Result<Option<RoundTransactionInfo>, ClickHouseError> {
+        let result: Option<RoundTransactionInfo> = self.client
             .query(r#"
-                SELECT ra.round_id
-                FROM round_addresses ra FINAL
-                WHERE ra.round_id NOT IN (
-                    SELECT DISTINCT round_id FROM round_transaction_stats FINAL
-                )
-                ORDER BY ra.round_id ASC
-                LIMIT 100
+                SELECT 
+                    round_id,
+                    sum(transaction_count) as transaction_count,
+                    min(min_slot) as min_slot,
+                    max(max_slot) as max_slot
+                FROM round_transaction_stats FINAL
+                WHERE round_id = ?
+                GROUP BY round_id
             "#)
-            .fetch_all()
+            .bind(round_id)
+            .fetch_optional()
             .await?;
-        Ok(results)
+        Ok(result)
     }
     
-    /// Insert round transaction stats for a batch of round_ids with their addresses.
-    /// Computes stats from raw_transactions_v2 joined with round_addresses.
-    /// If a round has no transactions, inserts a placeholder with count=0.
-    pub async fn backfill_round_transaction_stats(&self, rounds: &[(u64, String)]) -> Result<usize, ClickHouseError> {
-        if rounds.is_empty() {
-            return Ok(0);
+    /// Get transaction stats (count, min_slot, max_slot) for a round address from v2 table
+    pub async fn get_v2_txn_stats_for_round(&self, round_address: &str) -> Result<V2TxnStats, ClickHouseError> {
+        #[derive(clickhouse::Row, serde::Deserialize)]
+        struct StatsRow {
+            count: u64,
+            min_slot: u64,
+            max_slot: u64,
         }
         
-        let round_ids_str = rounds.iter()
-            .map(|(id, _)| id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
+        let result: Option<StatsRow> = self.client
+            .query(r#"
+                SELECT 
+                    count() as count,
+                    min(slot) as min_slot,
+                    max(slot) as max_slot
+                FROM raw_transactions_v2 FINAL
+                WHERE has(accounts, ?)
+            "#)
+            .bind(round_address)
+            .fetch_optional()
+            .await?;
         
-        // STEP 1: Insert placeholders FIRST for ALL rounds in batch (count=0)
-        // This ensures every round is marked as "processed" even if it has no transactions.
-        // We do this BEFORE the real stats so that if a round has transactions,
-        // the real stats will be inserted after and SummingMergeTree will add them.
-        let placeholder_query = format!(r#"
-            INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
-            SELECT 
-                ra.round_id,
-                ra.address,
-                0 AS transaction_count,
-                0 AS min_slot,
-                0 AS max_slot
-            FROM round_addresses AS ra FINAL
-            WHERE ra.round_id IN ({})
-        "#, round_ids_str);
+        Ok(result.map(|r| V2TxnStats {
+            count: r.count,
+            min_slot: r.min_slot,
+            max_slot: r.max_slot,
+        }).unwrap_or_default())
+    }
+    
+    /// Get transaction stats for new transactions after a specific slot
+    pub async fn get_v2_txn_stats_after_slot(&self, round_address: &str, after_slot: u64) -> Result<V2TxnStats, ClickHouseError> {
+        #[derive(clickhouse::Row, serde::Deserialize)]
+        struct StatsRow {
+            count: u64,
+            min_slot: u64,
+            max_slot: u64,
+        }
         
-        self.client.query(&placeholder_query).execute().await?;
+        let result: Option<StatsRow> = self.client
+            .query(r#"
+                SELECT 
+                    count() as count,
+                    min(slot) as min_slot,
+                    max(slot) as max_slot
+                FROM raw_transactions_v2 FINAL
+                WHERE has(accounts, ?) AND slot > ?
+            "#)
+            .bind(round_address)
+            .bind(after_slot)
+            .fetch_optional()
+            .await?;
         
-        // STEP 2: Insert actual stats for rounds that have transactions
-        // This will add to the placeholder's count=0 via SummingMergeTree
-        let addresses_str = rounds.iter()
-            .map(|(_, addr)| format!("'{}'", addr))
-            .collect::<Vec<_>>()
-            .join(", ");
-        
-        let query = format!(r#"
-            INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
-            SELECT 
-                ra.round_id,
-                ra.address,
-                count() AS transaction_count,
-                min(v2.slot) AS min_slot,
-                max(v2.slot) AS max_slot
-            FROM raw_transactions_v2 AS v2 FINAL
-            INNER JOIN round_addresses AS ra FINAL ON has(v2.accounts, ra.address)
-            WHERE ra.address IN ({})
-            GROUP BY ra.round_id, ra.address
-        "#, addresses_str);
-        
-        self.client.query(&query).execute().await?;
-        
-        Ok(rounds.len())
+        Ok(result.map(|r| V2TxnStats {
+            count: r.count,
+            min_slot: r.min_slot,
+            max_slot: r.max_slot,
+        }).unwrap_or_default())
+    }
+    
+    /// Insert or update round transaction stats
+    /// Uses INSERT which with SummingMergeTree will merge with existing data
+    pub async fn upsert_round_transaction_stats(
+        &self,
+        round_id: u64,
+        address: &str,
+        count: u64,
+        min_slot: u64,
+        max_slot: u64,
+    ) -> Result<(), ClickHouseError> {
+        self.client
+            .query(r#"
+                INSERT INTO round_transaction_stats 
+                (round_id, address, transaction_count, min_slot, max_slot)
+                VALUES (?, ?, ?, ?, ?)
+            "#)
+            .bind(round_id)
+            .bind(address)
+            .bind(count)
+            .bind(min_slot)
+            .bind(max_slot)
+            .execute()
+            .await?;
+        Ok(())
     }
     
     // ========== Automation States ==========
