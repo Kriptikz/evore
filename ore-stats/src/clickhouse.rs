@@ -2695,14 +2695,36 @@ impl ClickHouseClient {
             return Ok(0);
         }
         
-        // Build comma-separated addresses for the batch
+        let round_ids_str = rounds.iter()
+            .map(|(id, _)| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        // STEP 1: Insert placeholders FIRST for ALL rounds in batch (count=0)
+        // This ensures every round is marked as "processed" even if it has no transactions.
+        // We do this BEFORE the real stats so that if a round has transactions,
+        // the real stats will be inserted after and SummingMergeTree will add them.
+        let placeholder_query = format!(r#"
+            INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
+            SELECT 
+                ra.round_id,
+                ra.address,
+                0 AS transaction_count,
+                0 AS min_slot,
+                0 AS max_slot
+            FROM round_addresses AS ra FINAL
+            WHERE ra.round_id IN ({})
+        "#, round_ids_str);
+        
+        self.client.query(&placeholder_query).execute().await?;
+        
+        // STEP 2: Insert actual stats for rounds that have transactions
+        // This will add to the placeholder's count=0 via SummingMergeTree
         let addresses_str = rounds.iter()
             .map(|(_, addr)| format!("'{}'", addr))
             .collect::<Vec<_>>()
             .join(", ");
         
-        // Query transactions that contain any of these round addresses
-        // Then join back to get the round_id
         let query = format!(r#"
             INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
             SELECT 
@@ -2718,28 +2740,6 @@ impl ClickHouseClient {
         "#, addresses_str);
         
         self.client.query(&query).execute().await?;
-        
-        // Also insert a placeholder for rounds with no transactions so we don't re-check them
-        // We use 0 transaction_count as a marker
-        let round_ids_str = rounds.iter()
-            .map(|(id, _)| id.to_string())
-            .collect::<Vec<_>>()
-            .join(", ");
-        
-        let placeholder_query = format!(r#"
-            INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
-            SELECT 
-                ra.round_id,
-                ra.address,
-                0 AS transaction_count,
-                0 AS min_slot,
-                0 AS max_slot
-            FROM round_addresses AS ra FINAL
-            WHERE ra.round_id IN ({})
-              AND ra.round_id NOT IN (SELECT DISTINCT round_id FROM round_transaction_stats FINAL)
-        "#, round_ids_str);
-        
-        self.client.query(&placeholder_query).execute().await?;
         
         Ok(rounds.len())
     }
