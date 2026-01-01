@@ -2251,19 +2251,19 @@ impl ClickHouseClient {
     }
     
     /// Get list of rounds that have stored transactions (v2), with counts.
-    /// Uses round_addresses to map round_id -> address, then counts transactions in v2.
+    /// Uses the pre-computed round_transaction_stats table (populated by MV).
     pub async fn get_rounds_with_transactions(&self, limit: u32, offset: u32) -> Result<Vec<RoundTransactionInfo>, ClickHouseError> {
         let rows = self.client
             .query(r#"
                 SELECT 
-                    ra.round_id as round_id,
-                    count(DISTINCT v2.signature) as transaction_count,
-                    min(v2.slot) as min_slot,
-                    max(v2.slot) as max_slot
-                FROM round_addresses ra FINAL
-                INNER JOIN raw_transactions_v2 v2 FINAL ON has(v2.accounts, ra.address)
-                GROUP BY ra.round_id
-                ORDER BY ra.round_id DESC
+                    round_id,
+                    sum(transaction_count) as transaction_count,
+                    min(min_slot) as min_slot,
+                    max(max_slot) as max_slot
+                FROM round_transaction_stats
+                GROUP BY round_id
+                HAVING transaction_count > 0
+                ORDER BY round_id DESC
                 LIMIT ? OFFSET ?
             "#)
             .bind(limit)
@@ -2277,12 +2277,9 @@ impl ClickHouseClient {
     pub async fn get_rounds_with_transactions_count(&self) -> Result<u64, ClickHouseError> {
         let count: u64 = self.client
             .query(r#"
-                SELECT count(DISTINCT ra.round_id)
-                FROM round_addresses ra FINAL
-                WHERE EXISTS (
-                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
-                    WHERE has(v2.accounts, ra.address)
-                )
+                SELECT count(DISTINCT round_id)
+                FROM round_transaction_stats
+                WHERE transaction_count > 0
             "#)
             .fetch_one()
             .await?;
