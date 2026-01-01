@@ -2665,6 +2665,80 @@ impl ClickHouseClient {
         Ok(count >= max_round_id)
     }
     
+    // ========== Round Transaction Stats Backfill ==========
+    
+    /// Get round_ids that have addresses and v2 transactions but no stats yet.
+    /// Returns up to 100 round_ids per call.
+    pub async fn get_rounds_needing_stats_backfill(&self) -> Result<Vec<u64>, ClickHouseError> {
+        let results: Vec<u64> = self.client
+            .query(r#"
+                SELECT DISTINCT ra.round_id
+                FROM round_addresses ra FINAL
+                WHERE ra.round_id NOT IN (
+                    SELECT round_id FROM round_transaction_stats FINAL
+                )
+                AND EXISTS (
+                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
+                    WHERE has(v2.accounts, ra.address)
+                )
+                ORDER BY ra.round_id ASC
+                LIMIT 100
+            "#)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Insert round transaction stats for a batch of round_ids.
+    /// Computes stats from raw_transactions_v2 joined with round_addresses.
+    pub async fn backfill_round_transaction_stats(&self, round_ids: &[u64]) -> Result<usize, ClickHouseError> {
+        if round_ids.is_empty() {
+            return Ok(0);
+        }
+        
+        // Build the IN clause
+        let ids_str = round_ids.iter()
+            .map(|id| id.to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        
+        let query = format!(r#"
+            INSERT INTO round_transaction_stats (round_id, address, transaction_count, min_slot, max_slot)
+            SELECT 
+                ra.round_id,
+                ra.address,
+                count() AS transaction_count,
+                min(v2.slot) AS min_slot,
+                max(v2.slot) AS max_slot
+            FROM raw_transactions_v2 AS v2 FINAL
+            INNER JOIN round_addresses AS ra FINAL ON has(v2.accounts, ra.address)
+            WHERE ra.round_id IN ({})
+            GROUP BY ra.round_id, ra.address
+        "#, ids_str);
+        
+        self.client.query(&query).execute().await?;
+        Ok(round_ids.len())
+    }
+    
+    /// Check if all rounds with v2 transactions have stats.
+    pub async fn all_round_stats_complete(&self) -> Result<bool, ClickHouseError> {
+        let missing: u64 = self.client
+            .query(r#"
+                SELECT count(DISTINCT ra.round_id)
+                FROM round_addresses ra FINAL
+                WHERE ra.round_id NOT IN (
+                    SELECT round_id FROM round_transaction_stats FINAL
+                )
+                AND EXISTS (
+                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
+                    WHERE has(v2.accounts, ra.address)
+                )
+            "#)
+            .fetch_one()
+            .await?;
+        Ok(missing == 0)
+    }
+    
     // ========== Automation States ==========
     
     /// Insert an automation state snapshot.

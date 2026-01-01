@@ -1,12 +1,15 @@
-//! Round addresses backfill task
+//! Round addresses and transaction stats backfill task
 //!
-//! Background task to populate the round_addresses table with PDA mappings.
-//! This enables transaction lookups by round_id since raw_transactions_v2 uses accounts.
+//! Background task to populate:
+//! 1. round_addresses table - PDA mappings for each round
+//! 2. round_transaction_stats table - pre-computed transaction counts per round
+//!
+//! This enables fast transaction lookups by round_id.
 //!
 //! Features:
 //! - Restart-safe: checks what's already populated
 //! - Throttled: doesn't overload CPU, inserts slowly
-//! - Self-terminating: stops when all rounds are populated
+//! - Self-terminating: stops when all data is backfilled
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,33 +18,63 @@ use tokio::task::JoinHandle;
 
 use crate::app_state::AppState;
 
-/// Spawn background task to backfill round_addresses table.
+/// Spawn background task to backfill round_addresses and round_transaction_stats tables.
 /// 
 /// This task will:
-/// 1. Check if all rounds from 1 to current live round have addresses
-/// 2. If not, slowly fill in missing round PDAs
-/// 3. Stop when complete (won't restart on subsequent server starts if done)
+/// 1. First, fill in all missing round_addresses from 1 to current live round
+/// 2. Then, backfill round_transaction_stats for rounds that have v2 transactions
+/// 3. Stop when both are complete
 pub fn spawn_round_addresses_backfill(state: Arc<AppState>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        tracing::info!("Starting round addresses backfill task...");
+        tracing::info!("Starting round addresses/stats backfill task...");
         
         // Wait for startup to complete
         tokio::time::sleep(Duration::from_secs(10)).await;
         
+        let mut addresses_complete = false;
+        let mut stats_complete = false;
+        
         loop {
-            match backfill_round_addresses(&state).await {
-                Ok(BackfillResult::Complete) => {
-                    tracing::info!("Round addresses backfill complete!");
-                    break;
+            // Phase 1: Backfill round_addresses
+            if !addresses_complete {
+                match backfill_round_addresses(&state).await {
+                    Ok(BackfillResult::Complete) => {
+                        tracing::info!("Round addresses backfill complete!");
+                        addresses_complete = true;
+                    }
+                    Ok(BackfillResult::Progress(count)) => {
+                        tracing::debug!("Backfilled {} round addresses", count);
+                    }
+                    Err(e) => {
+                        tracing::error!("Round addresses backfill error: {}", e);
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
                 }
-                Ok(BackfillResult::Progress(count)) => {
-                    tracing::debug!("Backfilled {} round addresses", count);
+            }
+            
+            // Phase 2: Backfill round_transaction_stats (only after addresses are done)
+            if addresses_complete && !stats_complete {
+                match backfill_round_transaction_stats(&state).await {
+                    Ok(BackfillResult::Complete) => {
+                        tracing::info!("Round transaction stats backfill complete!");
+                        stats_complete = true;
+                    }
+                    Ok(BackfillResult::Progress(count)) => {
+                        tracing::debug!("Backfilled stats for {} rounds", count);
+                    }
+                    Err(e) => {
+                        tracing::error!("Round transaction stats backfill error: {}", e);
+                        tokio::time::sleep(Duration::from_secs(30)).await;
+                        continue;
+                    }
                 }
-                Err(e) => {
-                    tracing::error!("Round addresses backfill error: {}", e);
-                    // Wait before retrying on error
-                    tokio::time::sleep(Duration::from_secs(30)).await;
-                }
+            }
+            
+            // Both complete - exit the loop
+            if addresses_complete && stats_complete {
+                tracing::info!("All round backfills complete!");
+                break;
             }
             
             // Slow down to avoid overloading - wait between batches
@@ -98,6 +131,28 @@ async fn backfill_round_addresses(state: &AppState) -> anyhow::Result<BackfillRe
     
     // Insert batch
     state.clickhouse.insert_round_addresses(batch).await?;
+    
+    Ok(BackfillResult::Progress(count))
+}
+
+async fn backfill_round_transaction_stats(state: &AppState) -> anyhow::Result<BackfillResult> {
+    // Check if already complete
+    if state.clickhouse.all_round_stats_complete().await? {
+        return Ok(BackfillResult::Complete);
+    }
+    
+    // Get rounds that need stats (have addresses + v2 transactions but no stats)
+    let rounds_needing_stats = state.clickhouse.get_rounds_needing_stats_backfill().await?;
+    
+    if rounds_needing_stats.is_empty() {
+        return Ok(BackfillResult::Complete);
+    }
+    
+    // Process in smaller batches to avoid timeouts
+    let batch_size = 50.min(rounds_needing_stats.len());
+    let batch = &rounds_needing_stats[..batch_size];
+    
+    let count = state.clickhouse.backfill_round_transaction_stats(batch).await?;
     
     Ok(BackfillResult::Progress(count))
 }
