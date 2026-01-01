@@ -35,6 +35,7 @@ const RETRY_DELAY_MS: u64 = 500;
 /// Rate limits per provider (milliseconds between requests)
 const FLUX_MIN_INTERVAL_MS: u64 = 33;    // ~30 rps
 const HELIUS_MIN_INTERVAL_MS: u64 = 40;  // ~25 rps
+const TRITON_MIN_INTERVAL_MS: u64 = 40;  // ~25 rps
 
 /// RPC metrics context for a single request
 #[derive(Debug, Clone)]
@@ -116,28 +117,47 @@ pub struct AppRpc {
 }
 
 impl AppRpc {
-    /// Create a new AppRpc instance with Flux as primary and Helius as backup.
+    /// Create a new AppRpc instance with Flux as primary and Helius/Triton as backups.
     /// 
     /// # Arguments
     /// * `helius_rpc_url` - The Helius RPC URL (with or without https:// prefix)
     /// * `flux_rpc_url` - The Flux RPC URL (with or without https:// prefix)
+    /// * `triton_rpc_url` - Optional Triton RPC URL (with or without https:// prefix)
     /// * `clickhouse` - Optional ClickHouse client for metrics logging
-    pub fn new(helius_rpc_url: String, flux_rpc_url: String, clickhouse: Option<Arc<ClickHouseClient>>) -> Self {
-        // Create providers in priority order: Flux first, then Helius
+    pub fn new(
+        helius_rpc_url: String,
+        flux_rpc_url: String,
+        triton_rpc_url: Option<String>,
+        clickhouse: Option<Arc<ClickHouseClient>>,
+    ) -> Self {
+        // Create providers in priority order: Flux first, then Helius, then Triton
         let flux_provider = RpcProvider::new("flux", &flux_rpc_url, FLUX_MIN_INTERVAL_MS);
         let helius_provider = RpcProvider::new("helius", &helius_rpc_url, HELIUS_MIN_INTERVAL_MS);
         
-        tracing::info!(
-            "AppRpc initialized with {} providers: Flux={} ({}ms), Helius={} ({}ms)",
-            2,
-            flux_provider.url,
-            FLUX_MIN_INTERVAL_MS,
-            helius_provider.url,
-            HELIUS_MIN_INTERVAL_MS
-        );
+        let mut providers = vec![flux_provider, helius_provider];
+        
+        // Add Triton if URL is provided
+        if let Some(triton_url) = triton_rpc_url {
+            let triton_provider = RpcProvider::new("triton", &triton_url, TRITON_MIN_INTERVAL_MS);
+            tracing::info!(
+                "AppRpc initialized with {} providers: Flux ({}ms), Helius ({}ms), Triton ({}ms)",
+                3,
+                FLUX_MIN_INTERVAL_MS,
+                HELIUS_MIN_INTERVAL_MS,
+                TRITON_MIN_INTERVAL_MS
+            );
+            providers.push(triton_provider);
+        } else {
+            tracing::info!(
+                "AppRpc initialized with {} providers: Flux ({}ms), Helius ({}ms)",
+                2,
+                FLUX_MIN_INTERVAL_MS,
+                HELIUS_MIN_INTERVAL_MS
+            );
+        }
         
         Self {
-            providers: vec![flux_provider, helius_provider],
+            providers,
             clickhouse,
             program_name: "ore-stats".to_string(),
         }

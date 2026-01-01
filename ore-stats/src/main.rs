@@ -109,8 +109,9 @@ async fn main() -> anyhow::Result<()> {
 
     let rpc_url = env::var("RPC_URL").expect("RPC_URL must be set");
     let flux_rpc_url = env::var("FLUX_RPC_URL").expect("FLUX_RPC_URL must be set");
-    let rpc = Arc::new(AppRpc::new(rpc_url.clone(), flux_rpc_url.clone(), Some(clickhouse.clone())));
-    tracing::info!("RPC clients initialized (Helius + Flux)");
+    let triton_rpc_url = env::var("TRITON_RPC_URL").ok(); // Optional
+    let rpc = Arc::new(AppRpc::new(rpc_url.clone(), flux_rpc_url.clone(), triton_rpc_url, Some(clickhouse.clone())));
+    tracing::info!("RPC clients initialized (Flux + Helius + Triton)");
     
     // ========== Helius API for token holders ==========
     
