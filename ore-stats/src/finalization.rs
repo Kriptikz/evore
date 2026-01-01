@@ -487,12 +487,23 @@ pub async fn fetch_and_store_round_transactions(state: &std::sync::Arc<crate::ap
     tracing::info!("Fetching transactions for round {} (PDA: {})", round_id, round_pda_str);
     
     // Get all signatures for this round
-    let signatures = state.rpc.get_all_signatures_for_address(&round_pda_pubkey).await?;
+    let all_signatures = state.rpc.get_all_signatures_for_address(&round_pda_pubkey).await?;
+    let total_count = all_signatures.len();
     
-    tracing::info!("Round {}: fetched {} signatures", round_id, signatures.len());
+    // Filter out failed transactions (ones with errors)
+    let signatures: Vec<_> = all_signatures.into_iter()
+        .filter(|s| s.err.is_none())
+        .collect();
+    
+    let failed_count = total_count - signatures.len();
+    if failed_count > 0 {
+        tracing::info!("Round {}: filtered out {} failed transactions", round_id, failed_count);
+    }
+    
+    tracing::info!("Round {}: fetched {} successful signatures (of {} total)", round_id, signatures.len(), total_count);
     
     if signatures.is_empty() {
-        tracing::warn!("Round {}: no transactions found", round_id);
+        tracing::warn!("Round {}: no successful transactions found", round_id);
         return Ok(());
     }
     
