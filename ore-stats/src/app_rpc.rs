@@ -4,11 +4,13 @@
 //! Provides:
 //! - Rate limiting per provider
 //! - Round-robin retry with fallback across providers
+//! - Round-robin distribution for transaction fetching (to maximize throughput)
 //! - Request/response timing
 //! - Metrics logging to ClickHouse
 //! - Error tracking
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::Result;
@@ -104,12 +106,16 @@ impl RpcProvider {
 /// Central RPC gateway with metrics tracking
 /// 
 /// Uses multiple RPC providers with round-robin retry on failure:
-/// - First attempt always uses provider[0] (Flux)
-/// - On failure, rotates to next provider (Helius, then back to Flux, etc.)
+/// - First attempt always uses provider[0] (Flux) for most calls
+/// - Transaction fetching uses round-robin across ALL providers for max throughput
+/// - On failure, rotates to next provider (round-robin)
 /// - 10 total attempts with 500ms delay between retries
 pub struct AppRpc {
-    /// RPC providers in priority order: [Flux, Helius, ...]
+    /// RPC providers in priority order: [Flux, Helius, Triton, ...]
     providers: Vec<RpcProvider>,
+    
+    /// Atomic counter for round-robin provider selection (used for transaction fetching)
+    round_robin_counter: AtomicUsize,
     
     // Metrics tracking
     clickhouse: Option<Arc<ClickHouseClient>>,
@@ -158,6 +164,7 @@ impl AppRpc {
         
         Self {
             providers,
+            round_robin_counter: AtomicUsize::new(0),
             clickhouse,
             program_name: "ore-stats".to_string(),
         }
@@ -171,6 +178,14 @@ impl AppRpc {
     /// Get provider by index (wraps around)
     fn provider(&self, index: usize) -> &RpcProvider {
         &self.providers[index % self.providers.len()]
+    }
+    
+    /// Get the next provider in round-robin order (for load distribution)
+    /// Returns the provider index and a reference to the provider
+    fn next_round_robin_provider(&self) -> (usize, &RpcProvider) {
+        let index = self.round_robin_counter.fetch_add(1, Ordering::Relaxed);
+        let provider_index = index % self.providers.len();
+        (provider_index, &self.providers[provider_index])
     }
     
     /// Log successful RPC call to ClickHouse
@@ -1133,6 +1148,9 @@ impl AppRpc {
     /// Get a full transaction by signature
     /// Uses Confirmed commitment
     /// Returns the raw JSON transaction
+    /// 
+    /// Uses round-robin provider selection for the first attempt to distribute
+    /// load across all providers. Retries continue round-robin from there.
     pub async fn get_transaction(&self, signature: &str) -> Result<Option<TransactionResult>> {
         use solana_sdk::signature::Signature;
         
@@ -1149,8 +1167,11 @@ impl AppRpc {
         
         let mut last_error = String::new();
         
+        // Get starting provider via round-robin (distributes load across all providers)
+        let (start_idx, _) = self.next_round_robin_provider();
+        
         for attempt in 0..MAX_RETRIES {
-            let provider_idx = attempt % self.providers.len();
+            let provider_idx = (start_idx + attempt) % self.providers.len();
             let provider = &self.providers[provider_idx];
             
             provider.rate_limit().await;
