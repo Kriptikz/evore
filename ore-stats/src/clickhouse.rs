@@ -2250,18 +2250,20 @@ impl ClickHouseClient {
         Ok(result)
     }
     
-    /// Get list of rounds that have stored transactions, with counts.
+    /// Get list of rounds that have stored transactions (v2), with counts.
+    /// Uses round_addresses to map round_id -> address, then counts transactions in v2.
     pub async fn get_rounds_with_transactions(&self, limit: u32, offset: u32) -> Result<Vec<RoundTransactionInfo>, ClickHouseError> {
         let rows = self.client
             .query(r#"
                 SELECT 
-                    round_id,
-                    count() as transaction_count,
-                    min(slot) as min_slot,
-                    max(slot) as max_slot
-                FROM raw_transactions FINAL
-                GROUP BY round_id
-                ORDER BY round_id DESC
+                    ra.round_id as round_id,
+                    count(DISTINCT v2.signature) as transaction_count,
+                    min(v2.slot) as min_slot,
+                    max(v2.slot) as max_slot
+                FROM round_addresses ra FINAL
+                INNER JOIN raw_transactions_v2 v2 FINAL ON has(v2.accounts, ra.address)
+                GROUP BY ra.round_id
+                ORDER BY ra.round_id DESC
                 LIMIT ? OFFSET ?
             "#)
             .bind(limit)
@@ -2271,10 +2273,17 @@ impl ClickHouseClient {
         Ok(rows)
     }
     
-    /// Get total count of unique rounds with stored transactions.
+    /// Get total count of unique rounds with stored transactions (v2).
     pub async fn get_rounds_with_transactions_count(&self) -> Result<u64, ClickHouseError> {
         let count: u64 = self.client
-            .query("SELECT count(DISTINCT round_id) FROM raw_transactions FINAL")
+            .query(r#"
+                SELECT count(DISTINCT ra.round_id)
+                FROM round_addresses ra FINAL
+                WHERE EXISTS (
+                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
+                    WHERE has(v2.accounts, ra.address)
+                )
+            "#)
             .fetch_one()
             .await?;
         Ok(count)
@@ -2506,6 +2515,157 @@ impl ClickHouseClient {
             .fetch_optional()
             .await?;
         Ok(result)
+    }
+    
+    // ========== Round Addresses ==========
+    
+    /// Insert a round address mapping.
+    pub async fn insert_round_address(&self, round_id: u64, address: &str) -> Result<(), ClickHouseError> {
+        self.client
+            .query("INSERT INTO round_addresses (round_id, address) VALUES (?, ?)")
+            .bind(round_id)
+            .bind(address)
+            .execute()
+            .await?;
+        Ok(())
+    }
+    
+    /// Insert multiple round address mappings.
+    pub async fn insert_round_addresses(&self, mappings: Vec<(u64, String)>) -> Result<(), ClickHouseError> {
+        if mappings.is_empty() {
+            return Ok(());
+        }
+        
+        // Use batch insert for efficiency
+        let values: Vec<String> = mappings.iter()
+            .map(|(id, addr)| format!("({}, '{}')", id, addr))
+            .collect();
+        
+        let query = format!(
+            "INSERT INTO round_addresses (round_id, address) VALUES {}",
+            values.join(", ")
+        );
+        
+        self.client.query(&query).execute().await?;
+        Ok(())
+    }
+    
+    /// Get address for a specific round.
+    pub async fn get_round_address(&self, round_id: u64) -> Result<Option<String>, ClickHouseError> {
+        let result: Option<String> = self.client
+            .query("SELECT address FROM round_addresses FINAL WHERE round_id = ? LIMIT 1")
+            .bind(round_id)
+            .fetch_optional()
+            .await?;
+        Ok(result)
+    }
+    
+    /// Check if a round address exists.
+    pub async fn round_address_exists(&self, round_id: u64) -> Result<bool, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count() FROM round_addresses FINAL WHERE round_id = ?")
+            .bind(round_id)
+            .fetch_one()
+            .await?;
+        Ok(count > 0)
+    }
+    
+    /// Get all rounds that have addresses stored (useful for transaction analyzer).
+    pub async fn get_rounds_with_addresses(&self) -> Result<Vec<u64>, ClickHouseError> {
+        let results: Vec<u64> = self.client
+            .query("SELECT round_id FROM round_addresses FINAL ORDER BY round_id DESC")
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get rounds that have transactions in raw_transactions_v2.
+    /// Uses the round_addresses table to map round_id -> address, then checks if that address
+    /// has transactions in raw_transactions_v2.
+    pub async fn get_rounds_with_v2_transactions(&self) -> Result<Vec<u64>, ClickHouseError> {
+        let results: Vec<u64> = self.client
+            .query(r#"
+                SELECT DISTINCT ra.round_id
+                FROM round_addresses ra FINAL
+                WHERE EXISTS (
+                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
+                    WHERE has(v2.accounts, ra.address)
+                )
+                ORDER BY ra.round_id DESC
+            "#)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Get count of rounds that have v2 transactions.
+    pub async fn get_rounds_with_v2_transactions_count(&self) -> Result<u64, ClickHouseError> {
+        let count: u64 = self.client
+            .query(r#"
+                SELECT count(DISTINCT ra.round_id)
+                FROM round_addresses ra FINAL
+                WHERE EXISTS (
+                    SELECT 1 FROM raw_transactions_v2 v2 FINAL
+                    WHERE has(v2.accounts, ra.address)
+                )
+            "#)
+            .fetch_one()
+            .await?;
+        Ok(count)
+    }
+    
+    /// Get the maximum round_id in round_addresses table.
+    pub async fn get_max_round_address_id(&self) -> Result<Option<u64>, ClickHouseError> {
+        let result: Option<u64> = self.client
+            .query("SELECT max(round_id) FROM round_addresses FINAL")
+            .fetch_optional()
+            .await?;
+        // max() returns 0 for empty table, so check if there are any rows
+        if let Some(max) = result {
+            if max == 0 {
+                let count: u64 = self.client
+                    .query("SELECT count() FROM round_addresses FINAL")
+                    .fetch_one()
+                    .await?;
+                if count == 0 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(max))
+        } else {
+            Ok(None)
+        }
+    }
+    
+    /// Get missing round_ids from 1 to max_round_id (for round_addresses backfill).
+    /// Returns a list of round_ids that don't have an address mapping yet.
+    pub async fn get_missing_round_address_ids(&self, max_round_id: u64) -> Result<Vec<u64>, ClickHouseError> {
+        // Generate sequence from 1 to max_round_id and find gaps
+        let results: Vec<u64> = self.client
+            .query(r#"
+                SELECT n.number + 1 as round_id
+                FROM numbers(?) n
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM round_addresses ra FINAL
+                    WHERE ra.round_id = n.number + 1
+                )
+                ORDER BY round_id ASC
+                LIMIT 1000
+            "#)
+            .bind(max_round_id)
+            .fetch_all()
+            .await?;
+        Ok(results)
+    }
+    
+    /// Check if all rounds from 1 to max_round_id have addresses.
+    pub async fn all_round_addresses_complete(&self, max_round_id: u64) -> Result<bool, ClickHouseError> {
+        let count: u64 = self.client
+            .query("SELECT count() FROM round_addresses FINAL WHERE round_id <= ?")
+            .bind(max_round_id)
+            .fetch_one()
+            .await?;
+        Ok(count >= max_round_id)
     }
     
     // ========== Automation States ==========

@@ -53,6 +53,7 @@ mod tx_analyzer;
 // - old_rpc.rs
 mod account_tracker;
 mod custom_rpc;
+mod round_addresses;
 mod txn_backfill;
 
 use app_state::AppState;
@@ -216,6 +217,14 @@ async fn main() -> anyhow::Result<()> {
         });
         tracing::info!("Backfill action queue worker started");
     }
+    
+    // Transaction migration background task (old raw_transactions -> v2)
+    let _txn_migration_handle = txn_backfill::spawn_txn_backfill_task(state.clone());
+    tracing::info!("Transaction migration backfill task started");
+    
+    // Round addresses backfill (maps round_id -> PDA for transaction lookups)
+    let _round_addresses_handle = round_addresses::spawn_round_addresses_backfill(state.clone());
+    tracing::info!("Round addresses backfill task started");
     
     // ========== Axum Router ==========
     

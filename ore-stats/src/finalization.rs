@@ -42,6 +42,11 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     let end_slot = live_round.end_slot;
     drop(round_cache);
     
+    // Store round address mapping (for transaction lookups by round)
+    if let Err(e) = crate::round_addresses::insert_round_address(state, round_id).await {
+        tracing::warn!("Failed to insert round address for round {}: {}", round_id, e);
+    }
+    
     // === STEP 1: Wait 10 seconds for transactions to settle ===
     tracing::info!("Round {} ending - waiting 10 seconds for transactions to settle...", round_id);
     tokio::time::sleep(Duration::from_secs(10)).await;
@@ -59,11 +64,11 @@ pub async fn capture_round_snapshot(state: &AppState) -> Option<RoundSnapshot> {
     // - Round-robin across providers (Flux first, then Helius, etc.)
     // - Validates at least 10,000 miners for a complete snapshot
     let gpa_result = match state.rpc.get_all_miners_gpa(treasury_for_gpa.as_ref()).await {
-        Ok(miners) => {
+            Ok(miners) => {
             tracing::info!("GPA miners snapshot: {} miners fetched", miners.len());
             Some(miners)
-        }
-        Err(e) => {
+            }
+            Err(e) => {
             tracing::error!("GPA miners snapshot failed after all retries: {}", e);
             None
         }
@@ -301,9 +306,9 @@ pub async fn finalize_round(
     match wait_for_round_finalization(state, round_id, &snapshot).await {
         Ok(finalized_round) => {
             // SUCCESS: Full finalization with top_miner
-            let rng = finalized_round.rng().ok_or_else(|| {
-                anyhow::anyhow!("Round {} still has no slot_hash after waiting", round_id)
-            })?;
+    let rng = finalized_round.rng().ok_or_else(|| {
+        anyhow::anyhow!("Round {} still has no slot_hash after waiting", round_id)
+    })?;
             
             store_finalized_round(state, &snapshot, &finalized_round, rng).await?;
             tracing::info!("Round {} finalized successfully", round_id);
@@ -557,7 +562,7 @@ pub async fn fetch_and_store_round_transactions(state: &std::sync::Arc<crate::ap
         state.clickhouse.insert_raw_transactions_v2(tx_rows).await?;
     }
     
-    tracing::info!(
+        tracing::info!(
         "Round {}: stored {} transactions ({} signatures total)",
         round_id, stored_count, signatures.len()
     );
@@ -581,7 +586,7 @@ async fn store_partial_round(
             tracing::error!("Failed to fetch round {} for partial storage: {}", round_id, e);
             // Create placeholder partial round
             let partial = PartialRoundInsert::from_snapshot(
-                round_id,
+            round_id,
                 snapshot.start_slot,
                 snapshot.end_slot,
                 [0u8; 32], // No slot_hash available
@@ -610,11 +615,11 @@ async fn store_partial_round(
     };
     
     let partial = PartialRoundInsert::from_snapshot(
-        round_id,
+            round_id,
         snapshot.start_slot,
         snapshot.end_slot,
         round.slot_hash,
-        winning_square,
+            winning_square,
         round.total_deployed,
         round.total_vaulted,
         round.total_winnings,
