@@ -136,6 +136,30 @@ impl ClickHouseClient {
         Ok(count > 0)
     }
     
+    /// Get the highest round_id stored in the rounds table.
+    pub async fn get_highest_round_id(&self) -> Result<Option<u64>, ClickHouseError> {
+        let result: Option<u64> = self.client
+            .query("SELECT max(round_id) FROM rounds FINAL")
+            .fetch_optional()
+            .await?;
+        
+        // max() returns 0 for empty table, so check if there are any rows
+        if let Some(max_id) = result {
+            if max_id == 0 {
+                let count: u64 = self.client
+                    .query("SELECT count() FROM rounds FINAL")
+                    .fetch_one()
+                    .await?;
+                if count == 0 {
+                    return Ok(None);
+                }
+            }
+            Ok(Some(max_id))
+        } else {
+            Ok(None)
+        }
+    }
+    
     /// Delete a round by ID (for re-backfill).
     pub async fn delete_round(&self, round_id: u64) -> Result<u64, ClickHouseError> {
         // ClickHouse uses ALTER TABLE ... DELETE for MergeTree tables

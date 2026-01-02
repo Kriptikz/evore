@@ -307,27 +307,17 @@ pub async fn backfill_rounds(
 
 /// The actual background task that fetches missing rounds from the external API.
 /// 
-/// The external API has ALL rounds in sequential order with NO gaps.
-/// 
-/// Simple logic:
-/// 1. Fetch page 0 to get highest_round and per_page
-/// 2. Find next missing round in ClickHouse (highest missing between stop_at_round+1 and highest_round)
-/// 3. Calculate which page that round is on: page = (highest_round - target_round) / per_page
-/// 4. Fetch that page
-/// 5. If page_first > target_round: go back a page (page - 1)
-///    If page_last < target_round: go forward a page (page + 1)
-///    Otherwise: round is on this page, find and store it
-/// 6. Once found, find the next missing round and repeat
-/// 7. Stop when no more missing rounds or we reach stop_at_round
+/// Simple sequential logic:
+/// 1. Find our highest round_id in ClickHouse (this is our starting point)
+/// 2. Fetch page 0 to get the external API's highest_round and per_page
+/// 3. Calculate which page contains our highest round
+/// 4. Go page by page from there, storing any missing rounds
+/// 5. Stop when we reach stop_at_round or run out of pages
 async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_pages: u32) {
     use crate::app_state::BackfillTaskStatus;
-    use std::collections::HashSet;
     
     let start_time = std::time::Instant::now();
     let mut pages_fetched: u32 = 0;
-    
-    // Cache of rounds not found in external API (skipped during this run)
-    let mut skipped_rounds: HashSet<u64> = HashSet::new();
     
     // Helper to check cancellation
     let check_cancelled = || async {
@@ -335,7 +325,24 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
         *cancel
     };
     
-    // STEP 1: Fetch page 0 to get highest_round and per_page
+    // STEP 1: Find our highest round_id in ClickHouse
+    let our_highest_round = match state.clickhouse.get_highest_round_id().await {
+        Ok(Some(id)) => id,
+        Ok(None) => 0, // No rounds stored yet, start from beginning
+        Err(e) => {
+            tracing::error!("Failed to get highest round from ClickHouse: {}", e);
+            let mut task_state = state.backfill_rounds_task_state.write().await;
+            task_state.status = BackfillTaskStatus::Failed;
+            task_state.error = Some(format!("ClickHouse query failed: {}", e));
+            task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
+            task_state.last_updated = chrono::Utc::now();
+            return;
+        }
+    };
+    
+    tracing::info!("Our highest round in ClickHouse: {}", our_highest_round);
+    
+    // STEP 2: Fetch page 0 to get external API's highest_round and per_page
     tracing::info!("Fetching page 0 to get highest_round and per_page");
     let first_page = get_ore_supply_rounds(0).await;
     pages_fetched += 1;
@@ -350,27 +357,42 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
         return;
     }
     
-    let per_page = first_page.len();
-    let highest_round = first_page.first().map(|r| r.round_id as u64).unwrap_or(0);
+    let per_page = first_page.len() as u64;
+    let api_highest_round = first_page.first().map(|r| r.round_id as u64).unwrap_or(0);
     
-    tracing::info!("External API: highest_round={}, per_page={}", highest_round, per_page);
+    tracing::info!("External API: highest_round={}, per_page={}", api_highest_round, per_page);
     
     // Update initial state
     {
         let mut task_state = state.backfill_rounds_task_state.write().await;
-        task_state.first_round_id_seen = Some(highest_round);
-        task_state.per_page = per_page;
-        if highest_round > stop_at_round {
-            task_state.estimated_total_rounds = Some(highest_round - stop_at_round);
+        task_state.first_round_id_seen = Some(api_highest_round);
+        task_state.per_page = per_page as usize;
+        if api_highest_round > stop_at_round {
+            task_state.estimated_total_rounds = Some(api_highest_round - stop_at_round);
         }
         task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
         task_state.last_updated = chrono::Utc::now();
     }
     
-    // Store any missing rounds from page 0
+    // Store any missing rounds from page 0 (newest rounds)
     store_missing_rounds_from_page(&state, &first_page, stop_at_round).await;
     
-    // MAIN LOOP: Find and fetch each missing round
+    // STEP 3: Calculate starting page (page containing our highest round)
+    // Page 0 has newest rounds, higher pages have older rounds
+    // If our_highest_round is 100k and api is 107k with 100 per page:
+    // (107k - 100k) / 100 = 70 -> start at page 70
+    let start_page = if our_highest_round > 0 && api_highest_round > our_highest_round {
+        ((api_highest_round - our_highest_round) / per_page) as u32
+    } else {
+        1 // Start from page 1 (we already fetched page 0)
+    };
+    
+    tracing::info!("Starting sequential fetch from page {} (our_highest={}, api_highest={})", 
+        start_page, our_highest_round, api_highest_round);
+    
+    // STEP 4: Go page by page, storing missing rounds
+    let mut current_page = start_page;
+    
     loop {
         // Check for cancellation
         if check_cancelled().await {
@@ -388,146 +410,47 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
             break;
         }
         
-        // STEP 2: Find the next missing round in ClickHouse (excluding already-skipped rounds)
-        let next_missing = match state.clickhouse.find_next_missing_round_in_range_excluding(
-            stop_at_round + 1, 
-            highest_round,
-            &skipped_rounds,
-        ).await {
-            Ok(Some(round_id)) => round_id,
-            Ok(None) => {
-                tracing::info!("No more missing rounds between {} and {}", stop_at_round + 1, highest_round);
-                break;
-            }
-            Err(e) => {
-                tracing::error!("Failed to find missing round: {}", e);
-                let mut task_state = state.backfill_rounds_task_state.write().await;
-                task_state.status = BackfillTaskStatus::Failed;
-                task_state.error = Some(format!("ClickHouse query failed: {}", e));
-                task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
-                task_state.last_updated = chrono::Utc::now();
-                return;
-            }
-        };
+        // Rate limit (be nice to the external API)
+        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
         
-        tracing::info!("Next missing round: {}", next_missing);
-        
-        // Update state with target round
+        // Update current page in state
         {
             let mut task_state = state.backfill_rounds_task_state.write().await;
-            task_state.last_round_id_processed = Some(next_missing);
-            task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
-            task_state.last_updated = chrono::Utc::now();
-        }
-        
-        // STEP 3: Calculate which page this round should be on
-        // Page 0 has rounds [highest_round, highest_round - per_page + 1]
-        // Page N has rounds [highest_round - N*per_page, highest_round - (N+1)*per_page + 1]
-        let rounds_from_highest = highest_round.saturating_sub(next_missing);
-        let mut target_page = (rounds_from_highest / per_page as u64) as u32;
-        
-        tracing::info!("Calculated target page: {} (rounds_from_highest={})", target_page, rounds_from_highest);
-        
-        // STEP 4-5: Fetch pages until we find the round
-        let mut found = false;
-        let mut search_attempts = 0;
-        const MAX_SEARCH_ATTEMPTS: u32 = 10; // Prevent infinite loops
-        
-        while !found && search_attempts < MAX_SEARCH_ATTEMPTS {
-            search_attempts += 1;
-            
-            // Check for cancellation
-            if check_cancelled().await {
-                tracing::info!("Backfill task cancelled during search");
-                let mut task_state = state.backfill_rounds_task_state.write().await;
-                task_state.status = BackfillTaskStatus::Cancelled;
-                task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
-                task_state.last_updated = chrono::Utc::now();
-                return;
-            }
-            
-            // Rate limit
-            tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
-            
-            // Update current page
-            {
-                let mut task_state = state.backfill_rounds_task_state.write().await;
-                task_state.current_page = target_page;
+            task_state.current_page = current_page;
                 task_state.elapsed_ms = start_time.elapsed().as_millis() as u64;
                 task_state.last_updated = chrono::Utc::now();
             }
             
             // Fetch the page
-            tracing::info!("Fetching page {} looking for round {}", target_page, next_missing);
-            let page_rounds = get_ore_supply_rounds(target_page as u64).await;
+        tracing::info!("Fetching page {}", current_page);
+        let page_rounds = get_ore_supply_rounds(current_page as u64).await;
             pages_fetched += 1;
             
             if page_rounds.is_empty() {
-                tracing::warn!("Page {} is empty, this shouldn't happen", target_page);
+            tracing::info!("Page {} is empty, reached end of external API data", current_page);
                 break;
             }
             
             let page_first = page_rounds.first().map(|r| r.round_id as u64).unwrap_or(0);
             let page_last = page_rounds.last().map(|r| r.round_id as u64).unwrap_or(0);
             
-            tracing::info!("Page {} contains rounds {} to {}", target_page, page_first, page_last);
-            
-            // Check if target round is on this page
-            if page_last > next_missing {
-                // Target round is on a later page (lower round numbers = higher page numbers)
-                tracing::info!("Round {} is below page range [{}, {}], going to next page", next_missing, page_first, page_last);
-                target_page += 1;
-                continue;
-            }
-            
-            if page_first < next_missing {
-                // Target round is on an earlier page (higher round numbers = lower page numbers)
-                if target_page == 0 {
-                    tracing::error!("Round {} should be above page 0 but isn't found!", next_missing);
+        tracing::info!("Page {} contains rounds {} to {}", current_page, page_first, page_last);
+        
+        // Check if we've gone past stop_at_round
+        if page_first <= stop_at_round {
+            tracing::info!("Reached stop_at_round {} (page_first={})", stop_at_round, page_first);
+            // Still store any rounds above stop_at_round from this page
+            store_missing_rounds_from_page(&state, &page_rounds, stop_at_round).await;
                     break;
-                }
-                tracing::info!("Round {} is above page range [{}, {}], going to previous page", next_missing, page_first, page_last);
-                target_page -= 1;
-                continue;
             }
             
-            // Target round should be on this page (page_last <= next_missing <= page_first)
             // Store all missing rounds from this page
             let stored = store_missing_rounds_from_page(&state, &page_rounds, stop_at_round).await;
             
-            // Verify the round was found
-            if page_rounds.iter().any(|r| r.round_id as u64 == next_missing) {
-                found = true;
-                tracing::info!("Found and stored round {} (plus {} other missing rounds from page)", next_missing, stored.saturating_sub(1));
-            } else {
-                // Round not on this page even though it should be - external API has a gap
-                tracing::warn!("Round {} not found on page {} (range [{}, {}]) - external API gap, skipping", 
-                    next_missing, target_page, page_first, page_last);
-                
-                // Add to skipped set so we don't keep looking for this round
-                skipped_rounds.insert(next_missing);
-                
-                {
-                    let mut task_state = state.backfill_rounds_task_state.write().await;
-                    task_state.rounds_not_in_external_api += 1;
-                }
-                
-                found = true; // Mark as "handled" so we continue to next missing round
-            }
-        }
+        tracing::info!("Page {}: stored {} missing rounds", current_page, stored);
         
-        if !found {
-            // This means we hit MAX_SEARCH_ATTEMPTS without finding the round
-            // External API doesn't have this round, skip it
-            tracing::warn!("Round {} not found after {} attempts - external API gap, skipping", next_missing, search_attempts);
-            
-            skipped_rounds.insert(next_missing);
-            
-            {
-                let mut task_state = state.backfill_rounds_task_state.write().await;
-                task_state.rounds_not_in_external_api += 1;
-            }
-        }
+        // Move to next page (older rounds)
+        current_page += 1;
     }
     
     // Mark as completed
@@ -538,10 +461,9 @@ async fn run_backfill_rounds_task(state: Arc<AppState>, stop_at_round: u64, max_
     task_state.last_updated = chrono::Utc::now();
     
     tracing::info!(
-        "Backfill complete: {} fetched, {} skipped, {} not in external API, {} pages in {:?}",
+        "Backfill complete: {} fetched, {} skipped, {} pages in {:?}",
         task_state.rounds_fetched,
         task_state.rounds_skipped,
-        task_state.rounds_not_in_external_api,
         pages_fetched,
         start_time.elapsed()
     );
@@ -720,8 +642,8 @@ pub async fn fetch_round_transactions(
     
     if let Err(e) = state.clickhouse.insert_signatures(sig_rows).await {
         tracing::error!("Failed to store signatures: {}", e);
-        return Err((
-            StatusCode::INTERNAL_SERVER_ERROR,
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: format!("Failed to store signatures: {}", e) }),
         ));
     }
