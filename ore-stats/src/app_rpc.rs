@@ -1147,7 +1147,7 @@ impl AppRpc {
     
     /// Get all signatures for an address, retrying with different providers if 0 are found.
     /// This is for backfill operations where 0 signatures indicates an RPC issue, not missing data.
-    /// Tries each provider in round-robin order until signatures are found or all fail.
+    /// Starts with the last provider (Triton) for better historical data access, then tries others.
     pub async fn get_all_signatures_for_address_with_retry(
         &self,
         address: &Pubkey,
@@ -1160,9 +1160,13 @@ impl AppRpc {
             batch_size: 0,
         };
         
+        // Start with the last provider (Triton) for backfill operations
+        // Triton tends to have better historical data availability
+        let start_idx = self.providers.len().saturating_sub(1);
+        
         // Try each provider
         for attempt in 0..self.providers.len() {
-            let provider_idx = attempt % self.providers.len();
+            let provider_idx = (start_idx + attempt) % self.providers.len();
             let provider = &self.providers[provider_idx];
             
             tracing::debug!("Trying {} for signatures of {}", provider.name, address);
@@ -1360,6 +1364,98 @@ impl AppRpc {
         }
         
         Err(anyhow::anyhow!("All {} getTransaction attempts failed: {}", MAX_RETRIES, last_error))
+    }
+    
+    /// Get a full transaction by signature for backfill operations.
+    /// Starts with the last provider (Triton) for better historical data availability.
+    /// Uses Confirmed commitment.
+    pub async fn get_transaction_for_backfill(&self, signature: &str) -> Result<Option<TransactionResult>> {
+        use solana_sdk::signature::Signature;
+        
+        let sig = signature.parse::<Signature>()
+            .map_err(|e| anyhow::anyhow!("Invalid signature: {}", e))?;
+        
+        let ctx = RpcContext {
+            method: "getTransaction".to_string(),
+            target_type: "transaction_backfill".to_string(),
+            target_address: signature.to_string(),
+            is_batch: false,
+            batch_size: 1,
+        };
+        
+        let mut last_error = String::new();
+        
+        // Start with the last provider (Triton) for backfill - better historical data
+        let start_idx = self.providers.len().saturating_sub(1);
+        
+        for attempt in 0..MAX_RETRIES {
+            let provider_idx = (start_idx + attempt) % self.providers.len();
+            let provider = &self.providers[provider_idx];
+            
+            provider.rate_limit().await;
+            let start = Instant::now();
+            
+            use solana_client::rpc_request::RpcRequest;
+            use serde_json::json;
+            
+            let params = json!([
+                sig.to_string(),
+                {
+                    "encoding": "json",
+                    "commitment": "confirmed",
+                    "maxSupportedTransactionVersion": 0
+                }
+            ]);
+            
+            let result: Result<serde_json::Value, _> = provider.client
+                .send(RpcRequest::GetTransaction, params)
+                .await;
+            
+            match result {
+                Ok(tx_json) => {
+                    if tx_json.is_null() {
+                        let duration_ms = start.elapsed().as_millis() as u32;
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 0, 0).await;
+                        return Ok(None);
+                    }
+                    
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    let slot = tx_json.get("slot").and_then(|s| s.as_u64()).unwrap_or(0);
+                    let block_time = tx_json.get("blockTime").and_then(|t| t.as_i64());
+                    let raw_json = serde_json::to_string(&tx_json)
+                        .map_err(|e| anyhow::anyhow!("Failed to serialize transaction: {}", e))?;
+                    
+                    self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 1, raw_json.len() as u32).await;
+                    
+                    return Ok(Some(TransactionResult {
+                        signature: signature.to_string(),
+                        slot,
+                        block_time,
+                        raw_json,
+                    }));
+                }
+                Err(e) => {
+                    last_error = e.to_string();
+                    let duration_ms = start.elapsed().as_millis() as u32;
+                    
+                    if last_error.contains("not found") || last_error.contains("Transaction version") {
+                        self.log_success(&provider.name, &provider.api_key_id, &ctx, duration_ms, 0, 0).await;
+                        return Ok(None);
+                    }
+                    
+                    tracing::warn!(
+                        "getTransaction backfill ({}) failed (attempt {}/{}): {}",
+                        provider.name, attempt + 1, MAX_RETRIES, last_error
+                    );
+                    self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &last_error).await;
+                    if attempt < MAX_RETRIES - 1 {
+                        tokio::time::sleep(Duration::from_millis(RETRY_DELAY_MS)).await;
+                    }
+                }
+            }
+        }
+        
+        Err(anyhow::anyhow!("All {} getTransaction backfill attempts failed: {}", MAX_RETRIES, last_error))
     }
 }
 

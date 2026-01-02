@@ -690,7 +690,7 @@ pub async fn fetch_round_transactions(
                 let slot = sig_info.slot;
                 let rpc = state.rpc.clone();
                 async move {
-                    let result = rpc.get_transaction(&sig).await;
+                    let result = rpc.get_transaction_for_backfill(&sig).await;
                     (sig, slot, result)
                 }
             }).collect();
@@ -3059,7 +3059,7 @@ async fn execute_fetch_txns(state: &Arc<AppState>, round_id: u64) -> Result<(), 
                 let slot = sig_info.slot;
                 let rpc = state.rpc.clone();
                 async move {
-                    let result = rpc.get_transaction(&sig).await;
+                    let result = rpc.get_transaction_for_backfill(&sig).await;
                     (sig, slot, result)
                 }
             }).collect();
