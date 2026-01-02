@@ -596,7 +596,7 @@ pub async fn get_pending_rounds(
 }
 
 /// POST /admin/fetch-txns/{round_id}
-/// Fetch transactions for a round via Flux RPC and store to ClickHouse v2 tables
+/// Fetch transactions for a round via concurrent RPC and store to ClickHouse v2 tables
 pub async fn fetch_round_transactions(
     State(state): State<Arc<AppState>>,
     Path(round_id): Path<u64>,
@@ -604,14 +604,14 @@ pub async fn fetch_round_transactions(
     use crate::clickhouse::{RawTransactionV2, SignatureRow};
     use crate::txn_backfill::parse_transaction_accounts;
     
-    tracing::info!("Fetching transactions for round {} via Flux RPC", round_id);
+    tracing::info!("Fetching transactions for round {}", round_id);
     
     // Get round PDA
     let round_pda = evore::ore_api::round_pda(round_id).0;
     let round_pda_str = round_pda.to_string();
     
     // Fetch all signatures for the round
-    let signatures = match state.rpc.get_all_signatures_for_address(&round_pda).await {
+    let all_signatures = match state.rpc.get_all_signatures_for_address(&round_pda).await {
         Ok(sigs) => sigs,
         Err(e) => {
             tracing::error!("Failed to fetch signatures for round {}: {}", round_id, e);
@@ -622,7 +622,12 @@ pub async fn fetch_round_transactions(
         }
     };
     
-    tracing::info!("Round {}: fetched {} signatures", round_id, signatures.len());
+    // Filter out failed transactions
+    let signatures: Vec<_> = all_signatures.into_iter()
+        .filter(|s| s.err.is_none())
+        .collect();
+    
+    tracing::info!("Round {}: fetched {} successful signatures", round_id, signatures.len());
     
     if signatures.is_empty() {
         return Ok(Json(FetchTxnsResponse {
@@ -642,64 +647,74 @@ pub async fn fetch_round_transactions(
     
     if let Err(e) = state.clickhouse.insert_signatures(sig_rows).await {
         tracing::error!("Failed to store signatures: {}", e);
-                return Err((
-                    StatusCode::INTERNAL_SERVER_ERROR,
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
             Json(ErrorResponse { error: format!("Failed to store signatures: {}", e) }),
         ));
     }
     
-    // Fetch and store full transactions
-    let mut tx_rows: Vec<RawTransactionV2> = Vec::new();
-    let mut stored_count = 0u32;
-    
+    // Filter to signatures not already stored
+    let mut sigs_to_fetch = Vec::new();
     for sig_info in &signatures {
-        // Check if already stored
-        if state.clickhouse.transaction_exists_v2(&sig_info.signature).await.unwrap_or(false) {
-            continue;
+        if !state.clickhouse.transaction_exists_v2(&sig_info.signature).await.unwrap_or(true) {
+            sigs_to_fetch.push(sig_info.clone());
         }
-        
-        // Fetch full transaction
-        match state.rpc.get_transaction(&sig_info.signature).await {
-            Ok(Some(tx)) => {
-                // Parse accounts from raw JSON
-                let accounts = match parse_transaction_accounts(&tx.raw_json) {
-                    Ok(acc) => acc,
-                    Err(_) => vec![round_pda_str.clone()],
-                };
-                
-                tx_rows.push(RawTransactionV2 {
-                    signature: sig_info.signature.clone(),
-                    slot: sig_info.slot,
-                    block_time: tx.block_time.unwrap_or(0),
-                    accounts,
-                    raw_json: tx.raw_json,
-                });
-                
-                stored_count += 1;
-                
-                // Batch insert every 50 transactions
-                if tx_rows.len() >= 50 {
-                    if let Err(e) = state.clickhouse.insert_raw_transactions_v2(tx_rows.drain(..).collect()).await {
-                        tracing::error!("Failed to store transactions: {}", e);
-                    }
-                }
-            }
-            Ok(None) => {
-                tracing::debug!("Transaction {} not found", sig_info.signature);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to fetch transaction {}: {}", sig_info.signature, e);
-            }
-        }
-        
-        // Small delay for rate limiting
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     
-    // Insert remaining transactions
-    if !tx_rows.is_empty() {
-        if let Err(e) = state.clickhouse.insert_raw_transactions_v2(tx_rows).await {
-            tracing::error!("Failed to store remaining transactions: {}", e);
+    tracing::info!("Round {}: {} txns need fetching ({} already stored)", 
+        round_id, sigs_to_fetch.len(), signatures.len() - sigs_to_fetch.len());
+    
+    // Fetch transactions concurrently in batches of 100
+    const BATCH_SIZE: usize = 100;
+    let mut stored_count = 0u32;
+    
+    for batch in sigs_to_fetch.chunks(BATCH_SIZE) {
+        // Spawn all fetch requests concurrently
+        let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
+            let sig = sig_info.signature.clone();
+            let slot = sig_info.slot;
+            let rpc = state.rpc.clone();
+            async move {
+                let result = rpc.get_transaction(&sig).await;
+                (sig, slot, result)
+            }
+        }).collect();
+        
+        // Wait for all requests in this batch
+        let results = futures::future::join_all(fetch_futures).await;
+        
+        // Process results
+        let mut tx_rows = Vec::new();
+        for (sig, slot, result) in results {
+            match result {
+                Ok(Some(tx)) => {
+                    let accounts = parse_transaction_accounts(&tx.raw_json)
+                        .unwrap_or_else(|_| vec![round_pda_str.clone()]);
+                    
+                    tx_rows.push(RawTransactionV2 {
+                        signature: sig,
+                        slot,
+                        block_time: tx.block_time.unwrap_or(0),
+                        accounts,
+                        raw_json: tx.raw_json,
+                    });
+                    
+                    stored_count += 1;
+                }
+                Ok(None) => {
+                    tracing::debug!("Transaction {} not found", sig);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to fetch transaction {}: {}", sig, e);
+                }
+            }
+        }
+        
+        // Insert this batch
+        if !tx_rows.is_empty() {
+            if let Err(e) = state.clickhouse.insert_raw_transactions_v2(tx_rows).await {
+                tracing::error!("Failed to store transactions: {}", e);
+            }
         }
     }
     
@@ -2944,7 +2959,7 @@ async fn execute_queue_action(state: &Arc<AppState>, item: &QueuedAction) -> Res
     }
 }
 
-/// Execute fetch_txns action using Flux RPC
+/// Execute fetch_txns action using concurrent RPC fetching
 async fn execute_fetch_txns(state: &Arc<AppState>, round_id: u64) -> Result<(), String> {
     use crate::clickhouse::{RawTransactionV2, SignatureRow};
     use crate::txn_backfill::parse_transaction_accounts;
@@ -2953,17 +2968,22 @@ async fn execute_fetch_txns(state: &Arc<AppState>, round_id: u64) -> Result<(), 
     let round_pda = evore::ore_api::round_pda(round_id).0;
     let round_pda_str = round_pda.to_string();
     
-    // Fetch all signatures for the round via Flux RPC
-    let signatures = state.rpc.get_all_signatures_for_address(&round_pda).await
+    // Fetch all signatures for the round
+    let all_signatures = state.rpc.get_all_signatures_for_address(&round_pda).await
         .map_err(|e| format!("RPC error: {}", e))?;
     
+    // Filter out failed transactions
+    let signatures: Vec<_> = all_signatures.into_iter()
+        .filter(|s| s.err.is_none())
+        .collect();
+    
     if signatures.is_empty() {
-        return Err("No transactions found".to_string());
+        return Err("No successful transactions found".to_string());
     }
     
     tracing::debug!("Queue: Round {} fetched {} signatures", round_id, signatures.len());
     
-    // Store signatures
+    // Store signatures with round PDA
     let sig_rows: Vec<SignatureRow> = signatures.iter().map(|s| SignatureRow {
         signature: s.signature.clone(),
         slot: s.slot,
@@ -2974,47 +2994,66 @@ async fn execute_fetch_txns(state: &Arc<AppState>, round_id: u64) -> Result<(), 
     state.clickhouse.insert_signatures(sig_rows).await
         .map_err(|e| format!("Failed to store signatures: {}", e))?;
     
-    // Fetch and store full transactions
-    let mut tx_rows: Vec<RawTransactionV2> = Vec::new();
-    let mut stored_count = 0usize;
-    
+    // Filter to signatures not already stored
+    let mut sigs_to_fetch = Vec::new();
     for sig_info in &signatures {
-        if state.clickhouse.transaction_exists_v2(&sig_info.signature).await.unwrap_or(false) {
-            continue;
+        if !state.clickhouse.transaction_exists_v2(&sig_info.signature).await.unwrap_or(true) {
+            sigs_to_fetch.push(sig_info.clone());
         }
-        
-        match state.rpc.get_transaction(&sig_info.signature).await {
-            Ok(Some(tx)) => {
-                let accounts = parse_transaction_accounts(&tx.raw_json)
-                    .unwrap_or_else(|_| vec![round_pda_str.clone()]);
-                
-                tx_rows.push(RawTransactionV2 {
-                    signature: sig_info.signature.clone(),
-                    slot: sig_info.slot,
-                    block_time: tx.block_time.unwrap_or(0),
-                    accounts,
-                    raw_json: tx.raw_json,
-                });
-                
-                stored_count += 1;
-                
-                if tx_rows.len() >= 50 {
-                    state.clickhouse.insert_raw_transactions_v2(tx_rows.drain(..).collect()).await
-                        .map_err(|e| format!("ClickHouse insert error: {}", e))?;
-                }
-            }
-            Ok(None) => {}
-            Err(e) => {
-                tracing::warn!("Queue: Failed to fetch tx {}: {}", sig_info.signature, e);
-            }
-        }
-        
-        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
     }
     
-    if !tx_rows.is_empty() {
-        state.clickhouse.insert_raw_transactions_v2(tx_rows).await
-            .map_err(|e| format!("ClickHouse insert error: {}", e))?;
+    tracing::debug!("Queue: Round {} - {} txns need fetching ({} already stored)", 
+        round_id, sigs_to_fetch.len(), signatures.len() - sigs_to_fetch.len());
+    
+    // Fetch transactions concurrently in batches of 100
+    const BATCH_SIZE: usize = 100;
+    let mut stored_count = 0usize;
+    
+    for batch in sigs_to_fetch.chunks(BATCH_SIZE) {
+        // Spawn all fetch requests concurrently
+        let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
+            let sig = sig_info.signature.clone();
+            let slot = sig_info.slot;
+            let rpc = state.rpc.clone();
+            async move {
+                let result = rpc.get_transaction(&sig).await;
+                (sig, slot, result)
+            }
+        }).collect();
+        
+        // Wait for all requests in this batch
+        let results = futures::future::join_all(fetch_futures).await;
+        
+        // Process results
+        let mut tx_rows = Vec::new();
+        for (sig, slot, result) in results {
+            match result {
+                Ok(Some(tx)) => {
+                    let accounts = parse_transaction_accounts(&tx.raw_json)
+                        .unwrap_or_else(|_| vec![round_pda_str.clone()]);
+                    
+                    tx_rows.push(RawTransactionV2 {
+                        signature: sig,
+                        slot,
+                        block_time: tx.block_time.unwrap_or(0),
+                        accounts,
+                        raw_json: tx.raw_json,
+                    });
+                    
+                    stored_count += 1;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("Queue: Failed to fetch tx {}: {}", sig, e);
+                }
+            }
+        }
+        
+        // Insert this batch
+        if !tx_rows.is_empty() {
+            state.clickhouse.insert_raw_transactions_v2(tx_rows).await
+                .map_err(|e| format!("ClickHouse insert error: {}", e))?;
+        }
     }
     
     // Update round_reconstruction_status
