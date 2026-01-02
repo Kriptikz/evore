@@ -530,65 +530,96 @@ pub async fn fetch_and_store_round_transactions(state: &std::sync::Arc<crate::ap
     // Fetch transactions concurrently in batches of 100
     // RPC providers have built-in rate limiting, so we can fire many requests at once
     const BATCH_SIZE: usize = 100;
+    const MAX_RETRIES: usize = 3;
     let mut stored_count = 0;
+    let mut pending_sigs = sigs_to_fetch;
     
-    for batch in sigs_to_fetch.chunks(BATCH_SIZE) {
-        // Spawn all fetch requests concurrently (don't await individually)
-        let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
-            let sig = sig_info.signature.clone();
-            let slot = sig_info.slot;
-            let rpc = state.rpc.clone();
-            async move {
-                let result = rpc.get_transaction(&sig).await;
-                (sig, slot, result)
-            }
-        }).collect();
+    for retry_attempt in 0..MAX_RETRIES {
+        if pending_sigs.is_empty() {
+            break;
+        }
         
-        // Wait for all requests in this batch to complete
-        let results = futures::future::join_all(fetch_futures).await;
+        if retry_attempt > 0 {
+            tracing::info!("Round {}: retry attempt {} for {} failed transactions", 
+                round_id, retry_attempt, pending_sigs.len());
+            // Small delay before retry
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
         
-        // Process results
-        let mut tx_rows = Vec::new();
-        for (sig, slot, result) in results {
-            match result {
-                Ok(Some(tx)) => {
-                    // Parse accounts from raw JSON
-                    let accounts = match parse_transaction_accounts(&tx.raw_json) {
-                        Ok(acc) => acc,
-                        Err(e) => {
-                            tracing::warn!(
-                                "Failed to parse accounts for tx {}: {}. Using round PDA only.",
-                                sig, e
-                            );
-                            vec![round_pda_str.clone()]
+        let mut failed_sigs = Vec::new();
+        
+        for batch in pending_sigs.chunks(BATCH_SIZE) {
+            // Spawn all fetch requests concurrently (don't await individually)
+            let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
+                let sig = sig_info.signature.clone();
+                let slot = sig_info.slot;
+                let rpc = state.rpc.clone();
+                async move {
+                    let result = rpc.get_transaction(&sig).await;
+                    (sig, slot, result)
+                }
+            }).collect();
+            
+            // Wait for all requests in this batch to complete
+            let results = futures::future::join_all(fetch_futures).await;
+            
+            // Process results
+            let mut tx_rows = Vec::new();
+            for (sig, slot, result) in results {
+                match result {
+                    Ok(Some(tx)) => {
+                        // Parse accounts from raw JSON
+                        let accounts = match parse_transaction_accounts(&tx.raw_json) {
+                            Ok(acc) => acc,
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Failed to parse accounts for tx {}: {}. Using round PDA only.",
+                                    sig, e
+                                );
+                                vec![round_pda_str.clone()]
+                            }
+                        };
+                        
+                        tx_rows.push(RawTransactionV2 {
+                            signature: sig,
+                            slot,
+                            block_time: tx.block_time.unwrap_or(0),
+                            accounts,
+                            raw_json: tx.raw_json,
+                        });
+                        
+                        stored_count += 1;
+                    }
+                    Ok(None) => {
+                        // Transaction not found - might be too old, don't retry
+                        tracing::debug!("Transaction {} not found (may be too old)", sig);
+                    }
+                    Err(e) => {
+                        // RPC error - add to retry list
+                        tracing::warn!("Failed to fetch transaction {}: {}", sig, e);
+                        // Find the original sig_info to retry
+                        if let Some(sig_info) = batch.iter().find(|s| s.signature == sig) {
+                            failed_sigs.push(sig_info.clone());
                         }
-                    };
-                    
-                    tx_rows.push(RawTransactionV2 {
-                        signature: sig,
-                        slot,
-                        block_time: tx.block_time.unwrap_or(0),
-                        accounts,
-                        raw_json: tx.raw_json,
-                    });
-                    
-                    stored_count += 1;
-                }
-                Ok(None) => {
-                    tracing::debug!("Transaction {} not found (may be too old)", sig);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to fetch transaction {}: {}", sig, e);
+                    }
                 }
             }
+            
+            // Insert this batch to ClickHouse
+            if !tx_rows.is_empty() {
+                state.clickhouse.insert_raw_transactions_v2(tx_rows).await?;
+            }
+            
+            tracing::debug!("Round {}: processed batch of {} transactions", round_id, batch.len());
         }
         
-        // Insert this batch to ClickHouse
-        if !tx_rows.is_empty() {
-            state.clickhouse.insert_raw_transactions_v2(tx_rows).await?;
-        }
-        
-        tracing::debug!("Round {}: processed batch of {} transactions", round_id, batch.len());
+        // Set up for next retry attempt
+        pending_sigs = failed_sigs;
+    }
+    
+    if !pending_sigs.is_empty() {
+        tracing::warn!("Round {}: {} transactions failed after {} retries", 
+            round_id, pending_sigs.len(), MAX_RETRIES);
     }
     
         tracing::info!(

@@ -1145,6 +1145,121 @@ impl AppRpc {
         Ok(all_sigs)
     }
     
+    /// Get all signatures for an address, retrying with different providers if 0 are found.
+    /// This is for backfill operations where 0 signatures indicates an RPC issue, not missing data.
+    /// Tries each provider in round-robin order until signatures are found or all fail.
+    pub async fn get_all_signatures_for_address_with_retry(
+        &self,
+        address: &Pubkey,
+    ) -> Result<Vec<solana_client::rpc_response::RpcConfirmedTransactionStatusWithSignature>> {
+        let ctx = RpcContext {
+            method: "getSignaturesForAddress".to_string(),
+            target_type: "signatures_backfill".to_string(),
+            target_address: address.to_string(),
+            is_batch: false,
+            batch_size: 0,
+        };
+        
+        // Try each provider
+        for attempt in 0..self.providers.len() {
+            let provider_idx = attempt % self.providers.len();
+            let provider = &self.providers[provider_idx];
+            
+            tracing::debug!("Trying {} for signatures of {}", provider.name, address);
+            
+            // Fetch signatures using this provider directly
+            let mut all_sigs = Vec::new();
+            let mut before: Option<String> = None;
+            let mut fetch_failed = false;
+            
+            loop {
+                provider.rate_limit().await;
+                let start = Instant::now();
+                
+                let before_sig = if let Some(ref sig_str) = before {
+                    sig_str.parse::<solana_sdk::signature::Signature>().ok()
+                } else {
+                    None
+                };
+                
+                let result = match before_sig {
+                    Some(before) => {
+                        provider.client.get_signatures_for_address_with_config(
+                            address,
+                            solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
+                                before: Some(before),
+                                until: None,
+                                limit: Some(1000),
+                                commitment: Some(solana_sdk::commitment_config::CommitmentConfig {
+                                    commitment: solana_sdk::commitment_config::CommitmentLevel::Confirmed,
+                                }),
+                            },
+                        ).await
+                    }
+                    None => {
+                        provider.client.get_signatures_for_address_with_config(
+                            address,
+                            solana_client::rpc_client::GetConfirmedSignaturesForAddress2Config {
+                                before: None,
+                                until: None,
+                                limit: Some(1000),
+                                commitment: Some(solana_sdk::commitment_config::CommitmentConfig {
+                                    commitment: solana_sdk::commitment_config::CommitmentLevel::Confirmed,
+                                }),
+                            },
+                        ).await
+                    }
+                };
+                
+                match result {
+                    Ok((sigs, _response_size)) => {
+                        let count = sigs.len();
+                        if let Some(last) = sigs.last() {
+                            before = Some(last.signature.clone());
+                        }
+                        all_sigs.extend(sigs);
+                        
+                        if count < 1000 {
+                            break; // No more pages
+                        }
+                    }
+                    Err(e) => {
+                        let duration_ms = start.elapsed().as_millis() as u32;
+                        tracing::warn!(
+                            "getSignaturesForAddress ({}) failed: {}",
+                            provider.name, e
+                        );
+                        self.log_error(&provider.name, &provider.api_key_id, &ctx, duration_ms, &e.to_string()).await;
+                        fetch_failed = true;
+                        break;
+                    }
+                }
+            }
+            
+            if fetch_failed {
+                continue; // Try next provider
+            }
+            
+            // If we got signatures, return them
+            if !all_sigs.is_empty() {
+                tracing::debug!("Got {} signatures from {}", all_sigs.len(), provider.name);
+                return Ok(all_sigs);
+            }
+            
+            // 0 signatures - try next provider
+            tracing::warn!(
+                "Got 0 signatures from {} for {}, trying next provider",
+                provider.name, address
+            );
+        }
+        
+        // All providers returned 0 or failed
+        Err(anyhow::anyhow!(
+            "All {} providers returned 0 signatures for {}",
+            self.providers.len(), address
+        ))
+    }
+    
     /// Get a full transaction by signature
     /// Uses Confirmed commitment
     /// Returns the raw JSON transaction

@@ -610,8 +610,8 @@ pub async fn fetch_round_transactions(
     let round_pda = evore::ore_api::round_pda(round_id).0;
     let round_pda_str = round_pda.to_string();
     
-    // Fetch all signatures for the round
-    let all_signatures = match state.rpc.get_all_signatures_for_address(&round_pda).await {
+    // Fetch all signatures for the round (retries with different providers if 0 found)
+    let all_signatures = match state.rpc.get_all_signatures_for_address_with_retry(&round_pda).await {
         Ok(sigs) => sigs,
         Err(e) => {
             tracing::error!("Failed to fetch signatures for round {}: {}", round_id, e);
@@ -664,58 +664,86 @@ pub async fn fetch_round_transactions(
     tracing::info!("Round {}: {} txns need fetching ({} already stored)", 
         round_id, sigs_to_fetch.len(), signatures.len() - sigs_to_fetch.len());
     
-    // Fetch transactions concurrently in batches of 100
+    // Fetch transactions concurrently in batches of 100 with retry
     const BATCH_SIZE: usize = 100;
+    const MAX_RETRIES: usize = 3;
     let mut stored_count = 0u32;
+    let mut pending_sigs = sigs_to_fetch;
     
-    for batch in sigs_to_fetch.chunks(BATCH_SIZE) {
-        // Spawn all fetch requests concurrently
-        let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
-            let sig = sig_info.signature.clone();
-            let slot = sig_info.slot;
-            let rpc = state.rpc.clone();
-            async move {
-                let result = rpc.get_transaction(&sig).await;
-                (sig, slot, result)
+    for retry_attempt in 0..MAX_RETRIES {
+        if pending_sigs.is_empty() {
+            break;
+        }
+        
+        if retry_attempt > 0 {
+            tracing::info!("Round {}: retry attempt {} for {} failed transactions", 
+                round_id, retry_attempt, pending_sigs.len());
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        
+        let mut failed_sigs = Vec::new();
+        
+        for batch in pending_sigs.chunks(BATCH_SIZE) {
+            // Spawn all fetch requests concurrently
+            let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
+                let sig = sig_info.signature.clone();
+                let slot = sig_info.slot;
+                let rpc = state.rpc.clone();
+                async move {
+                    let result = rpc.get_transaction(&sig).await;
+                    (sig, slot, result)
+                }
+            }).collect();
+            
+            // Wait for all requests in this batch
+            let results = futures::future::join_all(fetch_futures).await;
+            
+            // Process results
+            let mut tx_rows = Vec::new();
+            for (sig, slot, result) in results {
+                match result {
+                    Ok(Some(tx)) => {
+                        let accounts = parse_transaction_accounts(&tx.raw_json)
+                            .unwrap_or_else(|_| vec![round_pda_str.clone()]);
+                        
+                        tx_rows.push(RawTransactionV2 {
+                            signature: sig,
+                            slot,
+                            block_time: tx.block_time.unwrap_or(0),
+                            accounts,
+                            raw_json: tx.raw_json,
+                        });
+                        
+                        stored_count += 1;
+                    }
+                    Ok(None) => {
+                        // Transaction not found - don't retry
+                        tracing::debug!("Transaction {} not found", sig);
+                    }
+                    Err(e) => {
+                        // RPC error - add to retry list
+                        tracing::warn!("Failed to fetch transaction {}: {}", sig, e);
+                        if let Some(sig_info) = batch.iter().find(|s| s.signature == sig) {
+                            failed_sigs.push(sig_info.clone());
+                        }
+                    }
+                }
             }
-        }).collect();
-        
-        // Wait for all requests in this batch
-        let results = futures::future::join_all(fetch_futures).await;
-        
-        // Process results
-        let mut tx_rows = Vec::new();
-        for (sig, slot, result) in results {
-            match result {
-                Ok(Some(tx)) => {
-                    let accounts = parse_transaction_accounts(&tx.raw_json)
-                        .unwrap_or_else(|_| vec![round_pda_str.clone()]);
-                    
-                    tx_rows.push(RawTransactionV2 {
-                        signature: sig,
-                        slot,
-                        block_time: tx.block_time.unwrap_or(0),
-                        accounts,
-                        raw_json: tx.raw_json,
-                    });
-                    
-                    stored_count += 1;
-                }
-                Ok(None) => {
-                    tracing::debug!("Transaction {} not found", sig);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to fetch transaction {}: {}", sig, e);
+            
+            // Insert this batch
+            if !tx_rows.is_empty() {
+                if let Err(e) = state.clickhouse.insert_raw_transactions_v2(tx_rows).await {
+                    tracing::error!("Failed to store transactions: {}", e);
                 }
             }
         }
         
-        // Insert this batch
-        if !tx_rows.is_empty() {
-            if let Err(e) = state.clickhouse.insert_raw_transactions_v2(tx_rows).await {
-                tracing::error!("Failed to store transactions: {}", e);
-            }
-        }
+        pending_sigs = failed_sigs;
+    }
+    
+    if !pending_sigs.is_empty() {
+        tracing::warn!("Round {}: {} transactions failed after {} retries", 
+            round_id, pending_sigs.len(), MAX_RETRIES);
     }
     
     // Update PostgreSQL status
@@ -2968,8 +2996,8 @@ async fn execute_fetch_txns(state: &Arc<AppState>, round_id: u64) -> Result<(), 
     let round_pda = evore::ore_api::round_pda(round_id).0;
     let round_pda_str = round_pda.to_string();
     
-    // Fetch all signatures for the round
-    let all_signatures = state.rpc.get_all_signatures_for_address(&round_pda).await
+    // Fetch all signatures for the round (retries with different providers if 0 found)
+    let all_signatures = state.rpc.get_all_signatures_for_address_with_retry(&round_pda).await
         .map_err(|e| format!("RPC error: {}", e))?;
     
     // Filter out failed transactions
@@ -3005,55 +3033,84 @@ async fn execute_fetch_txns(state: &Arc<AppState>, round_id: u64) -> Result<(), 
     tracing::debug!("Queue: Round {} - {} txns need fetching ({} already stored)", 
         round_id, sigs_to_fetch.len(), signatures.len() - sigs_to_fetch.len());
     
-    // Fetch transactions concurrently in batches of 100
+    // Fetch transactions concurrently in batches of 100 with retry
     const BATCH_SIZE: usize = 100;
+    const MAX_RETRIES: usize = 3;
     let mut stored_count = 0usize;
+    let mut pending_sigs = sigs_to_fetch;
     
-    for batch in sigs_to_fetch.chunks(BATCH_SIZE) {
-        // Spawn all fetch requests concurrently
-        let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
-            let sig = sig_info.signature.clone();
-            let slot = sig_info.slot;
-            let rpc = state.rpc.clone();
-            async move {
-                let result = rpc.get_transaction(&sig).await;
-                (sig, slot, result)
+    for retry_attempt in 0..MAX_RETRIES {
+        if pending_sigs.is_empty() {
+            break;
+        }
+        
+        if retry_attempt > 0 {
+            tracing::info!("Queue: Round {} retry attempt {} for {} failed transactions", 
+                round_id, retry_attempt, pending_sigs.len());
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        
+        let mut failed_sigs = Vec::new();
+        
+        for batch in pending_sigs.chunks(BATCH_SIZE) {
+            // Spawn all fetch requests concurrently
+            let fetch_futures: Vec<_> = batch.iter().map(|sig_info| {
+                let sig = sig_info.signature.clone();
+                let slot = sig_info.slot;
+                let rpc = state.rpc.clone();
+                async move {
+                    let result = rpc.get_transaction(&sig).await;
+                    (sig, slot, result)
+                }
+            }).collect();
+            
+            // Wait for all requests in this batch
+            let results = futures::future::join_all(fetch_futures).await;
+            
+            // Process results
+            let mut tx_rows = Vec::new();
+            for (sig, slot, result) in results {
+                match result {
+                    Ok(Some(tx)) => {
+                        let accounts = parse_transaction_accounts(&tx.raw_json)
+                            .unwrap_or_else(|_| vec![round_pda_str.clone()]);
+                        
+                        tx_rows.push(RawTransactionV2 {
+                            signature: sig,
+                            slot,
+                            block_time: tx.block_time.unwrap_or(0),
+                            accounts,
+                            raw_json: tx.raw_json,
+                        });
+                        
+                        stored_count += 1;
+                    }
+                    Ok(None) => {
+                        // Transaction not found - don't retry
+                    }
+                    Err(e) => {
+                        // RPC error - add to retry list
+                        tracing::warn!("Queue: Failed to fetch tx {}: {}", sig, e);
+                        if let Some(sig_info) = batch.iter().find(|s| s.signature == sig) {
+                            failed_sigs.push(sig_info.clone());
+                        }
+                    }
+                }
             }
-        }).collect();
-        
-        // Wait for all requests in this batch
-        let results = futures::future::join_all(fetch_futures).await;
-        
-        // Process results
-        let mut tx_rows = Vec::new();
-        for (sig, slot, result) in results {
-            match result {
-                Ok(Some(tx)) => {
-                    let accounts = parse_transaction_accounts(&tx.raw_json)
-                        .unwrap_or_else(|_| vec![round_pda_str.clone()]);
-                    
-                    tx_rows.push(RawTransactionV2 {
-                        signature: sig,
-                        slot,
-                        block_time: tx.block_time.unwrap_or(0),
-                        accounts,
-                        raw_json: tx.raw_json,
-                    });
-                    
-                    stored_count += 1;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!("Queue: Failed to fetch tx {}: {}", sig, e);
-                }
+            
+            // Insert this batch
+            if !tx_rows.is_empty() {
+                state.clickhouse.insert_raw_transactions_v2(tx_rows).await
+                    .map_err(|e| format!("ClickHouse insert error: {}", e))?;
             }
         }
         
-        // Insert this batch
-        if !tx_rows.is_empty() {
-            state.clickhouse.insert_raw_transactions_v2(tx_rows).await
-                .map_err(|e| format!("ClickHouse insert error: {}", e))?;
-        }
+        pending_sigs = failed_sigs;
+    }
+    
+    if !pending_sigs.is_empty() {
+        tracing::warn!("Queue: Round {} - {} transactions failed after {} retries", 
+            round_id, pending_sigs.len(), MAX_RETRIES);
     }
     
     // Update round_reconstruction_status
