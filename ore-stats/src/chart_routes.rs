@@ -157,6 +157,7 @@ impl From<TreasuryHourlyRow> for TreasuryHourlyResponse {
 #[derive(Debug, Serialize)]
 pub struct MintHourlyResponse {
     pub hour: u32,
+    pub supply_start: u64,
     pub supply: u64,
     pub supply_change_total: i64,
     pub round_count: u32,
@@ -166,6 +167,7 @@ impl From<MintHourlyRow> for MintHourlyResponse {
     fn from(row: MintHourlyRow) -> Self {
         Self {
             hour: row.hour,
+            supply_start: row.supply_start,
             supply: row.supply,
             supply_change_total: row.supply_change_total,
             round_count: row.round_count,

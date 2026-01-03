@@ -70,7 +70,7 @@ interface SeriesConfig {
   type?: "area" | "line" | "bar";
 }
 
-type DisplayMode = "standard" | "full_precision" | "delta_focus";
+type DisplayMode = "standard" | "full_precision" | "delta_focus" | "full_delta";
 
 interface ChartConfig {
   id: string;
@@ -247,7 +247,8 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
       
       // Parse display mode
       const displayMode: DisplayMode = displayModeStr === "full" ? "full_precision" 
-        : displayModeStr === "delta" ? "delta_focus" 
+        : displayModeStr === "delta" ? "delta_focus"
+        : displayModeStr === "fd" ? "full_delta"
         : "standard";
 
       configs.push({
@@ -299,7 +300,8 @@ function chartsToUrlParam(charts: ChartConfig[]): string {
     
     // Display mode
     const displayMode = c.displayMode === "full_precision" ? "full" 
-      : c.displayMode === "delta_focus" ? "delta" 
+      : c.displayMode === "delta_focus" ? "delta"
+      : c.displayMode === "full_delta" ? "fd"
       : "std";
     
     return `${c.type}:${c.range}:${series}:${scale}:${style}:${grid}:${brush}:${viewMode}:${roundRange}:${brushRange}:${displayMode}`;
@@ -406,6 +408,7 @@ function transformChartData(type: ChartType, data: unknown[], range: TimeRange, 
     case "mint":
       return (data as (MintHourlyData | MintDailyData)[]).map(d => ({
         ...d,
+        supply_start: ((d as MintHourlyData).supply_start || (d as MintDailyData).supply_start || 0) / 1e11,
         supply: (d.supply || 0) / 1e11,
         supply_change_total: (d.supply_change_total || 0) / 1e11,
       }));
@@ -544,22 +547,27 @@ interface CustomTooltipProps {
   label?: string | number;
   xFormatter: (value: number) => string;
   seriesConfigs: SeriesConfig[];
+  useFullPrecision?: boolean;
 }
 
-function CustomTooltip({ active, payload, label, xFormatter, seriesConfigs }: CustomTooltipProps) {
+function CustomTooltip({ active, payload, label, xFormatter, seriesConfigs, useFullPrecision }: CustomTooltipProps) {
   if (!active || !payload || payload.length === 0) return null;
 
   const formatValue = (key: string, value: number): string => {
     const config = seriesConfigs.find(s => s.key === key);
-    if (!config) return formatters.number(value);
+    if (!config) return useFullPrecision ? formatters.numberFull(value) : formatters.number(value);
     
     if (config.unit === "SOL") {
-      return `${value.toFixed(4)} SOL`;
+      return `${value.toFixed(6)} SOL`;
     }
     if (config.unit === "ORE") {
+      // Value is already converted to ORE (divided by 1e11), so just format it
+      if (useFullPrecision) {
+        return `${value.toLocaleString(undefined, { minimumFractionDigits: 4, maximumFractionDigits: 4 })} ORE`;
+      }
       return `${formatters.ore(value * 1e11)} ORE`;
     }
-    return formatters.number(value);
+    return useFullPrecision ? formatters.numberFull(value) : formatters.number(value);
   };
 
   return (
@@ -732,8 +740,8 @@ function ChartOptions({
               <span className="text-xs text-slate-300">Show Brush (zoom)</span>
             </label>
 
-            {/* Display Mode - only show for mint/inflation charts */}
-            {(config.type === "mint" || config.type === "inflation") && (
+            {/* Display Mode - show for charts with large values that need precision/zoom */}
+            {(config.type === "mint" || config.type === "inflation" || config.type === "treasury") && (
               <div>
                 <label className="text-xs text-slate-400 block mb-1.5">Display Mode</label>
                 <div className="flex flex-col gap-1">
@@ -758,14 +766,14 @@ function ChartOptions({
                     Full Precision
                   </button>
                   <button
-                    onClick={() => onUpdate({ displayMode: "delta_focus" })}
+                    onClick={() => onUpdate({ displayMode: "full_delta" })}
                     className={`px-2 py-1 text-xs rounded text-left ${
-                      config.displayMode === "delta_focus"
+                      config.displayMode === "full_delta"
                         ? "bg-amber-500/20 text-amber-400"
                         : "bg-slate-700 text-slate-400"
                     }`}
                   >
-                    Delta Focus (auto-zoom)
+                    Full + Auto-Zoom
                   </button>
                 </div>
               </div>
@@ -954,16 +962,16 @@ function DynamicChart({
           yAxisId="left"
           stroke={chartTheme.axis.stroke}
           tick={{ fill: chartTheme.axis.tick.fill, fontSize: 10 }}
-          tickFormatter={config.displayMode === "full_precision" ? formatters.numberFull : formatters.number}
+          tickFormatter={config.displayMode === "full_precision" || config.displayMode === "full_delta" ? formatters.numberFull : formatters.number}
           tickLine={false}
           axisLine={false}
           scale={config.scale}
           domain={
-            config.displayMode === "delta_focus" 
+            config.displayMode === "delta_focus" || config.displayMode === "full_delta"
               ? calculateDeltaFocusDomain(data, enabledConfigs.filter(s => s.yAxisId !== "right").map(s => s.key))
               : config.scale === "log" ? ["auto", "auto"] : undefined
           }
-          width={config.displayMode === "full_precision" ? 80 : 55}
+          width={config.displayMode === "full_precision" || config.displayMode === "full_delta" ? 90 : 55}
         />
 
         {hasRightAxis && (
@@ -986,6 +994,7 @@ function DynamicChart({
             <CustomTooltip
               xFormatter={xFormatter}
               seriesConfigs={seriesConfigs}
+              useFullPrecision={config.displayMode === "full_precision" || config.displayMode === "full_delta"}
             />
           }
         />

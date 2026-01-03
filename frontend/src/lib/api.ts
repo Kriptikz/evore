@@ -1853,6 +1853,7 @@ export interface TreasuryHourlyData {
 
 export interface MintHourlyData {
   hour: number;  // Unix timestamp
+  supply_start: number;
   supply: number;
   supply_change_total: number;
   round_count: number;
