@@ -144,7 +144,7 @@ const CHART_SERIES: Record<ChartType, SeriesConfig[]> = {
     { key: "circulating_end", name: "Circulating", color: colors.primary, unit: "ORE", type: "area" },
     { key: "market_inflation_total", name: "Market Inflation", color: colors.positive, unit: "ORE", yAxisId: "right", type: "bar" },
     { key: "ore_claimed_total", name: "ORE Claimed", color: colors.cyan, unit: "ORE", yAxisId: "right", type: "line" },
-    { key: "ore_burned_total", name: "ORE Burned", color: colors.negative, unit: "ORE", yAxisId: "right", type: "line" },
+    { key: "ore_burned_total", name: "ORE Buried", color: colors.negative, unit: "ORE", yAxisId: "right", type: "line" },
     { key: "supply_change_total", name: "Supply Change", color: colors.blue, unit: "ORE", yAxisId: "right", type: "line" },
     { key: "supply_end", name: "Total Supply", color: colors.purple, unit: "ORE", type: "line" },
   ],
