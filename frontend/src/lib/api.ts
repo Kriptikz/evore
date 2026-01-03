@@ -1873,6 +1873,9 @@ export interface InflationHourlyData {
   unclaimed_end: number;
   unclaimed_change_total: number;
   circulating_end: number;
+  ore_won_total: number;
+  ore_claimed_total: number;
+  ore_burned_total: number;
   market_inflation_total: number;
   rounds_count: number;
 }
@@ -1882,8 +1885,14 @@ export interface InflationDailyData {
   supply_start: number;
   supply_end: number;
   supply_change_total: number;
+  unclaimed_start: number;
+  unclaimed_end: number;
+  unclaimed_change_total: number;
   circulating_start: number;
   circulating_end: number;
+  ore_won_total: number;
+  ore_claimed_total: number;
+  ore_burned_total: number;
   market_inflation_total: number;
   rounds_count: number;
 }

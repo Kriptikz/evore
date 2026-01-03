@@ -1109,6 +1109,9 @@ impl ClickHouseClient {
                 unclaimed_end,
                 unclaimed_change_total,
                 circulating_end,
+                ore_won_total,
+                ore_claimed_total,
+                ore_burned_total,
                 market_inflation_total,
                 rounds_count
             FROM inflation_hourly FINAL
@@ -1133,8 +1136,14 @@ impl ClickHouseClient {
                 supply_start,
                 supply_end,
                 supply_change_total,
+                unclaimed_start,
+                unclaimed_end,
+                unclaimed_change_total,
                 circulating_start,
                 circulating_end,
+                ore_won_total,
+                ore_claimed_total,
+                ore_burned_total,
                 market_inflation_total,
                 rounds_count
             FROM inflation_daily FINAL
@@ -4763,6 +4772,9 @@ pub struct InflationHourlyRow {
     pub unclaimed_end: u64,
     pub unclaimed_change_total: i64,
     pub circulating_end: u64,
+    pub ore_won_total: u64,
+    pub ore_claimed_total: i64,
+    pub ore_burned_total: i64,
     pub market_inflation_total: i64,
     pub rounds_count: u32,
 }
@@ -4774,8 +4786,14 @@ pub struct InflationDailyRow {
     pub supply_start: u64,
     pub supply_end: u64,
     pub supply_change_total: i64,
+    pub unclaimed_start: u64,
+    pub unclaimed_end: u64,
+    pub unclaimed_change_total: i64,
     pub circulating_start: u64,
     pub circulating_end: u64,
+    pub ore_won_total: u64,
+    pub ore_claimed_total: i64,
+    pub ore_burned_total: i64,
     pub market_inflation_total: i64,
     pub rounds_count: u32,
 }

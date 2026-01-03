@@ -70,6 +70,8 @@ interface SeriesConfig {
   type?: "area" | "line" | "bar";
 }
 
+type DisplayMode = "standard" | "full_precision" | "delta_focus";
+
 interface ChartConfig {
   id: string;
   type: ChartType;
@@ -81,6 +83,8 @@ interface ChartConfig {
   showBrush: boolean;
   // View mode: aggregate (time-based) or direct (round-based)
   viewMode: ViewMode;
+  // Display mode for formatting (primarily for mint/supply charts)
+  displayMode: DisplayMode;
   // For direct mode: round range
   roundStart?: number;
   roundEnd?: number | "live";
@@ -139,6 +143,8 @@ const CHART_SERIES: Record<ChartType, SeriesConfig[]> = {
   inflation: [
     { key: "circulating_end", name: "Circulating", color: colors.primary, unit: "ORE", type: "area" },
     { key: "market_inflation_total", name: "Market Inflation", color: colors.positive, unit: "ORE", yAxisId: "right", type: "bar" },
+    { key: "ore_claimed_total", name: "ORE Claimed", color: colors.cyan, unit: "ORE", yAxisId: "right", type: "line" },
+    { key: "ore_burned_total", name: "ORE Burned", color: colors.negative, unit: "ORE", yAxisId: "right", type: "line" },
     { key: "supply_change_total", name: "Supply Change", color: colors.blue, unit: "ORE", yAxisId: "right", type: "line" },
     { key: "supply_end", name: "Total Supply", color: colors.purple, unit: "ORE", type: "line" },
   ],
@@ -181,14 +187,15 @@ const MAX_CHARTS = 6;
 // URL State Management
 // ============================================================================
 
-// Format: c=type:range:series:scale:style:grid:brush:viewMode:roundRange:brushRange|...
+// Format: c=type:range:series:scale:style:grid:brush:viewMode:roundRange:brushRange:displayMode|...
 // roundRange = start-end (e.g., 100-live or 100-200)
 // brushRange = startIdx-endIdx (e.g., 0-live or 50-100)
 function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
   const chartsParam = searchParams.get("c");
   const defaultConfig = (): ChartConfig => ({
     id: "1", type: "rounds", range: "7d", enabledSeries: DEFAULT_SERIES.rounds, 
-    scale: "linear", style: "area", showGrid: true, showBrush: false, viewMode: "aggregate"
+    scale: "linear", style: "area", showGrid: true, showBrush: false, viewMode: "aggregate",
+    displayMode: "standard"
   });
   
   if (!chartsParam) {
@@ -203,7 +210,7 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
     const chartParts = chartsParam.split("|");
     
     chartParts.forEach((part, idx) => {
-      const [type, range, seriesStr, scale, style, grid, brush, viewMode, roundRange, brushRange] = part.split(":");
+      const [type, range, seriesStr, scale, style, grid, brush, viewMode, roundRange, brushRange, displayModeStr] = part.split(":");
       
       if (!CHART_TYPES.some(ct => ct.value === type)) {
         return;
@@ -237,6 +244,11 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
 
       const isDirectMode = viewMode === "direct";
       const validRange = TIME_RANGES.some(tr => tr.value === range) ? range as TimeRange : "7d";
+      
+      // Parse display mode
+      const displayMode: DisplayMode = displayModeStr === "full" ? "full_precision" 
+        : displayModeStr === "delta" ? "delta_focus" 
+        : "standard";
 
       configs.push({
         id: String(idx + 1),
@@ -248,6 +260,7 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
         showGrid: grid !== "0",
         showBrush: brush === "1",
         viewMode: isDirectMode ? "direct" : "aggregate",
+        displayMode,
         roundStart,
         roundEnd,
         brushStart,
@@ -259,7 +272,8 @@ function parseChartsFromUrl(searchParams: URLSearchParams): ChartConfig[] {
   } catch {
     return [{ 
       id: "1", type: "rounds", range: "7d", enabledSeries: DEFAULT_SERIES.rounds, 
-      scale: "linear", style: "area", showGrid: true, showBrush: false, viewMode: "aggregate" 
+      scale: "linear", style: "area", showGrid: true, showBrush: false, viewMode: "aggregate",
+      displayMode: "standard" as DisplayMode
     }];
   }
 }
@@ -283,7 +297,12 @@ function chartsToUrlParam(charts: ChartConfig[]): string {
       ? `${c.brushStart ?? ""}-${c.brushEnd ?? "live"}`
       : "";
     
-    return `${c.type}:${c.range}:${series}:${scale}:${style}:${grid}:${brush}:${viewMode}:${roundRange}:${brushRange}`;
+    // Display mode
+    const displayMode = c.displayMode === "full_precision" ? "full" 
+      : c.displayMode === "delta_focus" ? "delta" 
+      : "std";
+    
+    return `${c.type}:${c.range}:${series}:${scale}:${style}:${grid}:${brush}:${viewMode}:${roundRange}:${brushRange}:${displayMode}`;
   }).join("|");
 }
 
@@ -395,6 +414,9 @@ function transformChartData(type: ChartType, data: unknown[], range: TimeRange, 
         ...d,
         circulating_end: (d.circulating_end || 0) / 1e11,
         market_inflation_total: (d.market_inflation_total || 0) / 1e11,
+        ore_won_total: ((d as InflationHourlyData).ore_won_total || (d as InflationDailyData).ore_won_total || 0) / 1e11,
+        ore_claimed_total: ((d as InflationHourlyData).ore_claimed_total || (d as InflationDailyData).ore_claimed_total || 0) / 1e11,
+        ore_burned_total: ((d as InflationHourlyData).ore_burned_total || (d as InflationDailyData).ore_burned_total || 0) / 1e11,
         supply_change_total: (d.supply_change_total || 0) / 1e11,
         supply_end: ((d as InflationHourlyData).supply_end || (d as InflationDailyData).supply_end || 0) / 1e11,
       }));
@@ -709,11 +731,86 @@ function ChartOptions({
               />
               <span className="text-xs text-slate-300">Show Brush (zoom)</span>
             </label>
+
+            {/* Display Mode - only show for mint/inflation charts */}
+            {(config.type === "mint" || config.type === "inflation") && (
+              <div>
+                <label className="text-xs text-slate-400 block mb-1.5">Display Mode</label>
+                <div className="flex flex-col gap-1">
+                  <button
+                    onClick={() => onUpdate({ displayMode: "standard" })}
+                    className={`px-2 py-1 text-xs rounded text-left ${
+                      config.displayMode === "standard"
+                        ? "bg-amber-500/20 text-amber-400"
+                        : "bg-slate-700 text-slate-400"
+                    }`}
+                  >
+                    Standard (K/M)
+                  </button>
+                  <button
+                    onClick={() => onUpdate({ displayMode: "full_precision" })}
+                    className={`px-2 py-1 text-xs rounded text-left ${
+                      config.displayMode === "full_precision"
+                        ? "bg-amber-500/20 text-amber-400"
+                        : "bg-slate-700 text-slate-400"
+                    }`}
+                  >
+                    Full Precision
+                  </button>
+                  <button
+                    onClick={() => onUpdate({ displayMode: "delta_focus" })}
+                    className={`px-2 py-1 text-xs rounded text-left ${
+                      config.displayMode === "delta_focus"
+                        ? "bg-amber-500/20 text-amber-400"
+                        : "bg-slate-700 text-slate-400"
+                    }`}
+                  >
+                    Delta Focus (auto-zoom)
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </>
       )}
     </div>
   );
+}
+
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
+/**
+ * Calculate Y-axis domain for delta_focus mode - zooms in on the variation
+ * instead of starting from 0, making small changes visible on large values.
+ */
+function calculateDeltaFocusDomain(
+  data: Record<string, unknown>[], 
+  keys: string[]
+): [number, number] | undefined {
+  if (data.length === 0 || keys.length === 0) return undefined;
+  
+  const values: number[] = [];
+  data.forEach(d => {
+    keys.forEach(key => {
+      const val = d[key];
+      if (typeof val === "number" && !isNaN(val)) {
+        values.push(val);
+      }
+    });
+  });
+  
+  if (values.length === 0) return undefined;
+  
+  const min = Math.min(...values);
+  const max = Math.max(...values);
+  const range = max - min;
+  
+  // Add 10% padding, or 0.1% of max if range is very small
+  const padding = range > 0 ? range * 0.1 : max * 0.001;
+  
+  return [min - padding, max + padding];
 }
 
 // ============================================================================
@@ -857,12 +954,16 @@ function DynamicChart({
           yAxisId="left"
           stroke={chartTheme.axis.stroke}
           tick={{ fill: chartTheme.axis.tick.fill, fontSize: 10 }}
-          tickFormatter={formatters.number}
+          tickFormatter={config.displayMode === "full_precision" ? formatters.numberFull : formatters.number}
           tickLine={false}
           axisLine={false}
           scale={config.scale}
-          domain={config.scale === "log" ? ["auto", "auto"] : undefined}
-          width={55}
+          domain={
+            config.displayMode === "delta_focus" 
+              ? calculateDeltaFocusDomain(data, enabledConfigs.filter(s => s.yAxisId !== "right").map(s => s.key))
+              : config.scale === "log" ? ["auto", "auto"] : undefined
+          }
+          width={config.displayMode === "full_precision" ? 80 : 55}
         />
 
         {hasRightAxis && (
@@ -1254,6 +1355,7 @@ function ChartsContent() {
       showGrid: true,
       showBrush: false,
       viewMode: "aggregate",
+      displayMode: "standard",
     }]);
   }, [charts]);
 
@@ -1372,6 +1474,7 @@ function ChartsContent() {
                           showGrid: true,
                           showBrush: false,
                           viewMode: "aggregate",
+                          displayMode: "standard",
                         }]);
                       }}
                       className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-800/50 hover:bg-slate-800 border border-slate-700/50 rounded-lg text-xs text-slate-400 hover:text-slate-300 transition-colors"

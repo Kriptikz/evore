@@ -163,6 +163,30 @@ export const formatters = {
     return value.toLocaleString();
   },
   
+  // Full precision number (no abbreviation)
+  numberFull: (value: number): string => {
+    return value.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+  },
+  
+  // Full precision ORE (no abbreviation, expects already-converted ORE value)
+  oreFull: (ore: number): string => {
+    return ore.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+  },
+  
+  // Full precision ORE from atomic units (no abbreviation)
+  oreAtomicFull: (atomic: number): string => {
+    return (atomic / 1e11).toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 2
+    });
+  },
+  
   // Format percentage
   percent: (value: number): string => {
     return `${(value * 100).toFixed(1)}%`;
