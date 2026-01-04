@@ -14,11 +14,12 @@ interface MinerData {
   // From snapshot
   refined_ore: number;
   unclaimed_ore: number;
-  // From stats
+  // From stats (optional - may not have historical data)
   total_deployed: number;
   total_sol_earned: number;
   total_ore_earned: number;
   net_sol_change: number;
+  hasStats?: boolean; // Whether we have historical stats
   // Status
   loading?: boolean;
   error?: string;
@@ -89,10 +90,9 @@ export default function PortfolioPage() {
     setMinerData(new Map(newData));
 
     // Fetch sequentially with small delays to avoid rate limits
-    // (2 requests per miner, so ~50ms delay = ~40 req/s max, under 20 rps limit with margin)
     for (const entry of entries) {
       try {
-        // Fetch snapshot for unclaimed/refined with retry
+        // Fetch snapshot for unclaimed/refined - this is the critical data
         const snapshotResult = await fetchWithRetry(() =>
           api.getMinerSnapshots({
             search: entry.pubkey,
@@ -103,33 +103,37 @@ export default function PortfolioPage() {
         // Small delay between requests
         await new Promise((resolve) => setTimeout(resolve, 100));
 
-        // Fetch full stats for deployed/earned with retry
-        const stats = await fetchWithRetry(() => api.getMinerStats(entry.pubkey));
-
-        if (snapshotResult.data.length > 0) {
-          newData.set(entry.pubkey, {
-            pubkey: entry.pubkey,
-            refined_ore: snapshotResult.data[0].refined_ore,
-            unclaimed_ore: snapshotResult.data[0].unclaimed_ore,
-            total_deployed: stats.total_deployed,
-            total_sol_earned: stats.total_sol_earned,
-            total_ore_earned: stats.total_ore_earned,
-            net_sol_change: stats.net_sol_change,
-            loading: false,
-          });
-        } else {
-          newData.set(entry.pubkey, {
-            pubkey: entry.pubkey,
-            refined_ore: 0,
-            unclaimed_ore: 0,
-            total_deployed: stats.total_deployed,
-            total_sol_earned: stats.total_sol_earned,
-            total_ore_earned: stats.total_ore_earned,
-            net_sol_change: stats.net_sol_change,
-            loading: false,
-          });
+        // Try to fetch historical stats, but don't fail if unavailable
+        let stats = {
+          total_deployed: 0,
+          total_sol_earned: 0,
+          total_ore_earned: 0,
+          net_sol_change: 0,
+        };
+        let hasStats = false;
+        
+        try {
+          const fetchedStats = await fetchWithRetry(() => api.getMinerStats(entry.pubkey));
+          stats = fetchedStats;
+          hasStats = true;
+        } catch {
+          // Historical stats not available - that's okay, we still have snapshot data
         }
+
+        const snapshot = snapshotResult.data[0];
+        newData.set(entry.pubkey, {
+          pubkey: entry.pubkey,
+          refined_ore: snapshot?.refined_ore ?? 0,
+          unclaimed_ore: snapshot?.unclaimed_ore ?? 0,
+          total_deployed: stats.total_deployed,
+          total_sol_earned: stats.total_sol_earned,
+          total_ore_earned: stats.total_ore_earned,
+          net_sol_change: stats.net_sol_change,
+          hasStats,
+          loading: false,
+        });
       } catch (err) {
+        // Only show error if snapshot fetch completely fails
         newData.set(entry.pubkey, {
           pubkey: entry.pubkey,
           refined_ore: 0,
@@ -209,16 +213,20 @@ export default function PortfolioPage() {
     let totalSolEarned = 0;
     let totalOreEarned = 0;
     let totalNetSol = 0;
+    let hasAnyStats = false;
 
     entries.forEach((entry) => {
       const data = minerData.get(entry.pubkey);
       if (data && !data.loading && !data.error) {
         totalUnclaimed += data.unclaimed_ore;
         totalRefined += data.refined_ore;
-        totalDeployed += data.total_deployed;
-        totalSolEarned += data.total_sol_earned;
-        totalOreEarned += data.total_ore_earned;
-        totalNetSol += data.net_sol_change;
+        if (data.hasStats) {
+          hasAnyStats = true;
+          totalDeployed += data.total_deployed;
+          totalSolEarned += data.total_sol_earned;
+          totalOreEarned += data.total_ore_earned;
+          totalNetSol += data.net_sol_change;
+        }
       }
     });
 
@@ -228,7 +236,7 @@ export default function PortfolioPage() {
 
     // Cost per ORE (only if net is negative, meaning they spent more than earned)
     const oreInFullUnits = totalOreEarned / 1e11;
-    const costPerOre = totalNetSol < 0 && oreInFullUnits > 0 
+    const costPerOre = hasAnyStats && totalNetSol < 0 && oreInFullUnits > 0 
       ? Math.abs(totalNetSol) / oreInFullUnits 
       : 0;
 
@@ -242,6 +250,7 @@ export default function PortfolioPage() {
       totalOreEarned,
       totalNetSol,
       costPerOre,
+      hasAnyStats,
     };
   }, [entries, minerData]);
 
@@ -487,7 +496,7 @@ export default function PortfolioPage() {
                     <span className="text-xs text-slate-400">SOL Deployed</span>
                   </div>
                   <div className="text-xl font-bold font-mono text-slate-300">
-                    {formatSol(totals.totalDeployed)}
+                    {totals.hasAnyStats ? formatSol(totals.totalDeployed) : "-"}
                   </div>
                 </div>
                 <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/10 rounded-xl border border-green-500/30 p-4">
@@ -496,25 +505,30 @@ export default function PortfolioPage() {
                     <span className="text-xs text-slate-400">SOL Earned</span>
                   </div>
                   <div className="text-xl font-bold font-mono text-green-400">
-                    {formatSol(totals.totalSolEarned)}
+                    {totals.hasAnyStats ? formatSol(totals.totalSolEarned) : "-"}
                   </div>
                 </div>
                 <div className={`bg-gradient-to-br rounded-xl border p-4 ${
+                  !totals.hasAnyStats ? "from-slate-600/20 to-slate-700/10 border-slate-500/30" :
                   totals.totalNetSol >= 0 
                     ? "from-green-500/20 to-emerald-500/10 border-green-500/30"
                     : "from-red-500/20 to-rose-500/10 border-red-500/30"
                 }`}>
                   <div className="flex items-center gap-1.5 mb-2">
-                    <span className="text-lg">{totals.totalNetSol >= 0 ? "📈" : "📉"}</span>
+                    <span className="text-lg">{!totals.hasAnyStats ? "📊" : totals.totalNetSol >= 0 ? "📈" : "📉"}</span>
                     <span className="text-xs text-slate-400">Net SOL</span>
                   </div>
                   <div className={`text-xl font-bold font-mono ${
+                    !totals.hasAnyStats ? "text-slate-500" :
                     totals.totalNetSol >= 0 ? "text-green-400" : "text-red-400"
                   }`}>
-                    {totals.totalNetSol >= 0 ? "+" : ""}{formatSol(totals.totalNetSol)}
+                    {totals.hasAnyStats 
+                      ? `${totals.totalNetSol >= 0 ? "+" : ""}${formatSol(totals.totalNetSol)}`
+                      : "-"
+                    }
                   </div>
                 </div>
-                {totals.costPerOre > 0 && (
+                {totals.hasAnyStats && totals.costPerOre > 0 && (
                   <div className="bg-gradient-to-br from-cyan-500/20 to-blue-500/10 rounded-xl border border-cyan-500/30 p-4">
                     <div className="flex items-center gap-1.5 mb-2">
                       <span className="text-lg">💰</span>
@@ -553,7 +567,7 @@ export default function PortfolioPage() {
                     <span className="text-xs text-slate-400">Lifetime ORE Earned</span>
                   </div>
                   <div className="text-xl font-bold font-mono text-blue-400">
-                    {formatOre(totals.totalOreEarned)}
+                    {totals.hasAnyStats ? formatOre(totals.totalOreEarned) : "-"}
                   </div>
                 </div>
               </div>
@@ -686,20 +700,23 @@ export default function PortfolioPage() {
                               <td className="px-4 py-3 text-right font-mono text-green-400">
                                 {formatOre(data?.refined_ore || 0)}
                               </td>
-                              <td className="px-4 py-3 text-right font-mono text-slate-400">
-                                {formatSol(data?.total_deployed || 0)}
+                              <td className="px-4 py-3 text-right font-mono text-slate-500">
+                                {data?.hasStats ? formatSol(data.total_deployed) : "-"}
                               </td>
-                              <td className="px-4 py-3 text-right font-mono text-green-400">
-                                {formatSol(data?.total_sol_earned || 0)}
+                              <td className="px-4 py-3 text-right font-mono text-slate-500">
+                                {data?.hasStats ? formatSol(data.total_sol_earned) : "-"}
                               </td>
                               <td className={`px-4 py-3 text-right font-mono ${
-                                (data?.net_sol_change || 0) >= 0 ? "text-green-400" : "text-red-400"
+                                !data?.hasStats ? "text-slate-500" :
+                                data.net_sol_change >= 0 ? "text-green-400" : "text-red-400"
                               }`}>
-                                {(data?.net_sol_change || 0) >= 0 ? "+" : ""}
-                                {formatSol(data?.net_sol_change || 0)}
+                                {data?.hasStats 
+                                  ? `${data.net_sol_change >= 0 ? "+" : ""}${formatSol(data.net_sol_change)}`
+                                  : "-"
+                                }
                               </td>
                               <td className="px-4 py-3 text-right font-mono text-cyan-400">
-                                {costPerOre > 0 ? formatSol(costPerOre) : "-"}
+                                {data?.hasStats && costPerOre > 0 ? formatSol(costPerOre) : "-"}
                               </td>
                             </>
                           )}
