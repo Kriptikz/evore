@@ -517,7 +517,10 @@ function MinerProfileContent() {
 
       {/* Quick Search */}
       <div className="mb-8">
-        <MinerSearchBar placeholder="Search for another miner..." />
+        <MinerSearchBar 
+          placeholder="Search or select a bookmarked miner..." 
+          currentPubkey={pubkey}
+        />
       </div>
 
       {/* Round Range Filter */}
