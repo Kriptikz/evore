@@ -4,8 +4,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useOreStats, formatSol, formatOre } from "@/context/OreStatsContext";
-import { MinerBookmarksDropdown } from "./MinerBookmarksDropdown";
-import { ChartsBookmarksDropdown } from "./ChartsBookmarksDropdown";
+import { FavoritesDropdown } from "./FavoritesDropdown";
 
 export function Header() {
   const pathname = usePathname();
@@ -82,6 +81,17 @@ export function Header() {
             >
               Charts
             </Link>
+            <Link 
+              href="/portfolio" 
+              className={`text-sm transition-colors flex items-center gap-1 ${
+                isActive('/portfolio')
+                  ? 'text-amber-400 font-medium' 
+                  : 'text-slate-400 hover:text-white'
+              }`}
+            >
+              <span>💼</span>
+              Portfolio
+            </Link>
             {/* AutoMiners link hidden - feature not ready for public yet */}
             {/* <Link 
               href="/autominers" 
@@ -96,8 +106,7 @@ export function Header() {
           </nav>
         </div>
         <div className="flex items-center gap-2">
-          <MinerBookmarksDropdown />
-          <ChartsBookmarksDropdown />
+          <FavoritesDropdown />
           <WalletMultiButton />
         </div>
       </div>

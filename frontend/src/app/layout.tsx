@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import "./globals.css";
 import { WalletProvider } from "@/components/WalletProvider";
 import { OreStatsProvider } from "@/context/OreStatsContext";
+import { ToastProvider } from "@/components/Toast";
 
 const siteUrl = process.env.NEXT_PUBLIC_SITE_URL || "https://ore-stats.com";
 
@@ -63,7 +64,9 @@ export default function RootLayout({
       <body className="antialiased">
         <WalletProvider>
           <OreStatsProvider>
-            {children}
+            <ToastProvider>
+              {children}
+            </ToastProvider>
           </OreStatsProvider>
         </WalletProvider>
       </body>
