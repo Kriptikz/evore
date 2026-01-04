@@ -53,12 +53,38 @@ export function useMinerBookmarks(): UseMinerBookmarksReturn {
     setIsHydrated(true);
   }, []);
 
+  // Listen for localStorage changes from other tabs/components
+  useEffect(() => {
+    function handleStorageChange(e: StorageEvent) {
+      if (e.key === STORAGE_KEY) {
+        setBookmarks(loadBookmarks());
+      }
+    }
+    window.addEventListener("storage", handleStorageChange);
+    return () => window.removeEventListener("storage", handleStorageChange);
+  }, []);
+
   // Save to localStorage whenever bookmarks change (after hydration)
   useEffect(() => {
     if (isHydrated) {
       saveBookmarks(bookmarks);
+      // Dispatch a custom event for same-tab updates
+      window.dispatchEvent(new CustomEvent("minerBookmarksUpdate"));
     }
   }, [bookmarks, isHydrated]);
+
+  // Listen for same-tab updates
+  useEffect(() => {
+    function handleCustomUpdate() {
+      const stored = loadBookmarks();
+      // Only update if different
+      if (JSON.stringify(stored) !== JSON.stringify(bookmarks)) {
+        setBookmarks(stored);
+      }
+    }
+    window.addEventListener("minerBookmarksUpdate", handleCustomUpdate);
+    return () => window.removeEventListener("minerBookmarksUpdate", handleCustomUpdate);
+  }, [bookmarks]);
 
   const addBookmark = useCallback((pubkey: string, label?: string) => {
     setBookmarks((prev) => {

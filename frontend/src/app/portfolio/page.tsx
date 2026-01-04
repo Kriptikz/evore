@@ -1,10 +1,11 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback, useRef } from "react";
 import Link from "next/link";
 import { Header } from "@/components/Header";
 import { useToast } from "@/components/Toast";
-import { useMinerBookmarks, MinerBookmark } from "@/hooks/useMinerBookmarks";
+import { usePortfolio, PortfolioEntry } from "@/hooks/usePortfolio";
+import { useMinerBookmarks } from "@/hooks/useMinerBookmarks";
 import { api, MinerSnapshotEntry } from "@/lib/api";
 import { formatOre, formatSol, truncateAddress } from "@/lib/format";
 
@@ -14,26 +15,35 @@ interface MinerData extends MinerSnapshotEntry {
 }
 
 export default function PortfolioPage() {
-  const { bookmarks, removeBookmark, toggleIncludeInTotals, updateBookmark } =
-    useMinerBookmarks();
+  const { entries, addEntry, removeEntry, updateEntry, isInPortfolio } = usePortfolio();
+  const { bookmarks } = useMinerBookmarks();
   const { success } = useToast();
   const [minerData, setMinerData] = useState<Map<string, MinerData>>(new Map());
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [labelInput, setLabelInput] = useState("");
-  const [sortBy, setSortBy] = useState<"unclaimed" | "refined" | "lifetime">("unclaimed");
+  const [sortBy, setSortBy] = useState<"unclaimed" | "refined" | "claimable" | "lifetime">("claimable");
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [showBookmarks, setShowBookmarks] = useState(false);
+  
+  // Search state
+  const [search, setSearch] = useState("");
+  const [searchResults, setSearchResults] = useState<MinerSnapshotEntry[]>([]);
+  const [searchLoading, setSearchLoading] = useState(false);
+  const [searchFocused, setSearchFocused] = useState(false);
+  const searchRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<NodeJS.Timeout>();
 
-  // Fetch data for all bookmarked miners
-  const fetchAllData = async () => {
-    if (bookmarks.length === 0) return;
+  // Fetch data for all portfolio entries
+  const fetchAllData = useCallback(async () => {
+    if (entries.length === 0) return;
 
     setIsRefreshing(true);
     const newData = new Map<string, MinerData>();
 
     // Set loading state
-    bookmarks.forEach((b) => {
-      newData.set(b.pubkey, {
-        miner_pubkey: b.pubkey,
+    entries.forEach((e) => {
+      newData.set(e.pubkey, {
+        miner_pubkey: e.pubkey,
         refined_ore: 0,
         unclaimed_ore: 0,
         lifetime_sol: 0,
@@ -45,21 +55,21 @@ export default function PortfolioPage() {
 
     // Fetch all in parallel
     await Promise.all(
-      bookmarks.map(async (bookmark) => {
+      entries.map(async (entry) => {
         try {
           const result = await api.getMinerSnapshots({
-            search: bookmark.pubkey,
+            search: entry.pubkey,
             limit: 1,
           });
 
           if (result.data.length > 0) {
-            newData.set(bookmark.pubkey, {
+            newData.set(entry.pubkey, {
               ...result.data[0],
               loading: false,
             });
           } else {
-            newData.set(bookmark.pubkey, {
-              miner_pubkey: bookmark.pubkey,
+            newData.set(entry.pubkey, {
+              miner_pubkey: entry.pubkey,
               refined_ore: 0,
               unclaimed_ore: 0,
               lifetime_sol: 0,
@@ -69,8 +79,8 @@ export default function PortfolioPage() {
             });
           }
         } catch (err) {
-          newData.set(bookmark.pubkey, {
-            miner_pubkey: bookmark.pubkey,
+          newData.set(entry.pubkey, {
+            miner_pubkey: entry.pubkey,
             refined_ore: 0,
             unclaimed_ore: 0,
             lifetime_sol: 0,
@@ -83,12 +93,57 @@ export default function PortfolioPage() {
       })
     );
     setIsRefreshing(false);
-  };
+  }, [entries]);
 
   useEffect(() => {
     fetchAllData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [bookmarks.length]);
+  }, [fetchAllData]);
+
+  // Close search dropdown when clicking outside
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (searchRef.current && !searchRef.current.contains(event.target as Node)) {
+        setSearchFocused(false);
+      }
+    }
+    document.addEventListener("mousedown", handleClickOutside);
+    return () => document.removeEventListener("mousedown", handleClickOutside);
+  }, []);
+
+  // Search API with debounce
+  useEffect(() => {
+    if (debounceRef.current) {
+      clearTimeout(debounceRef.current);
+    }
+
+    if (search.length < 3) {
+      setSearchResults([]);
+      setSearchLoading(false);
+      return;
+    }
+
+    setSearchLoading(true);
+    debounceRef.current = setTimeout(async () => {
+      try {
+        const response = await api.getMinerSnapshots({
+          search: search.trim(),
+          limit: 10,
+        });
+        setSearchResults(response.data);
+      } catch (err) {
+        console.error("Search failed:", err);
+        setSearchResults([]);
+      } finally {
+        setSearchLoading(false);
+      }
+    }, 300);
+
+    return () => {
+      if (debounceRef.current) {
+        clearTimeout(debounceRef.current);
+      }
+    };
+  }, [search]);
 
   // Calculate totals
   const totals = useMemo(() => {
@@ -96,44 +151,74 @@ export default function PortfolioPage() {
     let totalRefined = 0;
     let totalLifetimeSol = 0;
     let totalLifetimeOre = 0;
-    let includedCount = 0;
 
-    bookmarks.forEach((bookmark) => {
-      if (bookmark.includeInTotals) {
-        const data = minerData.get(bookmark.pubkey);
-        if (data && !data.loading && !data.error) {
-          totalUnclaimed += data.unclaimed_ore;
-          totalRefined += data.refined_ore;
-          totalLifetimeSol += data.lifetime_sol;
-          totalLifetimeOre += data.lifetime_ore;
-          includedCount++;
-        }
+    entries.forEach((entry) => {
+      const data = minerData.get(entry.pubkey);
+      if (data && !data.loading && !data.error) {
+        totalUnclaimed += data.unclaimed_ore;
+        totalRefined += data.refined_ore;
+        totalLifetimeSol += data.lifetime_sol;
+        totalLifetimeOre += data.lifetime_ore;
       }
     });
 
-    return { totalUnclaimed, totalRefined, totalLifetimeSol, totalLifetimeOre, includedCount };
-  }, [bookmarks, minerData]);
+    // Claimable = unclaimed - 10% fee + refined
+    const fee = totalUnclaimed * 0.1;
+    const totalClaimable = totalUnclaimed - fee + totalRefined;
 
-  // Sorted miners
-  const sortedBookmarks = useMemo(() => {
-    return [...bookmarks].sort((a, b) => {
+    return { 
+      totalUnclaimed, 
+      totalRefined, 
+      totalClaimable,
+      fee,
+      totalLifetimeSol, 
+      totalLifetimeOre,
+    };
+  }, [entries, minerData]);
+
+  // Sorted entries
+  const sortedEntries = useMemo(() => {
+    return [...entries].sort((a, b) => {
       const dataA = minerData.get(a.pubkey);
       const dataB = minerData.get(b.pubkey);
 
       if (!dataA || !dataB) return 0;
+
+      const claimableA = (dataA.unclaimed_ore * 0.9) + dataA.refined_ore;
+      const claimableB = (dataB.unclaimed_ore * 0.9) + dataB.refined_ore;
 
       switch (sortBy) {
         case "unclaimed":
           return dataB.unclaimed_ore - dataA.unclaimed_ore;
         case "refined":
           return dataB.refined_ore - dataA.refined_ore;
+        case "claimable":
+          return claimableB - claimableA;
         case "lifetime":
           return dataB.lifetime_ore - dataA.lifetime_ore;
         default:
           return 0;
       }
     });
-  }, [bookmarks, minerData, sortBy]);
+  }, [entries, minerData, sortBy]);
+
+  // Bookmarks not in portfolio
+  const availableBookmarks = useMemo(() => {
+    return bookmarks.filter((b) => !isInPortfolio(b.pubkey));
+  }, [bookmarks, isInPortfolio]);
+
+  const handleAddToPortfolio = (pubkey: string, label?: string) => {
+    addEntry(pubkey, label);
+    success("Added to portfolio");
+    setSearch("");
+    setSearchFocused(false);
+  };
+
+  const handleRemoveEntry = (pubkey: string, label?: string) => {
+    const displayName = label || truncateAddress(pubkey);
+    removeEntry(pubkey);
+    success(`Removed ${displayName} from portfolio`);
+  };
 
   const handleStartEditLabel = (pubkey: string, currentLabel?: string) => {
     setEditingLabel(pubkey);
@@ -141,16 +226,12 @@ export default function PortfolioPage() {
   };
 
   const handleSaveLabel = (pubkey: string) => {
-    updateBookmark(pubkey, { label: labelInput || undefined });
+    updateEntry(pubkey, { label: labelInput || undefined });
     setEditingLabel(null);
     setLabelInput("");
   };
 
-  const handleRemoveBookmark = (pubkey: string, label?: string) => {
-    const displayName = label || truncateAddress(pubkey);
-    removeBookmark(pubkey);
-    success(`Removed ${displayName} from bookmarks`);
-  };
+  const isValidPubkey = search.trim().length >= 32 && search.trim().length <= 44;
 
   return (
     <>
@@ -161,17 +242,17 @@ export default function PortfolioPage() {
           <div>
             <h1 className="text-3xl font-bold text-white mb-2 flex items-center gap-3">
               <span className="text-amber-400">💼</span>
-              Your Portfolio
+              Portfolio
             </h1>
             <p className="text-slate-400">
-              Track your bookmarked miners and aggregate statistics
+              Track your miners and aggregate claimable ORE
             </p>
           </div>
           <button
             onClick={fetchAllData}
-            disabled={isRefreshing}
+            disabled={isRefreshing || entries.length === 0}
             className={`flex items-center gap-2 px-4 py-2 bg-slate-700 hover:bg-slate-600 text-white rounded-xl transition-colors ${
-              isRefreshing ? "opacity-50 cursor-not-allowed" : ""
+              isRefreshing || entries.length === 0 ? "opacity-50 cursor-not-allowed" : ""
             }`}
           >
             <svg
@@ -191,40 +272,160 @@ export default function PortfolioPage() {
           </button>
         </div>
 
-        {bookmarks.length === 0 ? (
+        {/* Search to Add */}
+        <div className="mb-6" ref={searchRef}>
+          <label className="block text-sm text-slate-400 mb-2">Add miner to portfolio</label>
+          <div className="relative">
+            <div className="relative">
+              <div className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-500">
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z" />
+                </svg>
+              </div>
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                onFocus={() => setSearchFocused(true)}
+                placeholder="Search by address or paste pubkey..."
+                className="w-full pl-10 pr-4 py-3 bg-slate-800 border border-slate-700 rounded-xl text-white placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-amber-500/50"
+              />
+            </div>
+
+            {/* Search Dropdown */}
+            {searchFocused && (search.length >= 3 || isValidPubkey) && (
+              <div className="absolute left-0 right-0 top-full mt-1 bg-slate-800 border border-slate-700 rounded-xl shadow-xl z-50 overflow-hidden">
+                {searchLoading ? (
+                  <div className="px-4 py-3 flex items-center gap-2 text-slate-400">
+                    <div className="w-4 h-4 border-2 border-slate-500 border-t-amber-500 rounded-full animate-spin" />
+                    <span className="text-sm">Searching...</span>
+                  </div>
+                ) : searchResults.length > 0 ? (
+                  <div className="max-h-60 overflow-y-auto">
+                    {searchResults.map((miner) => {
+                      const inPortfolio = isInPortfolio(miner.miner_pubkey);
+                      return (
+                        <button
+                          key={miner.miner_pubkey}
+                          onClick={() => !inPortfolio && handleAddToPortfolio(miner.miner_pubkey)}
+                          disabled={inPortfolio}
+                          className={`w-full px-4 py-3 flex items-center gap-3 transition-colors text-left ${
+                            inPortfolio
+                              ? "bg-slate-700/30 cursor-not-allowed"
+                              : "hover:bg-slate-700/50"
+                          }`}
+                        >
+                          <span className="font-mono text-sm text-white">
+                            {truncateAddress(miner.miner_pubkey, 8)}
+                          </span>
+                          {inPortfolio ? (
+                            <span className="text-xs text-green-400">✓ In portfolio</span>
+                          ) : (
+                            <span className="text-xs text-amber-400">+ Add</span>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                ) : search.length >= 3 ? (
+                  <div className="px-4 py-3 text-sm text-slate-400">
+                    No miners found
+                  </div>
+                ) : null}
+
+                {/* Direct add for valid pubkey */}
+                {isValidPubkey && !searchResults.some(r => r.miner_pubkey === search.trim()) && !isInPortfolio(search.trim()) && (
+                  <div className="border-t border-slate-700/50">
+                    <button
+                      onClick={() => handleAddToPortfolio(search.trim())}
+                      className="w-full px-4 py-3 text-left hover:bg-slate-700/50 transition-colors flex items-center gap-2"
+                    >
+                      <span className="text-amber-400 text-sm">Add address:</span>
+                      <span className="font-mono text-white text-sm">{truncateAddress(search.trim(), 8)}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Quick add from bookmarks */}
+          {availableBookmarks.length > 0 && (
+            <div className="mt-3">
+              <button
+                onClick={() => setShowBookmarks(!showBookmarks)}
+                className="text-xs text-slate-500 hover:text-slate-300 flex items-center gap-1"
+              >
+                <span>⭐ Add from bookmarks ({availableBookmarks.length})</span>
+                <svg
+                  className={`w-3 h-3 transition-transform ${showBookmarks ? "rotate-180" : ""}`}
+                  fill="none"
+                  stroke="currentColor"
+                  viewBox="0 0 24 24"
+                >
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                </svg>
+              </button>
+              {showBookmarks && (
+                <div className="mt-2 flex flex-wrap gap-2">
+                  {availableBookmarks.map((bookmark) => (
+                    <button
+                      key={bookmark.pubkey}
+                      onClick={() => handleAddToPortfolio(bookmark.pubkey, bookmark.label)}
+                      className="px-2.5 py-1.5 bg-slate-800 hover:bg-slate-700 border border-slate-700 hover:border-amber-500/50 rounded-lg text-xs text-slate-300 hover:text-amber-400 transition-all"
+                    >
+                      + {bookmark.label || truncateAddress(bookmark.pubkey, 4)}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+
+        {entries.length === 0 ? (
           <EmptyPortfolio />
         ) : (
           <>
             {/* Portfolio Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
               <SummaryCard
-                title="Total Unclaimed"
-                value={formatOre(totals.totalUnclaimed)}
-                subtitle={`${totals.includedCount} miner${totals.includedCount !== 1 ? "s" : ""} included`}
-                icon="⛏️"
-                color="amber"
-              />
-              <SummaryCard
-                title="Total Refined"
-                value={formatOre(totals.totalRefined)}
-                subtitle="Ready to claim"
-                icon="✨"
-                color="green"
-              />
-              <SummaryCard
-                title="Combined Value"
-                value={formatOre(totals.totalUnclaimed + totals.totalRefined)}
-                subtitle="Unclaimed + Refined"
+                title="Total Claimable"
+                value={formatOre(totals.totalClaimable)}
+                subtitle={`After 10% fee (${formatOre(totals.fee)})`}
                 icon="💎"
                 color="purple"
+                large
               />
-              <SummaryCard
-                title="Lifetime Earnings"
-                value={formatSol(totals.totalLifetimeSol)}
-                subtitle={`${formatOre(totals.totalLifetimeOre)} ORE`}
-                icon="📈"
-                color="blue"
-              />
+              <div className="grid grid-cols-2 gap-4">
+                <SummaryCard
+                  title="Unclaimed"
+                  value={formatOre(totals.totalUnclaimed)}
+                  icon="⛏️"
+                  color="amber"
+                />
+                <SummaryCard
+                  title="Refined"
+                  value={formatOre(totals.totalRefined)}
+                  icon="✨"
+                  color="green"
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <SummaryCard
+                  title="Lifetime ORE"
+                  value={formatOre(totals.totalLifetimeOre)}
+                  icon="📈"
+                  color="blue"
+                />
+                <SummaryCard
+                  title="Lifetime SOL"
+                  value={formatSol(totals.totalLifetimeSol)}
+                  subtitle="Deployed"
+                  icon="◎"
+                  color="slate"
+                />
+              </div>
             </div>
 
             {/* Miners Table */}
@@ -232,8 +433,8 @@ export default function PortfolioPage() {
               {/* Table Header */}
               <div className="px-6 py-4 border-b border-slate-700/50 flex items-center justify-between">
                 <div className="flex items-center gap-3">
-                  <h2 className="text-lg font-semibold text-white">Bookmarked Miners</h2>
-                  <span className="text-sm text-slate-400">({bookmarks.length})</span>
+                  <h2 className="text-lg font-semibold text-white">Portfolio Miners</h2>
+                  <span className="text-sm text-slate-400">({entries.length})</span>
                 </div>
                 <div className="flex items-center gap-2">
                   <span className="text-xs text-slate-500">Sort by:</span>
@@ -242,6 +443,7 @@ export default function PortfolioPage() {
                     onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
                     className="px-3 py-1.5 bg-slate-700 border border-slate-600 rounded-lg text-sm text-white focus:outline-none focus:ring-2 focus:ring-amber-500/50"
                   >
+                    <option value="claimable">Claimable</option>
                     <option value="unclaimed">Unclaimed</option>
                     <option value="refined">Refined</option>
                     <option value="lifetime">Lifetime</option>
@@ -254,54 +456,37 @@ export default function PortfolioPage() {
                 <table className="w-full">
                   <thead className="bg-slate-900/50">
                     <tr className="text-left text-xs text-slate-500 uppercase tracking-wider">
-                      <th className="px-6 py-3">Include</th>
                       <th className="px-6 py-3">Miner</th>
                       <th className="px-6 py-3 text-right">Unclaimed</th>
                       <th className="px-6 py-3 text-right">Refined</th>
+                      <th className="px-6 py-3 text-right">Claimable</th>
                       <th className="px-6 py-3 text-right">Lifetime ORE</th>
                       <th className="px-6 py-3 text-right">Lifetime SOL</th>
                       <th className="px-6 py-3 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700/30">
-                    {sortedBookmarks.map((bookmark) => {
-                      const data = minerData.get(bookmark.pubkey);
+                    {sortedEntries.map((entry) => {
+                      const data = minerData.get(entry.pubkey);
                       const isLoading = data?.loading || false;
                       const hasError = !!data?.error;
+                      const claimable = data ? (data.unclaimed_ore * 0.9) + data.refined_ore : 0;
 
                       return (
                         <tr
-                          key={bookmark.pubkey}
-                          className={`transition-colors hover:bg-slate-700/30 ${
-                            bookmark.includeInTotals ? "" : "opacity-60"
-                          }`}
+                          key={entry.pubkey}
+                          className="transition-colors hover:bg-slate-700/30"
                         >
-                          {/* Include Toggle */}
-                          <td className="px-6 py-4">
-                            <button
-                              onClick={() => toggleIncludeInTotals(bookmark.pubkey)}
-                              className={`w-5 h-5 rounded flex items-center justify-center transition-colors ${
-                                bookmark.includeInTotals
-                                  ? "bg-amber-500 text-black"
-                                  : "bg-slate-700 border border-slate-600 text-transparent"
-                              }`}
-                            >
-                              <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M5 13l4 4L19 7" />
-                              </svg>
-                            </button>
-                          </td>
-
                           {/* Miner Info */}
                           <td className="px-6 py-4">
-                            {editingLabel === bookmark.pubkey ? (
+                            {editingLabel === entry.pubkey ? (
                               <div className="flex items-center gap-2">
                                 <input
                                   type="text"
                                   value={labelInput}
                                   onChange={(e) => setLabelInput(e.target.value)}
                                   onKeyDown={(e) => {
-                                    if (e.key === "Enter") handleSaveLabel(bookmark.pubkey);
+                                    if (e.key === "Enter") handleSaveLabel(entry.pubkey);
                                     if (e.key === "Escape") setEditingLabel(null);
                                   }}
                                   placeholder="Enter label..."
@@ -309,7 +494,7 @@ export default function PortfolioPage() {
                                   autoFocus
                                 />
                                 <button
-                                  onClick={() => handleSaveLabel(bookmark.pubkey)}
+                                  onClick={() => handleSaveLabel(entry.pubkey)}
                                   className="p-1 text-green-400 hover:text-green-300"
                                 >
                                   ✓
@@ -323,21 +508,21 @@ export default function PortfolioPage() {
                               </div>
                             ) : (
                               <Link
-                                href={`/miners/${bookmark.pubkey}`}
+                                href={`/miners/${entry.pubkey}`}
                                 className="block group"
                               >
-                                {bookmark.label ? (
+                                {entry.label ? (
                                   <>
                                     <div className="font-medium text-white group-hover:text-amber-400 transition-colors">
-                                      {bookmark.label}
+                                      {entry.label}
                                     </div>
                                     <div className="text-xs text-slate-500 font-mono">
-                                      {truncateAddress(bookmark.pubkey)}
+                                      {truncateAddress(entry.pubkey)}
                                     </div>
                                   </>
                                 ) : (
                                   <div className="font-mono text-sm text-white group-hover:text-amber-400 transition-colors">
-                                    {truncateAddress(bookmark.pubkey)}
+                                    {truncateAddress(entry.pubkey)}
                                   </div>
                                 )}
                               </Link>
@@ -346,13 +531,13 @@ export default function PortfolioPage() {
 
                           {/* Stats */}
                           {isLoading ? (
-                            <td colSpan={4} className="px-6 py-4 text-center">
+                            <td colSpan={5} className="px-6 py-4 text-center">
                               <div className="flex justify-center">
                                 <div className="w-4 h-4 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin" />
                               </div>
                             </td>
                           ) : hasError ? (
-                            <td colSpan={4} className="px-6 py-4 text-center text-slate-500 text-sm">
+                            <td colSpan={5} className="px-6 py-4 text-center text-slate-500 text-sm">
                               {data?.error}
                             </td>
                           ) : (
@@ -362,6 +547,9 @@ export default function PortfolioPage() {
                               </td>
                               <td className="px-6 py-4 text-right font-mono text-green-400">
                                 {formatOre(data?.refined_ore || 0)}
+                              </td>
+                              <td className="px-6 py-4 text-right font-mono text-purple-400 font-medium">
+                                {formatOre(claimable)}
                               </td>
                               <td className="px-6 py-4 text-right font-mono text-slate-300">
                                 {formatOre(data?.lifetime_ore || 0)}
@@ -376,9 +564,7 @@ export default function PortfolioPage() {
                           <td className="px-6 py-4">
                             <div className="flex items-center justify-end gap-1">
                               <button
-                                onClick={() =>
-                                  handleStartEditLabel(bookmark.pubkey, bookmark.label)
-                                }
+                                onClick={() => handleStartEditLabel(entry.pubkey, entry.label)}
                                 className="p-1.5 text-slate-500 hover:text-slate-300 rounded transition-colors"
                                 title="Edit label"
                               >
@@ -392,11 +578,9 @@ export default function PortfolioPage() {
                                 </svg>
                               </button>
                               <button
-                                onClick={() =>
-                                  handleRemoveBookmark(bookmark.pubkey, bookmark.label)
-                                }
+                                onClick={() => handleRemoveEntry(entry.pubkey, entry.label)}
                                 className="p-1.5 text-slate-500 hover:text-red-400 rounded transition-colors"
-                                title="Remove bookmark"
+                                title="Remove from portfolio"
                               >
                                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path
@@ -416,20 +600,6 @@ export default function PortfolioPage() {
                 </table>
               </div>
             </div>
-
-            {/* Tips */}
-            <div className="mt-6 flex items-center gap-4 text-xs text-slate-500">
-              <div className="flex items-center gap-2">
-                <kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700">B</kbd>
-                <span>Toggle bookmark on miner page</span>
-              </div>
-              <span className="text-slate-700">•</span>
-              <div className="flex items-center gap-2">
-                <kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700">←</kbd>
-                <kbd className="px-1.5 py-0.5 bg-slate-800 rounded border border-slate-700">→</kbd>
-                <span>Navigate between bookmarked miners</span>
-              </div>
-            </div>
           </>
         )}
       </main>
@@ -443,18 +613,21 @@ function SummaryCard({
   subtitle,
   icon,
   color,
+  large,
 }: {
   title: string;
   value: string;
-  subtitle: string;
+  subtitle?: string;
   icon: string;
-  color: "amber" | "green" | "purple" | "blue";
+  color: "amber" | "green" | "purple" | "blue" | "slate";
+  large?: boolean;
 }) {
   const colorStyles = {
     amber: "from-amber-500/20 to-orange-500/10 border-amber-500/30",
     green: "from-green-500/20 to-emerald-500/10 border-green-500/30",
     purple: "from-purple-500/20 to-violet-500/10 border-purple-500/30",
     blue: "from-blue-500/20 to-cyan-500/10 border-blue-500/30",
+    slate: "from-slate-600/20 to-slate-700/10 border-slate-500/30",
   };
 
   const textColors = {
@@ -462,20 +635,21 @@ function SummaryCard({
     green: "text-green-400",
     purple: "text-purple-400",
     blue: "text-blue-400",
+    slate: "text-slate-300",
   };
 
   return (
     <div
-      className={`bg-gradient-to-br ${colorStyles[color]} rounded-xl border p-5`}
+      className={`bg-gradient-to-br ${colorStyles[color]} rounded-xl border ${large ? "p-6" : "p-4"}`}
     >
-      <div className="flex items-center gap-2 mb-3">
-        <span className="text-xl">{icon}</span>
-        <span className="text-sm text-slate-400">{title}</span>
+      <div className="flex items-center gap-2 mb-2">
+        <span className={large ? "text-2xl" : "text-lg"}>{icon}</span>
+        <span className={`${large ? "text-sm" : "text-xs"} text-slate-400`}>{title}</span>
       </div>
-      <div className={`text-2xl font-bold font-mono ${textColors[color]} mb-1`}>
+      <div className={`${large ? "text-3xl" : "text-xl"} font-bold font-mono ${textColors[color]} mb-1`}>
         {value}
       </div>
-      <div className="text-xs text-slate-500">{subtitle}</div>
+      {subtitle && <div className="text-xs text-slate-500">{subtitle}</div>}
     </div>
   );
 }
@@ -483,11 +657,11 @@ function SummaryCard({
 function EmptyPortfolio() {
   return (
     <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-12 text-center">
-      <div className="text-5xl mb-4">📊</div>
-      <h2 className="text-xl font-semibold text-white mb-2">No Miners Bookmarked</h2>
+      <div className="text-5xl mb-4">💼</div>
+      <h2 className="text-xl font-semibold text-white mb-2">Your Portfolio is Empty</h2>
       <p className="text-slate-400 mb-6 max-w-md mx-auto">
-        Start building your portfolio by bookmarking miners. Visit any miner&apos;s page
-        and click the star button or press <kbd className="px-1.5 py-0.5 bg-slate-700 rounded border border-slate-600 text-xs">B</kbd> to bookmark.
+        Add miners to your portfolio using the search bar above or from your bookmarks.
+        Track total claimable ORE across all your miners.
       </p>
       <Link
         href="/miners"
@@ -501,4 +675,3 @@ function EmptyPortfolio() {
     </div>
   );
 }
-

@@ -40,12 +40,8 @@ export function MinerSearchBar({
   const isBookmarked = (pubkey: string) => bookmarks.some(b => b.pubkey === pubkey);
   const getBookmarkLabel = (pubkey: string) => bookmarks.find(b => b.pubkey === pubkey)?.label;
 
-  // Filter out current miner from results
-  const filteredResults = currentPubkey 
-    ? results.filter(r => r.miner_pubkey !== currentPubkey)
-    : results;
-
-  const showDropdown = isFocused && (filteredResults.length > 0 || loading || (search.length >= 3 && !loading));
+  // Don't filter - show all results including current miner
+  const showDropdown = isFocused && (results.length > 0 || loading || (search.length >= 3 && !loading));
 
   // Close dropdown when clicking outside
   useEffect(() => {
@@ -118,7 +114,7 @@ export function MinerSearchBar({
   };
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (!showDropdown || filteredResults.length === 0) {
+    if (!showDropdown || results.length === 0) {
       if (e.key === "Enter" && isValidPubkey) {
         handleNavigate();
       }
@@ -129,7 +125,7 @@ export function MinerSearchBar({
       case "ArrowDown":
         e.preventDefault();
         setSelectedIndex((prev) => 
-          prev < filteredResults.length - 1 ? prev + 1 : prev
+          prev < results.length - 1 ? prev + 1 : prev
         );
         break;
       case "ArrowUp":
@@ -138,8 +134,8 @@ export function MinerSearchBar({
         break;
       case "Enter":
         e.preventDefault();
-        if (selectedIndex >= 0 && selectedIndex < filteredResults.length) {
-          handleNavigate(filteredResults[selectedIndex].miner_pubkey);
+        if (selectedIndex >= 0 && selectedIndex < results.length) {
+          handleNavigate(results[selectedIndex].miner_pubkey);
         } else if (isValidPubkey) {
           handleNavigate();
         }
@@ -210,11 +206,12 @@ export function MinerSearchBar({
               <div className="w-4 h-4 border-2 border-slate-500 border-t-amber-500 rounded-full animate-spin" />
               <span className="text-sm">Searching...</span>
             </div>
-          ) : filteredResults.length > 0 ? (
+          ) : results.length > 0 ? (
             <div className="max-h-72 overflow-y-auto">
-              {filteredResults.map((miner, index) => {
+              {results.map((miner, index) => {
                 const bookmarked = isBookmarked(miner.miner_pubkey);
                 const label = getBookmarkLabel(miner.miner_pubkey);
+                const isCurrent = miner.miner_pubkey === currentPubkey;
                 
                 return (
                   <div
@@ -224,7 +221,7 @@ export function MinerSearchBar({
                       selectedIndex === index
                         ? "bg-amber-500/20"
                         : "hover:bg-slate-700/50"
-                    }`}
+                    } ${isCurrent ? "bg-slate-700/30" : ""}`}
                   >
                     {/* Bookmark Button */}
                     {showBookmarkButtons && (
@@ -266,6 +263,9 @@ export function MinerSearchBar({
                           ({label})
                         </span>
                       )}
+                      {isCurrent && (
+                        <span className="text-xs text-slate-500">(current)</span>
+                      )}
                     </button>
                     
                     <svg className="w-4 h-4 text-slate-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -282,7 +282,7 @@ export function MinerSearchBar({
           ) : null}
           
           {/* Direct navigation option for valid pubkey */}
-          {isValidPubkey && !filteredResults.some(r => r.miner_pubkey === search.trim()) && (
+          {isValidPubkey && !results.some(r => r.miner_pubkey === search.trim()) && (
             <div className="border-t border-slate-700/50">
               <button
                 onClick={() => handleNavigate()}

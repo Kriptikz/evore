@@ -4,6 +4,7 @@ import { useState, useRef, useEffect } from "react";
 import Link from "next/link";
 import { useMinerBookmarks } from "@/hooks/useMinerBookmarks";
 import { useChartsBookmarks } from "@/hooks/useChartsBookmarks";
+import { usePortfolio } from "@/hooks/usePortfolio";
 import { truncateAddress } from "@/lib/format";
 
 type TabType = "miners" | "charts";
@@ -11,6 +12,7 @@ type TabType = "miners" | "charts";
 export function FavoritesDropdown() {
   const { bookmarks: minerBookmarks, removeBookmark: removeMinerBookmark } = useMinerBookmarks();
   const { bookmarks: chartsBookmarks, removeBookmark: removeChartBookmark } = useChartsBookmarks();
+  const { isInPortfolio } = usePortfolio();
   const [isOpen, setIsOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<TabType>("miners");
   const dropdownRef = useRef<HTMLDivElement>(null);
@@ -34,10 +36,12 @@ export function FavoritesDropdown() {
       {/* Trigger Button */}
       <button
         onClick={() => setIsOpen(!isOpen)}
-        className={`relative flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
+        className={`flex items-center gap-1.5 px-3 py-2 rounded-lg transition-colors ${
           isOpen
             ? "bg-amber-500/20 text-amber-400"
-            : "text-slate-400 hover:text-white hover:bg-slate-800"
+            : totalCount > 0 
+              ? "text-amber-400 hover:text-amber-300 hover:bg-slate-800"
+              : "text-slate-400 hover:text-white hover:bg-slate-800"
         }`}
         title="Favorites"
       >
@@ -50,12 +54,6 @@ export function FavoritesDropdown() {
           />
         </svg>
         <span className="text-sm hidden sm:inline">Favorites</span>
-        {/* Badge */}
-        {totalCount > 0 && (
-          <span className="absolute -top-1 -right-1 w-4 h-4 bg-amber-500 text-black text-[10px] font-bold rounded-full flex items-center justify-center">
-            {totalCount > 9 ? "9+" : totalCount}
-          </span>
-        )}
       </button>
 
       {/* Dropdown */}
@@ -127,8 +125,10 @@ export function FavoritesDropdown() {
                           </div>
                         )}
                       </Link>
-                      {bookmark.includeInTotals && (
-                        <div className="w-2 h-2 rounded-full bg-green-500" title="In portfolio" />
+                      {isInPortfolio(bookmark.pubkey) && (
+                        <div className="px-1.5 py-0.5 text-[10px] bg-purple-500/20 text-purple-400 rounded" title="In portfolio">
+                          💼
+                        </div>
                       )}
                       <button
                         onClick={() => removeMinerBookmark(bookmark.pubkey)}
