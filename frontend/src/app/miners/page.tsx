@@ -5,6 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { api, MinerSnapshotsResponse } from "@/lib/api";
 import { Header } from "@/components/Header";
+import { BookmarkedMinersSection } from "@/components/BookmarkedMinersSection";
 import { useMultiUrlState } from "@/hooks/useUrlState";
 import { formatSol, formatOre, truncateAddress } from "@/lib/format";
 
@@ -118,6 +119,9 @@ function MinersContent() {
           </div>
         )}
       </div>
+
+      {/* Bookmarked Miners with Portfolio Totals */}
+      <BookmarkedMinersSection />
 
       {/* Filters */}
       <div className="bg-slate-800/50 rounded-xl border border-slate-700/50 p-6 mb-8">

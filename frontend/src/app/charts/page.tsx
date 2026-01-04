@@ -3,6 +3,7 @@
 import { useState, useEffect, useCallback, Suspense, useMemo, useRef } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import { Header } from "@/components/Header";
+import { useChartsBookmarks } from "@/hooks/useChartsBookmarks";
 import {
   AreaChart,
   Area,
@@ -1261,6 +1262,11 @@ function ChartsContent() {
   // Debounce URL updates
   const urlUpdateTimeout = useRef<NodeJS.Timeout>();
 
+  // Bookmarks
+  const { bookmarks, addBookmark } = useChartsBookmarks();
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [saveViewName, setSaveViewName] = useState("");
+
   // Sync charts to URL (debounced)
   useEffect(() => {
     if (urlUpdateTimeout.current) {
@@ -1386,6 +1392,15 @@ function ChartsContent() {
     }
   }, []);
 
+  // Save current view as bookmark
+  const handleSaveView = useCallback(() => {
+    if (!saveViewName.trim()) return;
+    const queryString = chartsToUrlParam(charts);
+    addBookmark(saveViewName.trim(), queryString);
+    setSaveViewName("");
+    setShowSaveDialog(false);
+  }, [saveViewName, charts, addBookmark]);
+
   return (
     <div className="min-h-screen bg-slate-950">
       <Header />
@@ -1400,6 +1415,69 @@ function ChartsContent() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {/* Save View Button */}
+            <div className="relative">
+              <button
+                onClick={() => setShowSaveDialog(!showSaveDialog)}
+                className={`flex items-center gap-2 px-3 py-2 border rounded-lg text-sm transition-colors ${
+                  showSaveDialog
+                    ? "bg-purple-500/20 border-purple-500/50 text-purple-400"
+                    : "bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300"
+                }`}
+                title="Save this chart configuration as a bookmark"
+              >
+                <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                </svg>
+                Save View
+              </button>
+
+              {/* Save Dialog */}
+              {showSaveDialog && (
+                <>
+                  <div
+                    className="fixed inset-0 z-40"
+                    onClick={() => setShowSaveDialog(false)}
+                  />
+                  <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-slate-700 rounded-xl shadow-xl z-50 p-4">
+                    <h3 className="text-sm font-medium text-white mb-3">Save Chart View</h3>
+                    <input
+                      type="text"
+                      value={saveViewName}
+                      onChange={(e) => setSaveViewName(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter") handleSaveView();
+                        if (e.key === "Escape") setShowSaveDialog(false);
+                      }}
+                      placeholder="Enter a name for this view..."
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white text-sm placeholder-slate-500 focus:outline-none focus:ring-2 focus:ring-purple-500/50 mb-3"
+                      autoFocus
+                    />
+                    <div className="flex gap-2">
+                      <button
+                        onClick={handleSaveView}
+                        disabled={!saveViewName.trim()}
+                        className="flex-1 px-3 py-2 bg-purple-500 hover:bg-purple-600 disabled:bg-slate-700 disabled:text-slate-500 text-white text-sm font-medium rounded-lg transition-colors"
+                      >
+                        Save
+                      </button>
+                      <button
+                        onClick={() => setShowSaveDialog(false)}
+                        className="px-3 py-2 bg-slate-700 hover:bg-slate-600 text-white text-sm rounded-lg transition-colors"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                    {bookmarks.length > 0 && (
+                      <div className="mt-3 pt-3 border-t border-slate-700 text-xs text-slate-500">
+                        {bookmarks.length} saved view{bookmarks.length !== 1 ? "s" : ""}
+                      </div>
+                    )}
+                  </div>
+                </>
+              )}
+            </div>
+
             <button
               onClick={copyShareUrl}
               className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-700 rounded-lg text-sm text-slate-300 transition-colors"

@@ -4,6 +4,8 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { WalletMultiButton } from "@solana/wallet-adapter-react-ui";
 import { useOreStats, formatSol, formatOre } from "@/context/OreStatsContext";
+import { MinerBookmarksDropdown } from "./MinerBookmarksDropdown";
+import { ChartsBookmarksDropdown } from "./ChartsBookmarksDropdown";
 
 export function Header() {
   const pathname = usePathname();
@@ -93,7 +95,11 @@ export function Header() {
             </Link> */}
           </nav>
         </div>
-        <WalletMultiButton />
+        <div className="flex items-center gap-2">
+          <MinerBookmarksDropdown />
+          <ChartsBookmarksDropdown />
+          <WalletMultiButton />
+        </div>
       </div>
 
       {/* Stats Bar */}
