@@ -6,10 +6,20 @@ import { Header } from "@/components/Header";
 import { useToast } from "@/components/Toast";
 import { usePortfolio, PortfolioEntry } from "@/hooks/usePortfolio";
 import { useMinerBookmarks } from "@/hooks/useMinerBookmarks";
-import { api, MinerSnapshotEntry } from "@/lib/api";
+import { api, MinerStats, MinerSnapshotEntry } from "@/lib/api";
 import { formatOre, formatSol, truncateAddress } from "@/lib/format";
 
-interface MinerData extends MinerSnapshotEntry {
+interface MinerData {
+  pubkey: string;
+  // From snapshot
+  refined_ore: number;
+  unclaimed_ore: number;
+  // From stats
+  total_deployed: number;
+  total_sol_earned: number;
+  total_ore_earned: number;
+  net_sol_change: number;
+  // Status
   loading?: boolean;
   error?: string;
 }
@@ -21,7 +31,7 @@ export default function PortfolioPage() {
   const [minerData, setMinerData] = useState<Map<string, MinerData>>(new Map());
   const [editingLabel, setEditingLabel] = useState<string | null>(null);
   const [labelInput, setLabelInput] = useState("");
-  const [sortBy, setSortBy] = useState<"unclaimed" | "refined" | "claimable" | "lifetime">("claimable");
+  const [sortBy, setSortBy] = useState<"claimable" | "unclaimed" | "refined" | "net_sol" | "cost_per_ore">("claimable");
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [showBookmarks, setShowBookmarks] = useState(false);
   
@@ -33,6 +43,29 @@ export default function PortfolioPage() {
   const searchRef = useRef<HTMLDivElement>(null);
   const debounceRef = useRef<NodeJS.Timeout>();
 
+  // Helper to retry on 429 rate limit
+  const fetchWithRetry = async <T,>(
+    fn: () => Promise<T>,
+    maxRetries = 3,
+    baseDelay = 1000
+  ): Promise<T> => {
+    for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        return await fn();
+      } catch (err) {
+        const is429 = err instanceof Error && err.message.includes("429");
+        if (is429 && attempt < maxRetries) {
+          // Exponential backoff: 1s, 2s, 4s
+          const delay = baseDelay * Math.pow(2, attempt);
+          await new Promise((resolve) => setTimeout(resolve, delay));
+          continue;
+        }
+        throw err;
+      }
+    }
+    throw new Error("Max retries exceeded");
+  };
+
   // Fetch data for all portfolio entries
   const fetchAllData = useCallback(async () => {
     if (entries.length === 0) return;
@@ -43,55 +76,78 @@ export default function PortfolioPage() {
     // Set loading state
     entries.forEach((e) => {
       newData.set(e.pubkey, {
-        miner_pubkey: e.pubkey,
+        pubkey: e.pubkey,
         refined_ore: 0,
         unclaimed_ore: 0,
-        lifetime_sol: 0,
-        lifetime_ore: 0,
+        total_deployed: 0,
+        total_sol_earned: 0,
+        total_ore_earned: 0,
+        net_sol_change: 0,
         loading: true,
       });
     });
     setMinerData(new Map(newData));
 
-    // Fetch all in parallel
-    await Promise.all(
-      entries.map(async (entry) => {
-        try {
-          const result = await api.getMinerSnapshots({
+    // Fetch sequentially with small delays to avoid rate limits
+    // (2 requests per miner, so ~50ms delay = ~40 req/s max, under 20 rps limit with margin)
+    for (const entry of entries) {
+      try {
+        // Fetch snapshot for unclaimed/refined with retry
+        const snapshotResult = await fetchWithRetry(() =>
+          api.getMinerSnapshots({
             search: entry.pubkey,
             limit: 1,
-          });
+          })
+        );
 
-          if (result.data.length > 0) {
-            newData.set(entry.pubkey, {
-              ...result.data[0],
-              loading: false,
-            });
-          } else {
-            newData.set(entry.pubkey, {
-              miner_pubkey: entry.pubkey,
-              refined_ore: 0,
-              unclaimed_ore: 0,
-              lifetime_sol: 0,
-              lifetime_ore: 0,
-              loading: false,
-              error: "No data found",
-            });
-          }
-        } catch (err) {
+        // Small delay between requests
+        await new Promise((resolve) => setTimeout(resolve, 100));
+
+        // Fetch full stats for deployed/earned with retry
+        const stats = await fetchWithRetry(() => api.getMinerStats(entry.pubkey));
+
+        if (snapshotResult.data.length > 0) {
           newData.set(entry.pubkey, {
-            miner_pubkey: entry.pubkey,
+            pubkey: entry.pubkey,
+            refined_ore: snapshotResult.data[0].refined_ore,
+            unclaimed_ore: snapshotResult.data[0].unclaimed_ore,
+            total_deployed: stats.total_deployed,
+            total_sol_earned: stats.total_sol_earned,
+            total_ore_earned: stats.total_ore_earned,
+            net_sol_change: stats.net_sol_change,
+            loading: false,
+          });
+        } else {
+          newData.set(entry.pubkey, {
+            pubkey: entry.pubkey,
             refined_ore: 0,
             unclaimed_ore: 0,
-            lifetime_sol: 0,
-            lifetime_ore: 0,
+            total_deployed: stats.total_deployed,
+            total_sol_earned: stats.total_sol_earned,
+            total_ore_earned: stats.total_ore_earned,
+            net_sol_change: stats.net_sol_change,
             loading: false,
-            error: err instanceof Error ? err.message : "Failed to fetch",
           });
         }
-        setMinerData(new Map(newData));
-      })
-    );
+      } catch (err) {
+        newData.set(entry.pubkey, {
+          pubkey: entry.pubkey,
+          refined_ore: 0,
+          unclaimed_ore: 0,
+          total_deployed: 0,
+          total_sol_earned: 0,
+          total_ore_earned: 0,
+          net_sol_change: 0,
+          loading: false,
+          error: err instanceof Error ? err.message : "Failed to fetch",
+        });
+      }
+      // Update UI after each miner loads
+      setMinerData(new Map(newData));
+      
+      // Small delay before next miner to stay under rate limit
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
     setIsRefreshing(false);
   }, [entries]);
 
@@ -149,32 +205,53 @@ export default function PortfolioPage() {
   const totals = useMemo(() => {
     let totalUnclaimed = 0;
     let totalRefined = 0;
-    let totalLifetimeSol = 0;
-    let totalLifetimeOre = 0;
+    let totalDeployed = 0;
+    let totalSolEarned = 0;
+    let totalOreEarned = 0;
+    let totalNetSol = 0;
 
     entries.forEach((entry) => {
       const data = minerData.get(entry.pubkey);
       if (data && !data.loading && !data.error) {
         totalUnclaimed += data.unclaimed_ore;
         totalRefined += data.refined_ore;
-        totalLifetimeSol += data.lifetime_sol;
-        totalLifetimeOre += data.lifetime_ore;
+        totalDeployed += data.total_deployed;
+        totalSolEarned += data.total_sol_earned;
+        totalOreEarned += data.total_ore_earned;
+        totalNetSol += data.net_sol_change;
       }
     });
 
     // Claimable = unclaimed - 10% fee + refined
     const fee = totalUnclaimed * 0.1;
-    const totalClaimable = totalUnclaimed - fee + totalRefined;
+    const totalClaimable = (totalUnclaimed - fee) + totalRefined;
+
+    // Cost per ORE (only if net is negative, meaning they spent more than earned)
+    const oreInFullUnits = totalOreEarned / 1e11;
+    const costPerOre = totalNetSol < 0 && oreInFullUnits > 0 
+      ? Math.abs(totalNetSol) / oreInFullUnits 
+      : 0;
 
     return { 
       totalUnclaimed, 
       totalRefined, 
       totalClaimable,
       fee,
-      totalLifetimeSol, 
-      totalLifetimeOre,
+      totalDeployed,
+      totalSolEarned,
+      totalOreEarned,
+      totalNetSol,
+      costPerOre,
     };
   }, [entries, minerData]);
+
+  // Calculate per-miner claimable and cost
+  const getClaimable = (data: MinerData) => (data.unclaimed_ore * 0.9) + data.refined_ore;
+  const getCostPerOre = (data: MinerData) => {
+    const oreInFullUnits = data.total_ore_earned / 1e11;
+    if (data.net_sol_change >= 0 || oreInFullUnits <= 0) return 0;
+    return Math.abs(data.net_sol_change) / oreInFullUnits;
+  };
 
   // Sorted entries
   const sortedEntries = useMemo(() => {
@@ -184,18 +261,17 @@ export default function PortfolioPage() {
 
       if (!dataA || !dataB) return 0;
 
-      const claimableA = (dataA.unclaimed_ore * 0.9) + dataA.refined_ore;
-      const claimableB = (dataB.unclaimed_ore * 0.9) + dataB.refined_ore;
-
       switch (sortBy) {
         case "unclaimed":
           return dataB.unclaimed_ore - dataA.unclaimed_ore;
         case "refined":
           return dataB.refined_ore - dataA.refined_ore;
         case "claimable":
-          return claimableB - claimableA;
-        case "lifetime":
-          return dataB.lifetime_ore - dataA.lifetime_ore;
+          return getClaimable(dataB) - getClaimable(dataA);
+        case "net_sol":
+          return dataB.net_sol_change - dataA.net_sol_change;
+        case "cost_per_ore":
+          return getCostPerOre(dataA) - getCostPerOre(dataB); // Lower cost is better
         default:
           return 0;
       }
@@ -388,43 +464,98 @@ export default function PortfolioPage() {
         ) : (
           <>
             {/* Portfolio Summary Cards */}
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 mb-8">
-              <SummaryCard
-                title="Total Claimable"
-                value={formatOre(totals.totalClaimable)}
-                subtitle={`After 10% fee (${formatOre(totals.fee)})`}
-                icon="💎"
-                color="purple"
-                large
-              />
-              <div className="grid grid-cols-2 gap-4">
-                <SummaryCard
-                  title="Unclaimed"
-                  value={formatOre(totals.totalUnclaimed)}
-                  icon="⛏️"
-                  color="amber"
-                />
-                <SummaryCard
-                  title="Refined"
-                  value={formatOre(totals.totalRefined)}
-                  icon="✨"
-                  color="green"
-                />
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-8">
+              {/* Main Claimable Card */}
+              <div className="bg-gradient-to-br from-purple-500/20 to-violet-500/10 rounded-xl border border-purple-500/30 p-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <span className="text-2xl">💎</span>
+                  <span className="text-sm text-slate-400">Total Claimable</span>
+                </div>
+                <div className="text-3xl font-bold font-mono text-purple-400 mb-2">
+                  {formatOre(totals.totalClaimable)}
+                </div>
+                <div className="text-xs text-slate-500">
+                  Unclaimed ({formatOre(totals.totalUnclaimed)}) - 10% fee ({formatOre(totals.fee)}) + Refined ({formatOre(totals.totalRefined)})
+                </div>
               </div>
+
+              {/* SOL Stats */}
               <div className="grid grid-cols-2 gap-4">
-                <SummaryCard
-                  title="Lifetime ORE"
-                  value={formatOre(totals.totalLifetimeOre)}
-                  icon="📈"
-                  color="blue"
-                />
-                <SummaryCard
-                  title="Lifetime SOL"
-                  value={formatSol(totals.totalLifetimeSol)}
-                  subtitle="Deployed"
-                  icon="◎"
-                  color="slate"
-                />
+                <div className="bg-gradient-to-br from-slate-600/20 to-slate-700/10 rounded-xl border border-slate-500/30 p-4">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-lg">📤</span>
+                    <span className="text-xs text-slate-400">SOL Deployed</span>
+                  </div>
+                  <div className="text-xl font-bold font-mono text-slate-300">
+                    {formatSol(totals.totalDeployed)}
+                  </div>
+                </div>
+                <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/10 rounded-xl border border-green-500/30 p-4">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-lg">📥</span>
+                    <span className="text-xs text-slate-400">SOL Earned</span>
+                  </div>
+                  <div className="text-xl font-bold font-mono text-green-400">
+                    {formatSol(totals.totalSolEarned)}
+                  </div>
+                </div>
+                <div className={`bg-gradient-to-br rounded-xl border p-4 ${
+                  totals.totalNetSol >= 0 
+                    ? "from-green-500/20 to-emerald-500/10 border-green-500/30"
+                    : "from-red-500/20 to-rose-500/10 border-red-500/30"
+                }`}>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-lg">{totals.totalNetSol >= 0 ? "📈" : "📉"}</span>
+                    <span className="text-xs text-slate-400">Net SOL</span>
+                  </div>
+                  <div className={`text-xl font-bold font-mono ${
+                    totals.totalNetSol >= 0 ? "text-green-400" : "text-red-400"
+                  }`}>
+                    {totals.totalNetSol >= 0 ? "+" : ""}{formatSol(totals.totalNetSol)}
+                  </div>
+                </div>
+                {totals.costPerOre > 0 && (
+                  <div className="bg-gradient-to-br from-cyan-500/20 to-blue-500/10 rounded-xl border border-cyan-500/30 p-4">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <span className="text-lg">💰</span>
+                      <span className="text-xs text-slate-400">Cost/ORE</span>
+                    </div>
+                    <div className="text-xl font-bold font-mono text-cyan-400">
+                      {formatSol(totals.costPerOre)}
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* ORE Stats */}
+              <div className="grid grid-cols-2 gap-4">
+                <div className="bg-gradient-to-br from-amber-500/20 to-orange-500/10 rounded-xl border border-amber-500/30 p-4">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-lg">⛏️</span>
+                    <span className="text-xs text-slate-400">Unclaimed</span>
+                  </div>
+                  <div className="text-xl font-bold font-mono text-amber-400">
+                    {formatOre(totals.totalUnclaimed)}
+                  </div>
+                </div>
+                <div className="bg-gradient-to-br from-green-500/20 to-emerald-500/10 rounded-xl border border-green-500/30 p-4">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-lg">✨</span>
+                    <span className="text-xs text-slate-400">Refined</span>
+                  </div>
+                  <div className="text-xl font-bold font-mono text-green-400">
+                    {formatOre(totals.totalRefined)}
+                  </div>
+                </div>
+                <div className="bg-gradient-to-br from-blue-500/20 to-cyan-500/10 rounded-xl border border-blue-500/30 p-4 col-span-2">
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <span className="text-lg">📊</span>
+                    <span className="text-xs text-slate-400">Lifetime ORE Earned</span>
+                  </div>
+                  <div className="text-xl font-bold font-mono text-blue-400">
+                    {formatOre(totals.totalOreEarned)}
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -446,7 +577,8 @@ export default function PortfolioPage() {
                     <option value="claimable">Claimable</option>
                     <option value="unclaimed">Unclaimed</option>
                     <option value="refined">Refined</option>
-                    <option value="lifetime">Lifetime</option>
+                    <option value="net_sol">Net SOL</option>
+                    <option value="cost_per_ore">Cost/ORE</option>
                   </select>
                 </div>
               </div>
@@ -456,13 +588,15 @@ export default function PortfolioPage() {
                 <table className="w-full">
                   <thead className="bg-slate-900/50">
                     <tr className="text-left text-xs text-slate-500 uppercase tracking-wider">
-                      <th className="px-6 py-3">Miner</th>
-                      <th className="px-6 py-3 text-right">Unclaimed</th>
-                      <th className="px-6 py-3 text-right">Refined</th>
-                      <th className="px-6 py-3 text-right">Claimable</th>
-                      <th className="px-6 py-3 text-right">Lifetime ORE</th>
-                      <th className="px-6 py-3 text-right">Lifetime SOL</th>
-                      <th className="px-6 py-3 text-right">Actions</th>
+                      <th className="px-4 py-3">Miner</th>
+                      <th className="px-4 py-3 text-right">Claimable</th>
+                      <th className="px-4 py-3 text-right">Unclaimed</th>
+                      <th className="px-4 py-3 text-right">Refined</th>
+                      <th className="px-4 py-3 text-right">Deployed</th>
+                      <th className="px-4 py-3 text-right">Earned</th>
+                      <th className="px-4 py-3 text-right">Net SOL</th>
+                      <th className="px-4 py-3 text-right">Cost/ORE</th>
+                      <th className="px-4 py-3 text-right w-20">Actions</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-700/30">
@@ -470,7 +604,8 @@ export default function PortfolioPage() {
                       const data = minerData.get(entry.pubkey);
                       const isLoading = data?.loading || false;
                       const hasError = !!data?.error;
-                      const claimable = data ? (data.unclaimed_ore * 0.9) + data.refined_ore : 0;
+                      const claimable = data ? getClaimable(data) : 0;
+                      const costPerOre = data ? getCostPerOre(data) : 0;
 
                       return (
                         <tr
@@ -478,7 +613,7 @@ export default function PortfolioPage() {
                           className="transition-colors hover:bg-slate-700/30"
                         >
                           {/* Miner Info */}
-                          <td className="px-6 py-4">
+                          <td className="px-4 py-3">
                             {editingLabel === entry.pubkey ? (
                               <div className="flex items-center gap-2">
                                 <input
@@ -531,37 +666,46 @@ export default function PortfolioPage() {
 
                           {/* Stats */}
                           {isLoading ? (
-                            <td colSpan={5} className="px-6 py-4 text-center">
+                            <td colSpan={7} className="px-4 py-3 text-center">
                               <div className="flex justify-center">
                                 <div className="w-4 h-4 border-2 border-amber-500/30 border-t-amber-500 rounded-full animate-spin" />
                               </div>
                             </td>
                           ) : hasError ? (
-                            <td colSpan={5} className="px-6 py-4 text-center text-slate-500 text-sm">
+                            <td colSpan={7} className="px-4 py-3 text-center text-slate-500 text-sm">
                               {data?.error}
                             </td>
                           ) : (
                             <>
-                              <td className="px-6 py-4 text-right font-mono text-amber-400">
-                                {formatOre(data?.unclaimed_ore || 0)}
-                              </td>
-                              <td className="px-6 py-4 text-right font-mono text-green-400">
-                                {formatOre(data?.refined_ore || 0)}
-                              </td>
-                              <td className="px-6 py-4 text-right font-mono text-purple-400 font-medium">
+                              <td className="px-4 py-3 text-right font-mono text-purple-400 font-medium">
                                 {formatOre(claimable)}
                               </td>
-                              <td className="px-6 py-4 text-right font-mono text-slate-300">
-                                {formatOre(data?.lifetime_ore || 0)}
+                              <td className="px-4 py-3 text-right font-mono text-amber-400">
+                                {formatOre(data?.unclaimed_ore || 0)}
                               </td>
-                              <td className="px-6 py-4 text-right font-mono text-slate-300">
-                                {formatSol(data?.lifetime_sol || 0)}
+                              <td className="px-4 py-3 text-right font-mono text-green-400">
+                                {formatOre(data?.refined_ore || 0)}
+                              </td>
+                              <td className="px-4 py-3 text-right font-mono text-slate-400">
+                                {formatSol(data?.total_deployed || 0)}
+                              </td>
+                              <td className="px-4 py-3 text-right font-mono text-green-400">
+                                {formatSol(data?.total_sol_earned || 0)}
+                              </td>
+                              <td className={`px-4 py-3 text-right font-mono ${
+                                (data?.net_sol_change || 0) >= 0 ? "text-green-400" : "text-red-400"
+                              }`}>
+                                {(data?.net_sol_change || 0) >= 0 ? "+" : ""}
+                                {formatSol(data?.net_sol_change || 0)}
+                              </td>
+                              <td className="px-4 py-3 text-right font-mono text-cyan-400">
+                                {costPerOre > 0 ? formatSol(costPerOre) : "-"}
                               </td>
                             </>
                           )}
 
                           {/* Actions */}
-                          <td className="px-6 py-4">
+                          <td className="px-4 py-3">
                             <div className="flex items-center justify-end gap-1">
                               <button
                                 onClick={() => handleStartEditLabel(entry.pubkey, entry.label)}
@@ -604,53 +748,6 @@ export default function PortfolioPage() {
         )}
       </main>
     </>
-  );
-}
-
-function SummaryCard({
-  title,
-  value,
-  subtitle,
-  icon,
-  color,
-  large,
-}: {
-  title: string;
-  value: string;
-  subtitle?: string;
-  icon: string;
-  color: "amber" | "green" | "purple" | "blue" | "slate";
-  large?: boolean;
-}) {
-  const colorStyles = {
-    amber: "from-amber-500/20 to-orange-500/10 border-amber-500/30",
-    green: "from-green-500/20 to-emerald-500/10 border-green-500/30",
-    purple: "from-purple-500/20 to-violet-500/10 border-purple-500/30",
-    blue: "from-blue-500/20 to-cyan-500/10 border-blue-500/30",
-    slate: "from-slate-600/20 to-slate-700/10 border-slate-500/30",
-  };
-
-  const textColors = {
-    amber: "text-amber-400",
-    green: "text-green-400",
-    purple: "text-purple-400",
-    blue: "text-blue-400",
-    slate: "text-slate-300",
-  };
-
-  return (
-    <div
-      className={`bg-gradient-to-br ${colorStyles[color]} rounded-xl border ${large ? "p-6" : "p-4"}`}
-    >
-      <div className="flex items-center gap-2 mb-2">
-        <span className={large ? "text-2xl" : "text-lg"}>{icon}</span>
-        <span className={`${large ? "text-sm" : "text-xs"} text-slate-400`}>{title}</span>
-      </div>
-      <div className={`${large ? "text-3xl" : "text-xl"} font-bold font-mono ${textColors[color]} mb-1`}>
-        {value}
-      </div>
-      {subtitle && <div className="text-xs text-slate-500">{subtitle}</div>}
-    </div>
   );
 }
 

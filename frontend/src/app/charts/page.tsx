@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, Suspense, useMemo, useRef } from "react";
 import { useSearchParams, useRouter, usePathname } from "next/navigation";
+import Link from "next/link";
 import { Header } from "@/components/Header";
 import { useChartsBookmarks } from "@/hooks/useChartsBookmarks";
 import {
@@ -43,7 +44,6 @@ import {
   CostPerOreDirectData,
   DirectResponse,
 } from "@/lib/api";
-import Link from "next/link";
 
 // ============================================================================
 // Types
@@ -307,6 +307,28 @@ function chartsToUrlParam(charts: ChartConfig[]): string {
     
     return `${c.type}:${c.range}:${series}:${scale}:${style}:${grid}:${brush}:${viewMode}:${roundRange}:${brushRange}:${displayMode}`;
   }).join("|");
+}
+
+function parseChartTypesForDisplay(queryString: string): string {
+  try {
+    const parts = queryString.split("|");
+    const typeLabels: Record<string, string> = {
+      rounds: "Rounds",
+      treasury: "Treasury",
+      mint: "Mint",
+      inflation: "Inflation",
+      cost_per_ore: "Cost/ORE",
+      miners: "Miners",
+    };
+    
+    const types = parts
+      .map((part) => typeLabels[part.split(":")[0]])
+      .filter(Boolean);
+    
+    return types.join(", ") || "Charts";
+  } catch {
+    return "Charts";
+  }
 }
 
 // ============================================================================
@@ -1263,9 +1285,34 @@ function ChartsContent() {
   const urlUpdateTimeout = useRef<NodeJS.Timeout>();
 
   // Bookmarks
-  const { bookmarks, addBookmark } = useChartsBookmarks();
+  const { bookmarks, addBookmark, removeBookmark } = useChartsBookmarks();
   const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [showSavedViews, setShowSavedViews] = useState(false);
   const [saveViewName, setSaveViewName] = useState("");
+  const savedViewsRef = useRef<HTMLDivElement>(null);
+  
+  // Track if we're updating URL from state (to avoid loops)
+  const isUpdatingUrl = useRef(false);
+
+  // Sync URL to charts state (for navigation from bookmarks)
+  useEffect(() => {
+    // Skip if we're the ones updating the URL
+    if (isUpdatingUrl.current) {
+      isUpdatingUrl.current = false;
+      return;
+    }
+    
+    const urlParam = searchParams.get("c");
+    const currentParam = chartsToUrlParam(charts);
+    
+    // Only update if URL changed from external navigation
+    if (urlParam && urlParam !== currentParam) {
+      const newCharts = parseChartsFromUrl(searchParams);
+      setCharts(newCharts);
+      // Clear chart data cache to force refetch
+      setChartData(new Map());
+    }
+  }, [searchParams]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Sync charts to URL (debounced)
   useEffect(() => {
@@ -1278,6 +1325,7 @@ function ChartsContent() {
       const currentParam = searchParams.get("c");
       
       if (urlParam !== currentParam) {
+        isUpdatingUrl.current = true;
         router.replace(`${pathname}?c=${urlParam}`, { scroll: false });
       }
     }, 300);
@@ -1415,6 +1463,79 @@ function ChartsContent() {
             </p>
           </div>
           <div className="flex items-center gap-3">
+            {/* Saved Views Dropdown */}
+            {bookmarks.length > 0 && (
+              <div className="relative" ref={savedViewsRef}>
+                <button
+                  onClick={() => setShowSavedViews(!showSavedViews)}
+                  className={`flex items-center gap-2 px-3 py-2 border rounded-lg text-sm transition-colors ${
+                    showSavedViews
+                      ? "bg-purple-500/20 border-purple-500/50 text-purple-400"
+                      : "bg-slate-800 hover:bg-slate-700 border-slate-700 text-slate-300"
+                  }`}
+                >
+                  <svg className="w-4 h-4" fill="currentColor" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                  </svg>
+                  Saved Views
+                  <span className="px-1.5 py-0.5 bg-purple-500/20 text-purple-400 text-xs rounded">
+                    {bookmarks.length}
+                  </span>
+                  <svg className={`w-3 h-3 transition-transform ${showSavedViews ? "rotate-180" : ""}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+                  </svg>
+                </button>
+
+                {showSavedViews && (
+                  <>
+                    <div
+                      className="fixed inset-0 z-40"
+                      onClick={() => setShowSavedViews(false)}
+                    />
+                    <div className="absolute right-0 top-full mt-2 w-72 bg-slate-800 border border-slate-700 rounded-xl shadow-xl z-50 overflow-hidden">
+                      <div className="px-4 py-3 border-b border-slate-700 flex items-center justify-between">
+                        <h3 className="text-sm font-medium text-white">Saved Chart Views</h3>
+                        <span className="text-xs text-slate-500">{bookmarks.length} saved</span>
+                      </div>
+                      <div className="max-h-64 overflow-y-auto">
+                        {bookmarks.map((bookmark) => (
+                          <div
+                            key={bookmark.id}
+                            className="flex items-center gap-2 px-4 py-3 hover:bg-slate-700/50 transition-colors group"
+                          >
+                            <Link
+                              href={`/charts?c=${bookmark.queryString}`}
+                              className="flex-1 min-w-0"
+                              onClick={() => setShowSavedViews(false)}
+                            >
+                              <div className="text-sm text-white group-hover:text-purple-400 transition-colors truncate">
+                                {bookmark.name}
+                              </div>
+                              <div className="text-xs text-slate-500 truncate">
+                                {parseChartTypesForDisplay(bookmark.queryString)}
+                              </div>
+                            </Link>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                removeBookmark(bookmark.id);
+                              }}
+                              className="p-1 text-slate-500 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-all"
+                              title="Delete"
+                            >
+                              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                              </svg>
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+
             {/* Save View Button */}
             <div className="relative">
               <button
@@ -1427,7 +1548,7 @@ function ChartsContent() {
                 title="Save this chart configuration as a bookmark"
               >
                 <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
                 </svg>
                 Save View
               </button>
@@ -1468,11 +1589,6 @@ function ChartsContent() {
                         Cancel
                       </button>
                     </div>
-                    {bookmarks.length > 0 && (
-                      <div className="mt-3 pt-3 border-t border-slate-700 text-xs text-slate-500">
-                        {bookmarks.length} saved view{bookmarks.length !== 1 ? "s" : ""}
-                      </div>
-                    )}
                   </div>
                 </>
               )}

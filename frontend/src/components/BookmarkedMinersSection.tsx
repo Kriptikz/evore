@@ -26,6 +26,28 @@ export function BookmarkedMinersSection() {
   useEffect(() => {
     if (bookmarks.length === 0) return;
 
+    // Helper to retry on 429 rate limit
+    const fetchWithRetry = async <T,>(
+      fn: () => Promise<T>,
+      maxRetries = 3,
+      baseDelay = 1000
+    ): Promise<T> => {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        try {
+          return await fn();
+        } catch (err) {
+          const is429 = err instanceof Error && err.message.includes("429");
+          if (is429 && attempt < maxRetries) {
+            const delay = baseDelay * Math.pow(2, attempt);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+          throw err;
+        }
+      }
+      throw new Error("Max retries exceeded");
+    };
+
     const fetchMinerData = async () => {
       const newData = new Map<string, MinerData>();
 
@@ -42,32 +64,22 @@ export function BookmarkedMinersSection() {
       });
       setMinerData(new Map(newData));
 
-      // Fetch each miner's data
-      await Promise.all(
-        bookmarks.map(async (bookmark) => {
-          try {
-            const result = await api.getMinerSnapshots({
+      // Fetch sequentially to avoid rate limits
+      for (const bookmark of bookmarks) {
+        try {
+          const result = await fetchWithRetry(() =>
+            api.getMinerSnapshots({
               search: bookmark.pubkey,
               limit: 1,
-            });
+            })
+          );
 
-            if (result.data.length > 0) {
-              newData.set(bookmark.pubkey, {
-                ...result.data[0],
-                loading: false,
-              });
-            } else {
-              newData.set(bookmark.pubkey, {
-                miner_pubkey: bookmark.pubkey,
-                refined_ore: 0,
-                unclaimed_ore: 0,
-                lifetime_sol: 0,
-                lifetime_ore: 0,
-                loading: false,
-                error: "No data",
-              });
-            }
-          } catch {
+          if (result.data.length > 0) {
+            newData.set(bookmark.pubkey, {
+              ...result.data[0],
+              loading: false,
+            });
+          } else {
             newData.set(bookmark.pubkey, {
               miner_pubkey: bookmark.pubkey,
               refined_ore: 0,
@@ -75,12 +87,24 @@ export function BookmarkedMinersSection() {
               lifetime_sol: 0,
               lifetime_ore: 0,
               loading: false,
-              error: "Error",
+              error: "No data",
             });
           }
-          setMinerData(new Map(newData));
-        })
-      );
+        } catch {
+          newData.set(bookmark.pubkey, {
+            miner_pubkey: bookmark.pubkey,
+            refined_ore: 0,
+            unclaimed_ore: 0,
+            lifetime_sol: 0,
+            lifetime_ore: 0,
+            loading: false,
+            error: "Error",
+          });
+        }
+        setMinerData(new Map(newData));
+        // Small delay between requests
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
     };
 
     fetchMinerData();
